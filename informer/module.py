@@ -182,7 +182,13 @@ class ProbAttention(nn.Module):
 
 class AttentionLayer(nn.Module):
     def __init__(
-        self, attention, d_model, n_heads, d_keys=None, d_values=None, mix=False
+        self, 
+        attention, 
+        d_model, 
+        n_heads, 
+        d_keys=None, 
+        d_values=None, 
+        mix=False
     ):
         super(AttentionLayer, self).__init__()
 
@@ -637,7 +643,7 @@ class InformerModel(nn.Module):
         enc_out, _ = self.encoder(enc_input)
         dec_output = self.decoder(dec_input, enc_out)
 
-        return self.param_proj(dec_output)
+        return self.param_proj(dec_output) # QUESTION: is this the head after the decoder?
 
     @torch.jit.ignore
     def output_distribution(
@@ -648,7 +654,7 @@ class InformerModel(nn.Module):
             sliced_params = [p[:, -trailing_n:] for p in params]
         return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
 
-    # for prediction
+    # for prediction QUESTION is this not also called in training?
     def forward(
         self,
         feat_static_cat: torch.Tensor,
@@ -696,7 +702,7 @@ class InformerModel(nn.Module):
 
         future_samples = []
 
-        # greedy decoding
+        # greedy decoding (,ansectral sampling)
         for k in range(self.prediction_length):
             # self._check_shapes(repeated_past_target, next_sample, next_features)
             # sequence = torch.cat((repeated_past_target, next_sample), dim=1)
