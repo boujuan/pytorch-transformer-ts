@@ -1,6 +1,6 @@
 import pytorch_lightning as pl
 import torch
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
 
 from module import InformerModel
@@ -10,14 +10,14 @@ class InformerLightningModule(pl.LightningModule):
     def __init__(
         self,
         model: InformerModel,
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
         self.model = model
-        self.loss = loss
+        # self.loss = loss CHANGE
         self.lr = lr
         self.weight_decay = weight_decay
 
@@ -47,7 +47,7 @@ class InformerLightningModule(pl.LightningModule):
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
-
+    # for training
     def forward(self, batch):
         feat_static_cat = batch["feat_static_cat"]
         feat_static_real = batch["feat_static_real"]
@@ -67,10 +67,16 @@ class InformerLightningModule(pl.LightningModule):
             future_time_feat,
             future_target,
         )
-        params = self.model.output_params(transformer_inputs)
-        distr = self.model.output_distribution(params, loc=loc, scale=scale)
 
-        loss_values = self.loss(distr, future_target)
+        params = self.model.output_params(transformer_inputs)
+        # distr = self.model.output_distribution(params, loc=loc, scale=scale)
+        
+        # loss_values = self.loss(distr, future_target) CHANGE
+        trailing_n = None
+        sliced_params = params
+        if trailing_n is not None:
+            sliced_params = [p[:, -trailing_n:] for p in params]
+        loss_values = self.model.distr_output.loss(future_target, sliced_params, loc=loc, scale=scale)
 
         if len(self.model.target_shape) == 0:
             loss_weights = future_observed_values

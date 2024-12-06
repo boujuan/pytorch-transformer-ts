@@ -10,7 +10,7 @@ from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.transform import (
     AddAgeFeature,
     AddObservedValuesIndicator,
@@ -25,6 +25,7 @@ from gluonts.transform import (
     Transformation,
     ValidationSplitSampler,
     VstackFeatures,
+    ExpandDimArray
 )
 from gluonts.transform.sampler import InstanceSampler
 
@@ -65,13 +66,13 @@ class InformerEstimator(PyTorchLightningEstimator):
         factor: int = 5,
         distil: bool = True,
         context_length: Optional[int] = None,
-        num_feat_dynamic_real: int = 0,
+        num_feat_dynamic_real: int = 0, # QUESTION why no feat_dynamic_cat
         num_feat_static_cat: int = 0,
         num_feat_static_real: int = 0,
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
@@ -94,7 +95,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         )
         self.prediction_length = prediction_length
         self.distr_output = distr_output
-        self.loss = loss
+        # self.loss = loss CHANGE
 
         self.input_size = input_size
         self.d_model = d_model
@@ -165,8 +166,13 @@ class InformerEstimator(PyTorchLightningEstimator):
                 ),
                 AsNumpyArray(
                     field=FieldName.TARGET,
-                    # in the following line, we add 1 for the time dimension
+                    # in the following line, we add 1 for the time dimension # TODO QUESTION should this be more for multivariate!
                     expected_ndim=1 + len(self.distr_output.event_shape),
+                    # expected_ndim=1 + 1 + len(self.distr_output.event_shape),
+                ),
+                ExpandDimArray( # CHANGE
+                    field=FieldName.TARGET,
+                    axis=0 if self.distr_output.event_shape[0] == 1 else None,
                 ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
@@ -205,14 +211,14 @@ class InformerEstimator(PyTorchLightningEstimator):
             "validation": self.validation_sampler,
             "test": TestSplitSampler(),
         }[mode]
-
+        
         return InstanceSplitter(
             target_field=FieldName.TARGET,
             is_pad_field=FieldName.IS_PAD,
             start_field=FieldName.START,
             forecast_start_field=FieldName.FORECAST_START,
             instance_sampler=instance_sampler,
-            past_length=module.model._past_length,
+            past_length=module.model._past_length, # TODO QUESTION why does this include lags_seq
             future_length=self.prediction_length,
             time_series_fields=[
                 FieldName.FEAT_TIME,
@@ -228,7 +234,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         shuffle_buffer_length: Optional[int] = None,
         **kwargs,
     ) -> Iterable:
-        data = Cyclic(data).stream()
+        data = Cyclic(data).stream() # will just repeat over same dataset if we only provide one
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
@@ -261,6 +267,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         self,
         transformation: Transformation,
         module: InformerLightningModule,
+        **kwargs # CHANGE
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
 
@@ -271,6 +278,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            **kwargs
         )
 
     def create_lightning_module(self) -> InformerLightningModule:
@@ -278,7 +286,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             freq=self.freq,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
-            num_feat_dynamic_real=1
+            num_feat_dynamic_real=1 # QUESTION what is the 1 for
             + self.num_feat_dynamic_real
             + len(self.time_features),
             num_feat_static_real=max(1, self.num_feat_static_real),
@@ -304,4 +312,5 @@ class InformerEstimator(PyTorchLightningEstimator):
             num_parallel_samples=self.num_parallel_samples,
         )
 
-        return InformerLightningModule(model=model, loss=self.loss)
+        # return InformerLightningModule(model=model, loss=self.loss) CHANGE
+        return InformerLightningModule(model=model)

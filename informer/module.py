@@ -1,6 +1,6 @@
 from math import sqrt
 from typing import List, Optional
-
+from collections import defaultdict
 import numpy as np
 import torch
 import torch.nn as nn
@@ -409,9 +409,10 @@ class InformerModel(nn.Module):
         elif scaling == "std":
             self.scaler = StdScaler(keepdim=True, dim=1)
         else:
-            self.scaler = NOPScaler(keepdim=True, dim=1)
+            self.scaler = NOPScaler(keepdim=True, dim=1) # TODO QUESTION should this dim be -1
 
-        # total feature size
+        # total feature size, this takes encoder input and decoder input 
+        # QUESTION what is in input_size vs. num_feat_dynamic_real
         self.embed = nn.Linear(
             self.input_size * len(self.lags_seq) + self._number_of_features, d_model
         )
@@ -419,6 +420,7 @@ class InformerModel(nn.Module):
         self.context_length = context_length
         self.prediction_length = prediction_length
         self.distr_output = distr_output
+        # TODO QUESTION how to make sure this is output for every vaiable => multivariate distribution output
         self.param_proj = distr_output.get_args_proj(d_model)
 
         # Informer enc-decoder
@@ -489,11 +491,12 @@ class InformerModel(nn.Module):
 
     @property
     def _number_of_features(self) -> int:
+        # QUESTION does this assume that input_size is just the targets we want
         return (
             sum(self.embedding_dimension)
             + self.num_feat_dynamic_real
             + self.num_feat_static_real
-            + self.input_size * 2  # the log(scale) and log(abs(loc)) features
+            + self.input_size * 2  # the log(scale) and log(abs(loc)) features 
         )
 
     @property
@@ -643,18 +646,20 @@ class InformerModel(nn.Module):
         enc_out, _ = self.encoder(enc_input)
         dec_output = self.decoder(dec_input, enc_out)
 
-        return self.param_proj(dec_output) # QUESTION: is this the head after the decoder?
+        return self.param_proj(dec_output) # this is the head after the decoder
 
     @torch.jit.ignore
     def output_distribution(
+        # self, params, scale=None, trailing_n=None
         self, params, loc=None, scale=None, trailing_n=None
     ) -> torch.distributions.Distribution:
         sliced_params = params
         if trailing_n is not None:
             sliced_params = [p[:, -trailing_n:] for p in params]
         return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
+        # return self.distr_output.distribution(sliced_params, scale=scale)
 
-    # for prediction QUESTION is this not also called in training?
+    # for prediction 
     def forward(
         self,
         feat_static_cat: torch.Tensor,
@@ -664,9 +669,13 @@ class InformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
-    ) -> torch.Tensor:
-        if num_parallel_samples is None:
+        output_distr_params: Optional[bool] = False # NOTE first element in output_distr_params must be the value used for pointwise prediction eg mean
+    ) -> torch.Tensor: # CHANGE THROUGHTOUT THIS FUNC
+        if output_distr_params:
+            num_parallel_samples = 1
+        elif num_parallel_samples is None:
             num_parallel_samples = self.num_parallel_samples
+
 
         encoder_inputs, loc, scale, static_feat = self.create_network_inputs(
             feat_static_cat,
@@ -678,13 +687,13 @@ class InformerModel(nn.Module):
 
         enc_out, _ = self.encoder(self.embed(encoder_inputs))
 
-        repeated_loc = loc.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
+        repeated_loc = loc.repeat_interleave(repeats=num_parallel_samples, dim=0)
         repeated_scale = scale.repeat_interleave(
-            repeats=self.num_parallel_samples, dim=0
+            repeats=num_parallel_samples, dim=0
         )
 
         repeated_past_target = (
-            past_target.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
+            past_target.repeat_interleave(repeats=num_parallel_samples, dim=0)
             - repeated_loc
         ) / repeated_scale
 
@@ -693,14 +702,17 @@ class InformerModel(nn.Module):
         )
         features = torch.cat((expanded_static_feat, future_time_feat), dim=-1)
         repeated_features = features.repeat_interleave(
-            repeats=self.num_parallel_samples, dim=0
+            repeats=num_parallel_samples, dim=0
         )
 
         repeated_enc_out = enc_out.repeat_interleave(
-            repeats=self.num_parallel_samples, dim=0
+            repeats=num_parallel_samples, dim=0
         )
 
-        future_samples = []
+        if output_distr_params:
+            future_samples = defaultdict(list)
+        else:
+            future_samples = []
 
         # greedy decoding (,ansectral sampling)
         for k in range(self.prediction_length):
@@ -721,22 +733,38 @@ class InformerModel(nn.Module):
             decoder_input = torch.cat(
                 (reshaped_lagged_sequence, repeated_features[:, : k + 1]), dim=-1
             )
-
-            output = self.decoder(self.embed(decoder_input), repeated_enc_out)
+            # TODO QUESTION what is the purpose of num_parallel_samples => st next_sample has 100 samples?
+            output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
 
             params = self.param_proj(output[:, -1:])
-            distr = self.output_distribution(
+            distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
                 params, scale=repeated_scale, loc=repeated_loc
             )
-            next_sample = distr.sample()
 
-            repeated_past_target = torch.cat(
-                (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
-                dim=1,
+            # CHANGE
+            if output_distr_params:
+                next_sample = {param_key: getattr(distr.base_dist, param_key) for param_key in distr.base_dist.arg_constraints.keys()} 
+                repeated_past_target = torch.cat(
+                    (repeated_past_target, (next_sample[list(distr.base_dist.arg_constraints.keys())[0]] - repeated_loc) / repeated_scale), # this assumes that first key is the mean value
+                    dim=1,
+                )
+                for param_key in distr.base_dist.arg_constraints.keys():
+                    future_samples[param_key].append(next_sample[param_key])
+            else:
+                next_sample = distr.sample()
+                repeated_past_target = torch.cat(
+                    (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
+                    dim=1,
+                )
+                future_samples.append(next_sample)
+
+        if output_distr_params:
+            concat_future_samples = {param_key: torch.cat(future_samples[param_key], dim=1) for param_key in future_samples}
+            return [{param_key: concat_future_samples[param_key].reshape(
+                (self.prediction_length, *self.target_shape, -1),
+            ).squeeze() for param_key in future_samples}]
+        else:
+            concat_future_samples = torch.cat(future_samples, dim=1)
+            return concat_future_samples.reshape(
+                (-1, num_parallel_samples, self.prediction_length) + self.target_shape,
             )
-            future_samples.append(next_sample)
-
-        concat_future_samples = torch.cat(future_samples, dim=1)
-        return concat_future_samples.reshape(
-            (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,
-        )
