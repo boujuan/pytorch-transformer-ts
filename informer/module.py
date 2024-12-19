@@ -409,10 +409,14 @@ class InformerModel(nn.Module):
         elif scaling == "std":
             self.scaler = StdScaler(keepdim=True, dim=1)
         else:
-            self.scaler = NOPScaler(keepdim=True, dim=1) # TODO QUESTION should this dim be -1
+            self.scaler = NOPScaler(keepdim=True, dim=1)
 
         # total feature size, this takes encoder input and decoder input 
-        # QUESTION what is in input_size vs. num_feat_dynamic_real
+        # QUESTION TODO what is in input_size vs. num_feat_dynamic_real, TODO make sure these are set to generalize to all inputs
+        # lags are values of same vector pasted in, making input vector larger. with lags, 
+        # can take past values and add it to vector even with small context size,
+        # but given frequency of time series, lags depend on this, 
+        # totals input feature size, for each time point will have vector of this size, with more lagged features need smaller context window
         self.embed = nn.Linear(
             self.input_size * len(self.lags_seq) + self._number_of_features, d_model
         )
@@ -420,7 +424,6 @@ class InformerModel(nn.Module):
         self.context_length = context_length
         self.prediction_length = prediction_length
         self.distr_output = distr_output
-        # TODO QUESTION how to make sure this is output for every vaiable => multivariate distribution output
         self.param_proj = distr_output.get_args_proj(d_model)
 
         # Informer enc-decoder
@@ -491,7 +494,6 @@ class InformerModel(nn.Module):
 
     @property
     def _number_of_features(self) -> int:
-        # QUESTION does this assume that input_size is just the targets we want
         return (
             sum(self.embedding_dimension)
             + self.num_feat_dynamic_real
@@ -671,11 +673,11 @@ class InformerModel(nn.Module):
         num_parallel_samples: Optional[int] = None,
         output_distr_params: Optional[bool] = False # NOTE first element in output_distr_params must be the value used for pointwise prediction eg mean
     ) -> torch.Tensor: # CHANGE THROUGHTOUT THIS FUNC
-        if output_distr_params:
-            num_parallel_samples = 1
-        elif num_parallel_samples is None:
-            num_parallel_samples = self.num_parallel_samples
-
+        # TODO check that dims are okay if first dim is number of continuity groups
+        # if output_distr_params:
+        #     num_parallel_samples = 1
+        # elif num_parallel_samples is None:
+        num_parallel_samples = self.num_parallel_samples
 
         encoder_inputs, loc, scale, static_feat = self.create_network_inputs(
             feat_static_cat,
@@ -709,60 +711,69 @@ class InformerModel(nn.Module):
             repeats=num_parallel_samples, dim=0
         )
 
+        future_samples = []
         if output_distr_params:
-            future_samples = defaultdict(list)
-        else:
-            future_samples = []
+            future_params = []
 
         # greedy decoding (,ansectral sampling)
         for k in range(self.prediction_length):
             # self._check_shapes(repeated_past_target, next_sample, next_features)
             # sequence = torch.cat((repeated_past_target, next_sample), dim=1)
-
+            
             lagged_sequence = self.get_lagged_subsequences(
                 sequence=repeated_past_target,
                 subsequences_length=1 + k,
                 shift=1,
             )
 
+            # shape [n_continuity_groups*n_parallel_samples, context_length, size of lagged repeated_past_target]
             lags_shape = lagged_sequence.shape
+
+            # shape [n_continuity_groups*n_parallel_samples, context_length * size of lagged repeated_past_target]
             reshaped_lagged_sequence = lagged_sequence.reshape(
                 lags_shape[0], lags_shape[1], -1
             )
-
+            # shape [n_continuity_groups*n_parallel_samples, 1, total input size]
             decoder_input = torch.cat(
                 (reshaped_lagged_sequence, repeated_features[:, : k + 1]), dim=-1
             )
-            # TODO QUESTION what is the purpose of num_parallel_samples => st next_sample has 100 samples?
+            # shape [n_continuity_groups*n_parallel_samples, 1, d_model]
             output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
 
+            # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
             params = self.param_proj(output[:, -1:])
+            if output_distr_params:
+                future_params.append(tuple(param[::num_parallel_samples, :, :] for param in params))
             distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
                 params, scale=repeated_scale, loc=repeated_loc
             )
-
-            # CHANGE
-            if output_distr_params:
-                next_sample = {param_key: getattr(distr.base_dist, param_key) for param_key in distr.base_dist.arg_constraints.keys()} 
-                repeated_past_target = torch.cat(
-                    (repeated_past_target, (next_sample[list(distr.base_dist.arg_constraints.keys())[0]] - repeated_loc) / repeated_scale), # this assumes that first key is the mean value
-                    dim=1,
-                )
-                for param_key in distr.base_dist.arg_constraints.keys():
-                    future_samples[param_key].append(next_sample[param_key])
-            else:
-                next_sample = distr.sample()
-                repeated_past_target = torch.cat(
-                    (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
-                    dim=1,
-                )
-                future_samples.append(next_sample)
-
+            
+            # if output_distr_params:
+            #     next_sample = {param_key: getattr(distr.base_dist, param_key) for param_key in distr.base_dist.arg_constraints.keys()}
+            #     # with 4 continuity_groups, shape []
+            #     # without ..., shape [1, 369, 6]
+            #     repeated_past_target = torch.cat(
+            #         (repeated_past_target, (next_sample[list(distr.base_dist.arg_constraints.keys())[0]] - repeated_loc) / repeated_scale), # this assumes that first key is the mean value
+            #         dim=1,
+            #     )
+            #     for param_key in distr.base_dist.arg_constraints.keys():
+            #         future_samples[param_key].append(next_sample[param_key])
+            # else:
+            next_sample = distr.sample()
+            repeated_past_target = torch.cat(
+                (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
+                dim=1,
+            )
+            future_samples.append(next_sample)
+        # from gluonts.model.forecast_generator import _unpack
         if output_distr_params:
-            concat_future_samples = {param_key: torch.cat(future_samples[param_key], dim=1) for param_key in future_samples}
-            return [{param_key: concat_future_samples[param_key].reshape(
-                (self.prediction_length, *self.target_shape, -1),
-            ).squeeze() for param_key in future_samples}]
+            param_keys = list(distr.base_dist.arg_constraints.keys())
+            # shape [n_continuity_groups*n_parallel_samples, prediction_length, input_size] for each param_key (e.g. loc)
+            # concat_future_params = {param_keys[p]: torch.cat([params[p] for params in future_params], dim=1) for p in range(len(param_keys))}
+            # return concat_future_params
+            concat_future_params = tuple(torch.cat([params[p] for params in future_params], dim=1) for p in range(len(param_keys)))
+            # concat_future_params = [tuple(torch.cat([params[p][dataset_idx, ...] for params in future_params], dim=0) for p in range(len(param_keys))) for dataset_idx in range(past_target.shape[0])]
+            return concat_future_params
         else:
             concat_future_samples = torch.cat(future_samples, dim=1)
             return concat_future_samples.reshape(

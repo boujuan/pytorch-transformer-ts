@@ -166,7 +166,7 @@ class InformerEstimator(PyTorchLightningEstimator):
                 ),
                 AsNumpyArray(
                     field=FieldName.TARGET,
-                    # in the following line, we add 1 for the time dimension # TODO QUESTION should this be more for multivariate!
+                    # in the following line, we add 1 for the time dimension 
                     expected_ndim=1 + len(self.distr_output.event_shape),
                     # expected_ndim=1 + 1 + len(self.distr_output.event_shape),
                 ),
@@ -218,7 +218,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             start_field=FieldName.START,
             forecast_start_field=FieldName.FORECAST_START,
             instance_sampler=instance_sampler,
-            past_length=module.model._past_length, # TODO QUESTION why does this include lags_seq
+            past_length=module.model._past_length,
             future_length=self.prediction_length,
             time_series_fields=[
                 FieldName.FEAT_TIME,

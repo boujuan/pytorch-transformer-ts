@@ -5,7 +5,6 @@ from gluonts.torch.util import weighted_average
 
 from module import InformerModel
 
-
 class InformerLightningModule(pl.LightningModule):
     def __init__(
         self,
