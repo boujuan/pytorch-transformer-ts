@@ -25,12 +25,11 @@ from gluonts.transform import (
     Transformation,
     ValidationSplitSampler,
     VstackFeatures,
-    ExpandDimArray
 )
 from gluonts.transform.sampler import InstanceSampler
 
-from lightning_module import InformerLightningModule
-from module import InformerModel
+from pytorch_transformer_ts.spacetimeformer.lightning_module import SpacetimeformerLightningModule
+from pytorch_transformer_ts.spacetimeformer.module import SpacetimeformerModel
 
 PREDICTION_INPUT_NAMES = [
     "feat_static_cat",
@@ -47,7 +46,7 @@ TRAINING_INPUT_NAMES = PREDICTION_INPUT_NAMES + [
 ]
 
 
-class InformerEstimator(PyTorchLightningEstimator):
+class SpacetimeformerEstimator(PyTorchLightningEstimator):
     @validated()
     def __init__(
         self,
@@ -66,13 +65,13 @@ class InformerEstimator(PyTorchLightningEstimator):
         factor: int = 5,
         distil: bool = True,
         context_length: Optional[int] = None,
-        num_feat_dynamic_real: int = 0, # QUESTION why no feat_dynamic_cat
+        num_feat_dynamic_real: int = 0,
         num_feat_static_cat: int = 0,
         num_feat_static_real: int = 0,
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
-        # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
+        # loss: DistributionLoss = NegativeLogLikelihood(),
         scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
@@ -95,7 +94,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         )
         self.prediction_length = prediction_length
         self.distr_output = distr_output
-        # self.loss = loss CHANGE
+        # self.loss = loss
 
         self.input_size = input_size
         self.d_model = d_model
@@ -166,13 +165,8 @@ class InformerEstimator(PyTorchLightningEstimator):
                 ),
                 AsNumpyArray(
                     field=FieldName.TARGET,
-                    # in the following line, we add 1 for the time dimension 
+                    # in the following line, we add 1 for the time dimension
                     expected_ndim=1 + len(self.distr_output.event_shape),
-                    # expected_ndim=1 + 1 + len(self.distr_output.event_shape),
-                ),
-                ExpandDimArray( # CHANGE
-                    field=FieldName.TARGET,
-                    axis=0 if self.distr_output.event_shape[0] == 1 else None,
                 ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
@@ -203,7 +197,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             ]
         )
 
-    def _create_instance_splitter(self, module: InformerLightningModule, mode: str):
+    def _create_instance_splitter(self, module: SpacetimeformerLightningModule, mode: str):
         assert mode in ["training", "validation", "test"]
 
         instance_sampler = {
@@ -211,7 +205,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             "validation": self.validation_sampler,
             "test": TestSplitSampler(),
         }[mode]
-        
+
         return InstanceSplitter(
             target_field=FieldName.TARGET,
             is_pad_field=FieldName.IS_PAD,
@@ -230,11 +224,11 @@ class InformerEstimator(PyTorchLightningEstimator):
     def create_training_data_loader(
         self,
         data: Dataset,
-        module: InformerLightningModule,
+        module: SpacetimeformerLightningModule,
         shuffle_buffer_length: Optional[int] = None,
         **kwargs,
     ) -> Iterable:
-        data = Cyclic(data).stream() # will just repeat over same dataset if we only provide one
+        data = Cyclic(data).stream()
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
@@ -250,7 +244,7 @@ class InformerEstimator(PyTorchLightningEstimator):
     def create_validation_data_loader(
         self,
         data: Dataset,
-        module: InformerLightningModule,
+        module: SpacetimeformerLightningModule,
         **kwargs,
     ) -> Iterable:
         instances = self._create_instance_splitter(module, "validation").apply(
@@ -266,8 +260,7 @@ class InformerEstimator(PyTorchLightningEstimator):
     def create_predictor(
         self,
         transformation: Transformation,
-        module: InformerLightningModule,
-        **kwargs # CHANGE
+        module: SpacetimeformerLightningModule,
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
 
@@ -278,15 +271,14 @@ class InformerEstimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
-            **kwargs
         )
 
-    def create_lightning_module(self) -> InformerLightningModule:
-        model = InformerModel(
+    def create_lightning_module(self) -> SpacetimeformerLightningModule:
+        model = SpacetimeformerModel(
             freq=self.freq,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
-            num_feat_dynamic_real=1 # QUESTION what is the 1 for
+            num_feat_dynamic_real=1
             + self.num_feat_dynamic_real
             + len(self.time_features),
             num_feat_static_real=max(1, self.num_feat_static_real),
@@ -312,5 +304,5 @@ class InformerEstimator(PyTorchLightningEstimator):
             num_parallel_samples=self.num_parallel_samples,
         )
 
-        # return InformerLightningModule(model=model, loss=self.loss) CHANGE
-        return InformerLightningModule(model=model)
+        # return SpacetimeformerLightningModule(model=model, loss=self.loss)
+        return SpacetimeformerLightningModule(model=model)

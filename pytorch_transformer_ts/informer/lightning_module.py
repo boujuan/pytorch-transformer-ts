@@ -1,23 +1,23 @@
 import pytorch_lightning as pl
 import torch
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
 
-from module import AutoformerModel
+# CHANGE
+from pytorch_transformer_ts.informer.module import InformerModel
 
-
-class AutoformerLightningModule(pl.LightningModule):
+class InformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: AutoformerModel,
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        model: InformerModel,
+        # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
         self.model = model
-        self.loss = loss
+        # self.loss = loss CHANGE
         self.lr = lr
         self.weight_decay = weight_decay
 
@@ -47,7 +47,7 @@ class AutoformerLightningModule(pl.LightningModule):
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
-
+    # for training
     def forward(self, batch):
         feat_static_cat = batch["feat_static_cat"]
         feat_static_real = batch["feat_static_real"]
@@ -58,13 +58,7 @@ class AutoformerLightningModule(pl.LightningModule):
         past_observed_values = batch["past_observed_values"]
         future_observed_values = batch["future_observed_values"]
 
-        (
-            autoformer_inputs,
-            loc,
-            scale,
-            dynamic_features,
-            _,
-        ) = self.model.create_network_inputs(
+        transformer_inputs, loc, scale, _ = self.model.create_network_inputs(
             feat_static_cat,
             feat_static_real,
             past_time_feat,
@@ -73,10 +67,12 @@ class AutoformerLightningModule(pl.LightningModule):
             future_time_feat,
             future_target,
         )
-        params = self.model.output_params(autoformer_inputs, dynamic_features)
-        distr = self.model.output_distribution(params, loc=loc, scale=scale)
 
-        loss_values = self.loss(distr, future_target)
+        params = self.model.output_params(transformer_inputs)
+        # distr = self.model.output_distribution(params, loc=loc, scale=scale)
+        
+        # loss_values = self.loss(distr, future_target) CHANGE
+        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale)
 
         if len(self.model.target_shape) == 0:
             loss_weights = future_observed_values

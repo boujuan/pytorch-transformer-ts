@@ -769,6 +769,15 @@ class AutoformerModel(nn.Module):
         return self.param_proj(dec_out[:, -self.prediction_length :, :])
 
     @torch.jit.ignore
+    def output_loss(
+        self, params, future_target, loc=None, scale=None, trailing_n=None
+    ) -> torch.distributions.Distribution:
+        sliced_params = params
+        if trailing_n is not None:
+            sliced_params = [p[:, -trailing_n:] for p in params]
+        return self.distr_output.loss(future_target, sliced_params, loc=loc, scale=scale)
+
+    @torch.jit.ignore
     def output_distribution(
         self, params, loc=None, scale=None, trailing_n=None
     ) -> torch.distributions.Distribution:
@@ -787,6 +796,7 @@ class AutoformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
+        output_distr_params: Optional[bool] = False 
     ) -> torch.Tensor:
         if num_parallel_samples is None:
             num_parallel_samples = self.num_parallel_samples
@@ -854,6 +864,10 @@ class AutoformerModel(nn.Module):
         # Future samples
         samples = distr.sample()
 
-        return samples.reshape(
-            (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,
-        )
+        # TODO QUESTION KASHIF why no looping over to make predictions?
+        if output_distr_params:
+            return params.reshape((-1, 1, self.prediction_length) + self.target_shape)
+        else:
+            return samples.reshape(
+                (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,
+            )

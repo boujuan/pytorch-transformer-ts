@@ -10,7 +10,7 @@ from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.transform import (
     AddAgeFeature,
     AddObservedValuesIndicator,
@@ -28,8 +28,8 @@ from gluonts.transform import (
 )
 from gluonts.transform.sampler import InstanceSampler
 
-from lightning_module import SpacetimeformerLightningModule
-from module import SpacetimeformerModule
+from pytorch_transformer_ts.autoformer.lightning_module import AutoformerLightningModule
+from pytorch_transformer_ts.autoformer.module import AutoformerModel
 
 PREDICTION_INPUT_NAMES = [
     "feat_static_cat",
@@ -46,24 +46,22 @@ TRAINING_INPUT_NAMES = PREDICTION_INPUT_NAMES + [
 ]
 
 
-class SpacetimeformerEstimator(PyTorchLightningEstimator):
+class AutoformerEstimator(PyTorchLightningEstimator):
     @validated()
     def __init__(
         self,
         freq: str,
         prediction_length: int,
-        # Informer arguments
+        # Autoformer arguments
+        n_heads: int,
         num_encoder_layers: int,
         num_decoder_layers: int,
         dim_feedforward: int,
-        d_model: int = 64,
-        nhead: int = 4,
         input_size: int = 1,
         activation: str = "gelu",
         dropout: float = 0.1,
-        attn: str = "prob",
-        factor: int = 5,
-        distil: bool = True,
+        factor: int = 1,
+        moving_avg: int = 25,
         context_length: Optional[int] = None,
         num_feat_dynamic_real: int = 0,
         num_feat_static_cat: int = 0,
@@ -71,7 +69,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        # loss: DistributionLoss = NegativeLogLikelihood(),
         scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
@@ -94,19 +92,17 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         )
         self.prediction_length = prediction_length
         self.distr_output = distr_output
-        self.loss = loss
+        # self.loss = loss
 
         self.input_size = input_size
-        self.d_model = d_model
-        self.nhead = nhead
+        self.n_heads = n_heads
         self.num_encoder_layers = num_encoder_layers
         self.num_decoder_layers = num_decoder_layers
         self.activation = activation
         self.dim_feedforward = dim_feedforward
         self.dropout = dropout
-        self.attn = attn
         self.factor = factor
-        self.distil = distil
+        self.moving_avg = moving_avg
 
         self.num_feat_dynamic_real = num_feat_dynamic_real
         self.num_feat_static_cat = num_feat_static_cat
@@ -197,7 +193,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             ]
         )
 
-    def _create_instance_splitter(self, module: InformerLightningModule, mode: str):
+    def _create_instance_splitter(self, module: AutoformerLightningModule, mode: str):
         assert mode in ["training", "validation", "test"]
 
         instance_sampler = {
@@ -224,7 +220,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
     def create_training_data_loader(
         self,
         data: Dataset,
-        module: SpacetimeformerLightningModule,
+        module: AutoformerLightningModule,
         shuffle_buffer_length: Optional[int] = None,
         **kwargs,
     ) -> Iterable:
@@ -244,7 +240,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
     def create_validation_data_loader(
         self,
         data: Dataset,
-        module: SpacetimeformerLightningModule,
+        module: AutoformerLightningModule,
         **kwargs,
     ) -> Iterable:
         instances = self._create_instance_splitter(module, "validation").apply(
@@ -260,7 +256,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
     def create_predictor(
         self,
         transformation: Transformation,
-        module: SpacetimeformerLightningModule,
+        module: AutoformerLightningModule,
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
 
@@ -273,8 +269,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         )
 
-    def create_lightning_module(self) -> SpacetimeformerLightningModule:
-        model = SpacetimeformerModel(
+    def create_lightning_module(self) -> AutoformerLightningModule:
+        model = AutoformerModel(
             freq=self.freq,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
@@ -285,17 +281,15 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             num_feat_static_cat=max(1, self.num_feat_static_cat),
             cardinality=self.cardinality,
             embedding_dimension=self.embedding_dimension,
-            # Informer arguments
-            d_model=self.d_model,
-            nhead=self.nhead,
+            # autoformer arguments
+            n_heads=self.n_heads,
             num_encoder_layers=self.num_encoder_layers,
             num_decoder_layers=self.num_decoder_layers,
             activation=self.activation,
             dropout=self.dropout,
             dim_feedforward=self.dim_feedforward,
-            attn=self.attn,
             factor=self.factor,
-            distil=self.distil,
+            moving_avg=self.moving_avg,
             # univariate input
             input_size=self.input_size,
             distr_output=self.distr_output,
@@ -304,4 +298,5 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             num_parallel_samples=self.num_parallel_samples,
         )
 
-        return SpacetimeformerLightningModule(model=model, loss=self.loss)
+        # return AutoformerLightningModule(model=model, loss=self.loss)
+        return AutoformerLightningModule(model=model)

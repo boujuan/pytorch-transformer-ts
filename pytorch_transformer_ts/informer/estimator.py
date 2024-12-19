@@ -10,7 +10,7 @@ from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.transform import (
     AddAgeFeature,
     AddObservedValuesIndicator,
@@ -25,11 +25,13 @@ from gluonts.transform import (
     Transformation,
     ValidationSplitSampler,
     VstackFeatures,
+    ExpandDimArray
 )
 from gluonts.transform.sampler import InstanceSampler
 
-from lightning_module import AutoformerLightningModule
-from module import AutoformerModel
+# CHANGE
+from pytorch_transformer_ts.informer.lightning_module import InformerLightningModule
+from pytorch_transformer_ts.informer.module import InformerModel
 
 PREDICTION_INPUT_NAMES = [
     "feat_static_cat",
@@ -46,30 +48,32 @@ TRAINING_INPUT_NAMES = PREDICTION_INPUT_NAMES + [
 ]
 
 
-class AutoformerEstimator(PyTorchLightningEstimator):
+class InformerEstimator(PyTorchLightningEstimator):
     @validated()
     def __init__(
         self,
         freq: str,
         prediction_length: int,
-        # Autoformer arguments
-        n_heads: int,
+        # Informer arguments
         num_encoder_layers: int,
         num_decoder_layers: int,
         dim_feedforward: int,
+        d_model: int = 64,
+        nhead: int = 4,
         input_size: int = 1,
         activation: str = "gelu",
         dropout: float = 0.1,
-        factor: int = 1,
-        moving_avg: int = 25,
+        attn: str = "prob",
+        factor: int = 5,
+        distil: bool = True,
         context_length: Optional[int] = None,
-        num_feat_dynamic_real: int = 0,
+        num_feat_dynamic_real: int = 0, # QUESTION why no feat_dynamic_cat
         num_feat_static_cat: int = 0,
         num_feat_static_real: int = 0,
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
@@ -92,17 +96,19 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         )
         self.prediction_length = prediction_length
         self.distr_output = distr_output
-        self.loss = loss
+        # self.loss = loss CHANGE
 
         self.input_size = input_size
-        self.n_heads = n_heads
+        self.d_model = d_model
+        self.nhead = nhead
         self.num_encoder_layers = num_encoder_layers
         self.num_decoder_layers = num_decoder_layers
         self.activation = activation
         self.dim_feedforward = dim_feedforward
         self.dropout = dropout
+        self.attn = attn
         self.factor = factor
-        self.moving_avg = moving_avg
+        self.distil = distil
 
         self.num_feat_dynamic_real = num_feat_dynamic_real
         self.num_feat_static_cat = num_feat_static_cat
@@ -161,8 +167,13 @@ class AutoformerEstimator(PyTorchLightningEstimator):
                 ),
                 AsNumpyArray(
                     field=FieldName.TARGET,
-                    # in the following line, we add 1 for the time dimension
+                    # in the following line, we add 1 for the time dimension 
                     expected_ndim=1 + len(self.distr_output.event_shape),
+                    # expected_ndim=1 + 1 + len(self.distr_output.event_shape),
+                ),
+                ExpandDimArray( # CHANGE
+                    field=FieldName.TARGET,
+                    axis=0 if self.distr_output.event_shape[0] == 1 else None,
                 ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
@@ -193,7 +204,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             ]
         )
 
-    def _create_instance_splitter(self, module: AutoformerLightningModule, mode: str):
+    def _create_instance_splitter(self, module: InformerLightningModule, mode: str):
         assert mode in ["training", "validation", "test"]
 
         instance_sampler = {
@@ -201,7 +212,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             "validation": self.validation_sampler,
             "test": TestSplitSampler(),
         }[mode]
-
+        
         return InstanceSplitter(
             target_field=FieldName.TARGET,
             is_pad_field=FieldName.IS_PAD,
@@ -220,11 +231,11 @@ class AutoformerEstimator(PyTorchLightningEstimator):
     def create_training_data_loader(
         self,
         data: Dataset,
-        module: AutoformerLightningModule,
+        module: InformerLightningModule,
         shuffle_buffer_length: Optional[int] = None,
         **kwargs,
     ) -> Iterable:
-        data = Cyclic(data).stream()
+        data = Cyclic(data).stream() # will just repeat over same dataset if we only provide one
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
@@ -240,7 +251,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
     def create_validation_data_loader(
         self,
         data: Dataset,
-        module: AutoformerLightningModule,
+        module: InformerLightningModule,
         **kwargs,
     ) -> Iterable:
         instances = self._create_instance_splitter(module, "validation").apply(
@@ -256,7 +267,8 @@ class AutoformerEstimator(PyTorchLightningEstimator):
     def create_predictor(
         self,
         transformation: Transformation,
-        module: AutoformerLightningModule,
+        module: InformerLightningModule,
+        **kwargs # CHANGE
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
 
@@ -267,29 +279,32 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            **kwargs
         )
 
-    def create_lightning_module(self) -> AutoformerLightningModule:
-        model = AutoformerModel(
+    def create_lightning_module(self) -> InformerLightningModule:
+        model = InformerModel(
             freq=self.freq,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
-            num_feat_dynamic_real=1
+            num_feat_dynamic_real=1 # QUESTION what is the 1 for
             + self.num_feat_dynamic_real
             + len(self.time_features),
             num_feat_static_real=max(1, self.num_feat_static_real),
             num_feat_static_cat=max(1, self.num_feat_static_cat),
             cardinality=self.cardinality,
             embedding_dimension=self.embedding_dimension,
-            # autoformer arguments
-            n_heads=self.n_heads,
+            # Informer arguments
+            d_model=self.d_model,
+            nhead=self.nhead,
             num_encoder_layers=self.num_encoder_layers,
             num_decoder_layers=self.num_decoder_layers,
             activation=self.activation,
             dropout=self.dropout,
             dim_feedforward=self.dim_feedforward,
+            attn=self.attn,
             factor=self.factor,
-            moving_avg=self.moving_avg,
+            distil=self.distil,
             # univariate input
             input_size=self.input_size,
             distr_output=self.distr_output,
@@ -298,4 +313,5 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             num_parallel_samples=self.num_parallel_samples,
         )
 
-        return AutoformerLightningModule(model=model, loss=self.loss)
+        # return InformerLightningModule(model=model, loss=self.loss) CHANGE
+        return InformerLightningModule(model=model)

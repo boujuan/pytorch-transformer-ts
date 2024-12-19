@@ -1,23 +1,23 @@
 import pytorch_lightning as pl
 import torch
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
 
-from module import SpacetimeformerModel
+from pytorch_transformer_ts.autoformer.module import AutoformerModel
 
 
-class SpacetimeformerLightningModule(pl.LightningModule):
+class AutoformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: SpacetimeformerModel,
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        model: AutoformerModel,
+        # loss: DistributionLoss = NegativeLogLikelihood(),
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
         self.model = model
-        self.loss = loss
+        # self.loss = loss
         self.lr = lr
         self.weight_decay = weight_decay
 
@@ -58,7 +58,13 @@ class SpacetimeformerLightningModule(pl.LightningModule):
         past_observed_values = batch["past_observed_values"]
         future_observed_values = batch["future_observed_values"]
 
-        transformer_inputs, loc, scale, _ = self.model.create_network_inputs(
+        (
+            autoformer_inputs,
+            loc,
+            scale,
+            dynamic_features,
+            _,
+        ) = self.model.create_network_inputs(
             feat_static_cat,
             feat_static_real,
             past_time_feat,
@@ -67,10 +73,10 @@ class SpacetimeformerLightningModule(pl.LightningModule):
             future_time_feat,
             future_target,
         )
-        params = self.model.output_params(transformer_inputs)
-        distr = self.model.output_distribution(params, loc=loc, scale=scale)
+        params = self.model.output_params(autoformer_inputs, dynamic_features)
+        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale, include_loss=True)
 
-        loss_values = self.loss(distr, future_target)
+        # loss_values = self.loss(distr, future_target)
 
         if len(self.model.target_shape) == 0:
             loss_weights = future_observed_values

@@ -651,15 +651,28 @@ class InformerModel(nn.Module):
         return self.param_proj(dec_output) # this is the head after the decoder
 
     @torch.jit.ignore
+    def output_loss(
+        self, params, future_target, loc=None, scale=None, trailing_n=None
+    ) -> torch.distributions.Distribution:
+        sliced_params = params
+        if trailing_n is not None:
+            sliced_params = [p[:, -trailing_n:] for p in params]
+        return self.distr_output.loss(future_target, sliced_params, loc=loc, scale=scale)
+
+    @torch.jit.ignore
     def output_distribution(
         # self, params, scale=None, trailing_n=None
-        self, params, loc=None, scale=None, trailing_n=None
+        self, params, loc=None, scale=None, trailing_n=None, include_loss=False
     ) -> torch.distributions.Distribution:
         sliced_params = params
         if trailing_n is not None:
             sliced_params = [p[:, -trailing_n:] for p in params]
         return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
         # return self.distr_output.distribution(sliced_params, scale=scale)
+        if include_loss:
+            return self.distr_output.loss(future_target, sliced_params, loc=loc, scale=scale)
+        else:
+            return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
 
     # for prediction 
     def forward(
@@ -671,12 +684,8 @@ class InformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
-        output_distr_params: Optional[bool] = False # NOTE first element in output_distr_params must be the value used for pointwise prediction eg mean
+        output_distr_params: Optional[bool] = False 
     ) -> torch.Tensor: # CHANGE THROUGHTOUT THIS FUNC
-        # TODO check that dims are okay if first dim is number of continuity groups
-        # if output_distr_params:
-        #     num_parallel_samples = 1
-        # elif num_parallel_samples is None:
         num_parallel_samples = self.num_parallel_samples
 
         encoder_inputs, loc, scale, static_feat = self.create_network_inputs(
@@ -747,24 +756,14 @@ class InformerModel(nn.Module):
             distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
                 params, scale=repeated_scale, loc=repeated_loc
             )
-            
-            # if output_distr_params:
-            #     next_sample = {param_key: getattr(distr.base_dist, param_key) for param_key in distr.base_dist.arg_constraints.keys()}
-            #     # with 4 continuity_groups, shape []
-            #     # without ..., shape [1, 369, 6]
-            #     repeated_past_target = torch.cat(
-            #         (repeated_past_target, (next_sample[list(distr.base_dist.arg_constraints.keys())[0]] - repeated_loc) / repeated_scale), # this assumes that first key is the mean value
-            #         dim=1,
-            #     )
-            #     for param_key in distr.base_dist.arg_constraints.keys():
-            #         future_samples[param_key].append(next_sample[param_key])
-            # else:
+             
             next_sample = distr.sample()
             repeated_past_target = torch.cat(
                 (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
                 dim=1,
             )
             future_samples.append(next_sample)
+            
         # from gluonts.model.forecast_generator import _unpack
         if output_distr_params:
             param_keys = list(distr.base_dist.arg_constraints.keys())

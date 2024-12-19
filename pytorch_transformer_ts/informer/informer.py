@@ -27,7 +27,7 @@ from lightning.pytorch.loggers import WandbLogger
 import wandb
 
 # from wind_forecasting.datasets.data_module import DataModule
-from wind_forecasting.models.pytorch_transformer_ts.informer.estimator import InformerEstimator
+from pytorch_transformer_ts.informer.estimator import InformerEstimator
 from wind_forecasting.preprocessing.data_module import DataModule
 
 # %%

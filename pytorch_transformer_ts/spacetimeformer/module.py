@@ -1607,6 +1607,15 @@ class SpacetimeformerModel(nn.Module):
         return self.param_proj(dec_output)
 
     @torch.jit.ignore
+    def output_loss(
+        self, params, future_target, loc=None, scale=None, trailing_n=None
+    ) -> torch.distributions.Distribution:
+        sliced_params = params
+        if trailing_n is not None:
+            sliced_params = [p[:, -trailing_n:] for p in params]
+        return self.distr_output.loss(sliced_params, future_target, loc=loc, scale=scale)
+
+    @torch.jit.ignore
     def output_distribution(
         self, params, loc=None, scale=None, trailing_n=None
     ) -> torch.distributions.Distribution:
