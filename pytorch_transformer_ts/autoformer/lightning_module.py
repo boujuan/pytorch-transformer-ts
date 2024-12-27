@@ -9,14 +9,14 @@ from pytorch_transformer_ts.autoformer.module import AutoformerModel
 class AutoformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: AutoformerModel,
+        model: dict,
         # loss: DistributionLoss = NegativeLogLikelihood(),
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = model
+        self.model = AutoformerModel(**model)
         # self.loss = loss
         self.lr = lr
         self.weight_decay = weight_decay
@@ -74,7 +74,7 @@ class AutoformerLightningModule(pl.LightningModule):
             future_target,
         )
         params = self.model.output_params(autoformer_inputs, dynamic_features)
-        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale, include_loss=True)
+        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale)
 
         # loss_values = self.loss(distr, future_target)
 

@@ -627,6 +627,7 @@ class AutoformerModel(nn.Module):
 
         lagged_values = []
         for lag_index in indices:
+            lag_index = max(0, lag_index) # CHANGE
             begin_index = -lag_index - subsequences_length
             end_index = -lag_index if lag_index > 0 else None
             lagged_values.append(sequence[:, begin_index:end_index, ...])
@@ -775,7 +776,7 @@ class AutoformerModel(nn.Module):
         sliced_params = params
         if trailing_n is not None:
             sliced_params = [p[:, -trailing_n:] for p in params]
-        return self.distr_output.loss(future_target, sliced_params, loc=loc, scale=scale)
+        return self.distr_output.loss(target=future_target, distr_args=sliced_params, loc=loc, scale=scale)
 
     @torch.jit.ignore
     def output_distribution(
@@ -866,7 +867,8 @@ class AutoformerModel(nn.Module):
 
         # TODO QUESTION KASHIF why no looping over to make predictions?
         if output_distr_params:
-            return params.reshape((-1, 1, self.prediction_length) + self.target_shape)
+            return params
+            # return params = tuple(param.reshape((-1, 1, self.prediction_length) + self.target_shape) for param in params)
         else:
             return samples.reshape(
                 (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,

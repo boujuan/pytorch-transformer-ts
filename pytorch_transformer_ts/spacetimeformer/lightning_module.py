@@ -8,14 +8,16 @@ from pytorch_transformer_ts.spacetimeformer.module import SpacetimeformerModel
 class SpacetimeformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: SpacetimeformerModel,
+        # model: SpacetimeformerModel,
+        model: dict, # CHANGE
         # loss: DistributionLoss = NegativeLogLikelihood(),
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = model
+        # self.model = model
+        self.model = SpacetimeformerModel(**model)
         # self.loss = loss
         self.lr = lr
         self.weight_decay = weight_decay
@@ -36,7 +38,11 @@ class SpacetimeformerLightningModule(pl.LightningModule):
         """Execute validation step"""
         with torch.inference_mode():
             val_loss = self(batch)
-        self.log("val_loss", val_loss, on_epoch=True, on_step=False, prog_bar=True)
+        self.log(
+            "val_loss", val_loss, 
+                on_epoch=True, 
+                on_step=True, 
+                prog_bar=True)
         return val_loss
 
     def configure_optimizers(self):
@@ -66,12 +72,11 @@ class SpacetimeformerLightningModule(pl.LightningModule):
             future_time_feat,
             future_target,
         )
-        params = self.model.output_params(transformer_inputs)
-        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale, include_loss=True)
+        params = self.model.output_params(transformer_inputs) 
+        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale)
 
         # loss_values = self.loss(distr, future_target)
         
-
         if len(self.model.target_shape) == 0:
             loss_weights = future_observed_values
         else:

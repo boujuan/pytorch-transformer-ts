@@ -9,14 +9,14 @@ from pytorch_transformer_ts.informer.module import InformerModel
 class InformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: InformerModel,
+        model: dict,
         # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = model
+        self.model = InformerModel(**model)
         # self.loss = loss CHANGE
         self.lr = lr
         self.weight_decay = weight_decay
@@ -37,7 +37,12 @@ class InformerLightningModule(pl.LightningModule):
         """Execute validation step"""
         with torch.inference_mode():
             val_loss = self(batch)
-        self.log("val_loss", val_loss, on_epoch=True, on_step=False, prog_bar=True)
+        self.log(
+            "val_loss", 
+            val_loss,
+            on_epoch=True,
+            on_step=True, # CHANGE 
+            prog_bar=True)
         return val_loss
 
     def configure_optimizers(self):

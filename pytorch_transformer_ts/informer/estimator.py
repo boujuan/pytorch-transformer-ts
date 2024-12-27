@@ -59,7 +59,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         num_decoder_layers: int,
         dim_feedforward: int,
         d_model: int = 64,
-        nhead: int = 4,
+        n_heads: int = 4,
         input_size: int = 1,
         activation: str = "gelu",
         dropout: float = 0.1,
@@ -100,7 +100,7 @@ class InformerEstimator(PyTorchLightningEstimator):
 
         self.input_size = input_size
         self.d_model = d_model
-        self.nhead = nhead
+        self.n_heads = n_heads
         self.num_encoder_layers = num_encoder_layers
         self.num_decoder_layers = num_decoder_layers
         self.activation = activation
@@ -171,10 +171,10 @@ class InformerEstimator(PyTorchLightningEstimator):
                     expected_ndim=1 + len(self.distr_output.event_shape),
                     # expected_ndim=1 + 1 + len(self.distr_output.event_shape),
                 ),
-                ExpandDimArray( # CHANGE
-                    field=FieldName.TARGET,
-                    axis=0 if self.distr_output.event_shape[0] == 1 else None,
-                ),
+                # ExpandDimArray( # CHANGE
+                #     field=FieldName.TARGET,
+                #     axis=0 if self.distr_output.event_shape[0] == 1 else None,
+                # ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
                     output_field=FieldName.OBSERVED_VALUES,
@@ -254,6 +254,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         module: InformerLightningModule,
         **kwargs,
     ) -> Iterable:
+        data = Cyclic(data).stream() # CHANGE
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
         )
@@ -262,6 +263,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             field_names=TRAINING_INPUT_NAMES,
             output_type=torch.tensor,
+            num_batches_per_epoch=self.num_batches_per_epoch,
         )
 
     def create_predictor(
@@ -283,7 +285,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         )
 
     def create_lightning_module(self) -> InformerLightningModule:
-        model = InformerModel(
+        model_params = dict(
             freq=self.freq,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
@@ -296,7 +298,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             embedding_dimension=self.embedding_dimension,
             # Informer arguments
             d_model=self.d_model,
-            nhead=self.nhead,
+            n_heads=self.n_heads,
             num_encoder_layers=self.num_encoder_layers,
             num_decoder_layers=self.num_decoder_layers,
             activation=self.activation,
@@ -314,4 +316,4 @@ class InformerEstimator(PyTorchLightningEstimator):
         )
 
         # return InformerLightningModule(model=model, loss=self.loss) CHANGE
-        return InformerLightningModule(model=model)
+        return InformerLightningModule(model=model_params)

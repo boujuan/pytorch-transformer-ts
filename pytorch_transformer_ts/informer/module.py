@@ -353,7 +353,6 @@ class Decoder(nn.Module):
 
         return x
 
-
 class InformerModel(nn.Module):
     @validated()
     def __init__(
@@ -367,7 +366,7 @@ class InformerModel(nn.Module):
         cardinality: List[int],
         # Informer arguments
         d_model: int,
-        nhead: int,
+        n_heads: int,
         num_encoder_layers: int,
         num_decoder_layers: int,
         dim_feedforward: int,
@@ -412,11 +411,14 @@ class InformerModel(nn.Module):
             self.scaler = NOPScaler(keepdim=True, dim=1)
 
         # total feature size, this takes encoder input and decoder input 
-        # QUESTION TODO what is in input_size vs. num_feat_dynamic_real, TODO make sure these are set to generalize to all inputs
         # lags are values of same vector pasted in, making input vector larger. with lags, 
         # can take past values and add it to vector even with small context size,
         # but given frequency of time series, lags depend on this, 
         # totals input feature size, for each time point will have vector of this size, with more lagged features need smaller context window
+        # input = targets for each element in lags_seq 
+        # + dynamic/static real features 
+        # + embedded cardinal features
+        # + loc and scale for each target
         self.embed = nn.Linear(
             self.input_size * len(self.lags_seq) + self._number_of_features, d_model
         )
@@ -440,7 +442,7 @@ class InformerModel(nn.Module):
                             output_attention=False,
                         ),
                         d_model,
-                        nhead,
+                        n_heads,
                         mix=False,
                     ),
                     d_model,
@@ -468,7 +470,7 @@ class InformerModel(nn.Module):
                             output_attention=False,
                         ),
                         d_model,
-                        nhead,
+                        n_heads,
                         mix=True,
                     ),
                     AttentionLayer(
@@ -479,7 +481,7 @@ class InformerModel(nn.Module):
                             output_attention=False,
                         ),
                         d_model,
-                        nhead,
+                        n_heads,
                         mix=False,
                     ),
                     d_model,
@@ -536,6 +538,7 @@ class InformerModel(nn.Module):
 
         lagged_values = []
         for lag_index in indices:
+            lag_index = max(0, lag_index) # CHANGE
             begin_index = -lag_index - subsequences_length
             end_index = -lag_index if lag_index > 0 else None
             lagged_values.append(sequence[:, begin_index:end_index, ...])
@@ -646,7 +649,7 @@ class InformerModel(nn.Module):
         dec_input = projected_inputs[:, self.context_length :, ...]
 
         enc_out, _ = self.encoder(enc_input)
-        dec_output = self.decoder(dec_input, enc_out)
+        dec_output = self.decoder(dec_input, enc_out) # [batch, pred_length, d_model]
 
         return self.param_proj(dec_output) # this is the head after the decoder
 
@@ -657,22 +660,17 @@ class InformerModel(nn.Module):
         sliced_params = params
         if trailing_n is not None:
             sliced_params = [p[:, -trailing_n:] for p in params]
-        return self.distr_output.loss(future_target, sliced_params, loc=loc, scale=scale)
+        return self.distr_output.loss(target=future_target, distr_args=sliced_params, loc=loc, scale=scale)
 
     @torch.jit.ignore
     def output_distribution(
         # self, params, scale=None, trailing_n=None
-        self, params, loc=None, scale=None, trailing_n=None, include_loss=False
+        self, params, loc=None, scale=None, trailing_n=None
     ) -> torch.distributions.Distribution:
         sliced_params = params
         if trailing_n is not None:
             sliced_params = [p[:, -trailing_n:] for p in params]
         return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
-        # return self.distr_output.distribution(sliced_params, scale=scale)
-        if include_loss:
-            return self.distr_output.loss(future_target, sliced_params, loc=loc, scale=scale)
-        else:
-            return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
 
     # for prediction 
     def forward(
@@ -686,7 +684,9 @@ class InformerModel(nn.Module):
         num_parallel_samples: Optional[int] = None,
         output_distr_params: Optional[bool] = False 
     ) -> torch.Tensor: # CHANGE THROUGHTOUT THIS FUNC
-        num_parallel_samples = self.num_parallel_samples
+
+        if num_parallel_samples is None:
+            num_parallel_samples = self.num_parallel_samples
 
         encoder_inputs, loc, scale, static_feat = self.create_network_inputs(
             feat_static_cat,
@@ -767,11 +767,7 @@ class InformerModel(nn.Module):
         # from gluonts.model.forecast_generator import _unpack
         if output_distr_params:
             param_keys = list(distr.base_dist.arg_constraints.keys())
-            # shape [n_continuity_groups*n_parallel_samples, prediction_length, input_size] for each param_key (e.g. loc)
-            # concat_future_params = {param_keys[p]: torch.cat([params[p] for params in future_params], dim=1) for p in range(len(param_keys))}
-            # return concat_future_params
             concat_future_params = tuple(torch.cat([params[p] for params in future_params], dim=1) for p in range(len(param_keys)))
-            # concat_future_params = [tuple(torch.cat([params[p][dataset_idx, ...] for params in future_params], dim=0) for p in range(len(param_keys))) for dataset_idx in range(past_target.shape[0])]
             return concat_future_params
         else:
             concat_future_samples = torch.cat(future_samples, dim=1)
