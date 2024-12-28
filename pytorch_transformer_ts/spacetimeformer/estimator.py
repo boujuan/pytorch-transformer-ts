@@ -313,7 +313,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         **kwargs,
     ) -> Iterable:
         # TODO QUESTION WILL THIS WORK, is there a reason not to do this
-        data = Cyclic(data).stream() # CHANGE
+        # data = Cyclic(data).stream() # CHANGE
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
         )
@@ -322,7 +322,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             field_names=TRAINING_INPUT_NAMES,
             output_type=torch.tensor,
-            num_batches_per_epoch=self.num_batches_per_epoch, #CHANGE
+            # num_batches_per_epoch=self.num_batches_per_epoch, #CHANGE
         )
 
     def create_predictor(

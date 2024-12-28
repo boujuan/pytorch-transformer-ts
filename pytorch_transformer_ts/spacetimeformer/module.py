@@ -736,10 +736,10 @@ class Embedding(nn.Module):
         self.time_emb = Time2Vec(d_x_time, embed_dim=time_dim)
 
         # self.lags_seq = [0]
-        dyn_feat_dim = d_model
-        self.dyn_feat_emb = nn.Linear(
-             d_x_feat, d_model
-         )
+        # dyn_feat_dim = d_model
+        # self.dyn_feat_emb = nn.Linear(
+        #      d_x_feat, d_model
+        #  )
 
         assert position_emb in ["t2v", "abs"]
         self.max_seq_len = max_seq_len
@@ -813,7 +813,6 @@ class Embedding(nn.Module):
         y = torch.cat((y, x_feat), dim=-1) # CHANGE
         y = torch.nan_to_num(y)
         x_time = torch.nan_to_num(x_time)
-        x_feat = torch.nan_to_num(x_feat)
 
         if self.is_encoder:
             # optionally mask the context sequence for reconstruction
@@ -1480,7 +1479,7 @@ class SpacetimeformerModel(nn.Module):
 
         # embeddings. seperate enc/dec in case the variable indices are not aligned
         self.enc_embedding = Embedding(
-            d_y=self.input_size,
+            d_y=self.input_size * len(self.lags_seq),
             d_x_time=self.num_time_features + 1, # time features and age
             d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # TODO QUESTION should this be time AND feat_dynamic_real? ie num_feat_dynamic_real... if only time features then not embedding feat dynamic real?
             d_model=d_model,
@@ -1500,7 +1499,7 @@ class SpacetimeformerModel(nn.Module):
             use_given=use_given,
         )
         self.dec_embedding = Embedding(
-            d_y=self.input_size,
+            d_y=self.input_size * len(self.lags_seq),
             d_x_time=self.num_time_features + 1, # time features and age
             d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # TODO QUESTION should this be time AND feat_dynamic_real? ie num_feat_dynamic_real... if only time features then not embedding feat dynamic real?
             d_model=d_model,
@@ -1775,7 +1774,7 @@ class SpacetimeformerModel(nn.Module):
                                  x_time=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:-(self.num_feat_dynamic_real - self.num_time_features - 1)], 
                                  x_feat=transformer_inputs[:, :self.context_length, -(self.num_feat_dynamic_real - self.num_time_features - 1):]
                                  )
-
+        
         # dec_vt_emb, dec_s_emb, _, dec_mask_seq = self.dec_embedding(y=reshaped_lagged_sequence, 
         #                                                                 x_time=repeated_features[:, :, :self.num_time_features + 1],
         #                                                                 x_feat=repeated_features[:, :, self.num_time_features + 1:])
@@ -2202,4 +2201,3 @@ class ConvLayer(nn.Module):
         x = self.maxPool(x)
         x = x.transpose(1, 2)
         return x
-

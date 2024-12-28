@@ -243,7 +243,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         module: AutoformerLightningModule,
         **kwargs,
     ) -> Iterable:
-        data = Cyclic(data).stream()
+        # data = Cyclic(data).stream()
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
         )
@@ -252,7 +252,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             field_names=TRAINING_INPUT_NAMES,
             output_type=torch.tensor,
-            num_batches_per_epoch=self.num_batches_per_epoch, #CHANGE
+            # num_batches_per_epoch=self.num_batches_per_epoch, #CHANGE
         )
 
     def create_predictor(
