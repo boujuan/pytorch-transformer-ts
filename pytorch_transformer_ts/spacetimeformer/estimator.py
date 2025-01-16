@@ -293,6 +293,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         shuffle_buffer_length: Optional[int] = None,
         **kwargs,
     ) -> Iterable:
+        # TODO why is this needed
         data = Cyclic(data).stream()
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
@@ -312,8 +313,6 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         module: SpacetimeformerLightningModule,
         **kwargs,
     ) -> Iterable:
-        # TODO QUESTION WILL THIS WORK, is there a reason not to do this
-        # data = Cyclic(data).stream() # CHANGE
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
         )
@@ -321,8 +320,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             instances,
             batch_size=self.batch_size,
             field_names=TRAINING_INPUT_NAMES,
-            output_type=torch.tensor,
-            # num_batches_per_epoch=self.num_batches_per_epoch, #CHANGE
+            output_type=torch.tensor
         )
 
     def create_predictor(
