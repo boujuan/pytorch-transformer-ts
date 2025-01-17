@@ -17,6 +17,13 @@ from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
 
+def FoldForPred(inp: torch.Tensor, length:int, d_params: torch.Tensor) -> torch.Tensor:
+    # out = rearrange(inp, "batch (dy len) dim -> dim batch len dy", dy=dy)
+    d_params_str = " ".join(f"dy{i}" for i in range(len(d_params)))
+    out = rearrange(inp, f"batch (d_in length) {d_params_str} -> batch length d_in {d_params_str}", length=length, **{f"dy{i}": d for i, d in enumerate(d_params)})
+        
+    return out
+
 class DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -454,13 +461,6 @@ def ReverseShiftBeforeWindow(inp: torch.Tensor, windows: int, offset: int = 2):
 def Stack(inp: torch.Tensor, dy: int):
     return rearrange(inp, "batch (dy len) dim -> batch len dy dim", dy=dy)
 
-
-def FoldForPred(inp: torch.Tensor, dy: int) -> torch.Tensor:
-    out = rearrange(inp, "batch (dy len) dim -> dim batch len dy", dy=dy)
-    out = out.squeeze(0)
-    return out
-
-
 class ConvBlock(nn.Module):
     def __init__(
         self,
@@ -777,7 +777,7 @@ class Embedding(nn.Module):
         self.use_given = use_given
         self.use_space = use_space
 
-    def __call__(self,  y: torch.Tensor, x_time: torch.Tensor, x_feat: torch.Tensor, x_static: torch.Tensor):
+    def __call__(self,  y: torch.Tensor, x_time: torch.Tensor, x_age: torch.Tensor, x_feat: torch.Tensor, x_static: torch.Tensor):
         if self.method == "spatio-temporal":
             emb = self.spatio_temporal_embed
         else:
@@ -832,7 +832,7 @@ class Embedding(nn.Module):
         if not self.use_val:
             y = torch.zeros_like(y)
 
-        val_time_inp = torch.cat((time_emb, y), dim=-1)
+        val_time_inp = torch.cat((y, time_emb), dim=-1)
         val_time_emb = self.val_time_emb(val_time_inp)
 
         # "given" embedding. not important for temporal emb
@@ -861,7 +861,7 @@ class Embedding(nn.Module):
         _, _, dx_feat = x_feat.shape
         _, _, dx_static = x_static.shape
 
-        # position emb ("local_emb")
+        # position emb ("local_emb") # TODO See how these features are stacked
         local_pos = repeat(
             torch.arange(length).to(x_time.device), f"length -> {batch} ({dy + dx_feat + dx_static} length)" # CHANGE
         )
@@ -878,7 +878,7 @@ class Embedding(nn.Module):
         if not self.use_time:
             x_time = torch.zeros_like(x_time)
             x_age = torch.zeros_like(x_age)
-        x_time = torch.nan_to_num(x_time) # TODO is this excluding AGE feature
+        x_time = torch.nan_to_num(x_time)
         x_age = torch.nan_to_num(x_age)
         x_time = repeat(x_time, f"batch len x_dim -> batch ({dy + dx_feat + dx_static} len) x_dim")
         x_age = repeat(x_age, f"batch len x_dim -> batch ({dy + dx_feat + dx_static} len) x_dim")
@@ -890,7 +890,7 @@ class Embedding(nn.Module):
         y = torch.nan_to_num(y)
         if not self.use_val:
             y = torch.zeros_like(y)
-
+        # TODO QUESTION should the y passed to the decoder include the features in addition to the targets...i think so, even though not in original spacetimeforger (exo_cols)
         # keep track of pre-dropout y for given emb
         y_original = y.clone()
         y_original = Flatten(y_original)
@@ -899,7 +899,7 @@ class Embedding(nn.Module):
         mask = self.make_mask(y)
 
         # concat time_emb, y --> FF --> val_time_emb
-        val_time_inp = torch.cat((time_emb, y), dim=-1)
+        val_time_inp = torch.cat((y, time_emb), dim=-1)
         val_time_emb = self.val_time_emb(val_time_inp)
 
         # "given" embedding
@@ -1443,8 +1443,8 @@ class SpacetimeformerModel(nn.Module):
         # embeddings. seperate enc/dec in case the variable indices are not aligned
         self.enc_embedding = Embedding(
             d_y=self.input_size * len(self.lags_seq),
-            d_x_time=self.num_time_features + 1, # time features and age
-            d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1,
+            d_x_time=self.num_time_features, # time features excluding age
+            d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # subtracdt time features and age
             d_x_static=sum(self.embedding_dimension) + self.num_feat_static_real + self.input_size * 2,
             d_model=d_model,
             time_emb_dim=time_emb_dim,
@@ -1464,8 +1464,8 @@ class SpacetimeformerModel(nn.Module):
         )
         self.dec_embedding = Embedding(
             d_y=self.input_size * len(self.lags_seq),
-            d_x_time=self.num_time_features + 1, # time features and age
-            d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1,
+            d_x_time=self.num_time_features, # time features excluding age
+            d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # subtract time features and age
             d_x_static=sum(self.embedding_dimension) + self.num_feat_static_real + self.input_size * 2, 
             d_model=d_model,
             time_emb_dim=time_emb_dim,
@@ -1572,6 +1572,11 @@ class SpacetimeformerModel(nn.Module):
             norm_layer=Normalization(norm, d_model=d_model) if use_final_norm else None,
             emb_dropout=dropout_emb,
         )
+        
+        self.reshape_layer = nn.Linear(self.prediction_length*(self.input_size * len(self.lags_seq) + self._number_of_features - (self.num_time_features + 1)), 
+                                       self.prediction_length)
+        # self.reshape_layer_predict = nn.Linear((self.input_size * len(self.lags_seq) + self._number_of_features - (self.num_time_features + 1)), 
+        #                                self.prediction_length)
         
 
     @property
@@ -1728,21 +1733,23 @@ class SpacetimeformerModel(nn.Module):
         return transformer_inputs, loc, scale, static_feat
 
     def output_params(self, transformer_inputs):
+        
         enc_vt_emb, enc_s_emb, _, enc_mask_seq  \
             = self.enc_embedding(
                 y=transformer_inputs[:, :self.context_length,  :self.input_size*len(self.lags_seq)], 
-                x_time=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:-(self.num_feat_dynamic_real - self.num_time_features - 1)], 
-                x_age=transformer_inputs[:, :self.context_length, -(self.num_feat_dynamic_real - self.num_time_features - 1):-(self.num_feat_dynamic_real - self.num_time_features)],
-                x_feat=transformer_inputs[:, :self.context_length, -(self.num_feat_dynamic_real - self.num_time_features - 1):],
+                x_time=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:][:, :, :self.num_time_features], 
+                x_age=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:][:, :, self.num_time_features:(self.num_time_features + 1)],
+                x_feat=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:][:, :, self.num_time_features + 1:],
                 x_static=transformer_inputs[:, :self.context_length, self.input_size*len(self.lags_seq):-self.num_feat_dynamic_real]
         )
+        
         
         dec_vt_emb, dec_s_emb, _, dec_mask_seq \
             = self.dec_embedding(
                 y=transformer_inputs[:, self.context_length:,  :self.input_size*len(self.lags_seq)], 
-                x_time=transformer_inputs[:, self.context_length:, -self.num_feat_dynamic_real:-(self.num_feat_dynamic_real - self.num_time_features - 1)], 
-                x_age=transformer_inputs[:, self.context_length:, -(self.num_feat_dynamic_real - self.num_time_features - 1):-(self.num_feat_dynamic_real - self.num_time_features)],
-                x_feat=transformer_inputs[:, self.context_length:, -(self.num_feat_dynamic_real - self.num_time_features - 1):],
+                x_time=transformer_inputs[:, self.context_length:, -self.num_feat_dynamic_real:][:, :, :self.num_time_features], 
+                x_age=transformer_inputs[:, self.context_length:, -self.num_feat_dynamic_real:][:, :, self.num_time_features:(self.num_time_features + 1)],
+                x_feat=transformer_inputs[:, self.context_length:, -self.num_feat_dynamic_real:][:, :, self.num_time_features + 1:],
                 x_static=transformer_inputs[:, self.context_length:, self.input_size*len(self.lags_seq):-self.num_feat_dynamic_real]
         )
             
@@ -1757,7 +1764,7 @@ class SpacetimeformerModel(nn.Module):
             enc_dec_mask_seq = enc_mask_seq.clone()
         else:
             enc_dec_mask_seq = enc_mask_seq
-        # TODO QUESTION where is the masked output only sequence fed to the decoder, that excludes x_feat and only contains target??
+        
         dec_output, _ = self.decoder(
                 val_time_emb=dec_vt_emb,
                 space_emb=dec_s_emb,
@@ -1765,11 +1772,14 @@ class SpacetimeformerModel(nn.Module):
                 self_mask_seq=dec_mask_seq,
                 cross_mask_seq=enc_dec_mask_seq,
                 output_cross_attn=False,
-        )
-        # TODO QUESTION is there a neater way to do this within embedding that still captures temporal and spatial correlations?
+        ) # [batch, time * (input_size * len(lag_seq) + self._num_features), d_model]
+        # Note rather than a linear project to 1 output dim for each flattened spatio-temporal value, output to number of distr params
         dec_output = torch.transpose(dec_output, 1, 2)
-        dec_output = torch.transpose(nn.Linear(dec_output.shape[-1], self.prediction_length)(dec_output), 1, 2)
-        return self.param_proj(dec_output)
+        dec_output = torch.transpose(self.reshape_layer(dec_output), 1, 2)
+        forecast_out = self.param_proj(dec_output)
+        # forecast_out = rearrange(dec_output, f"batch (d_in length) d_out -> batch length (d_in d_out)", length=self.prediction_length)
+        
+        return forecast_out
 
     @torch.jit.ignore
     def output_loss(
@@ -1819,7 +1829,8 @@ class SpacetimeformerModel(nn.Module):
         # embed context sequence
         enc_vt_emb, enc_s_emb, enc_var_idx, enc_mask_seq = self.enc_embedding(
             y=encoder_inputs[:, :, :self.input_size*len(self.lags_seq)], 
-            x_time=encoder_inputs[:, :, -self.num_feat_dynamic_real:][:, :, :self.num_time_features + 1], 
+            x_time=encoder_inputs[:, :, -self.num_feat_dynamic_real:][:, :, :self.num_time_features], 
+            x_age=encoder_inputs[:, :, -self.num_feat_dynamic_real:][:, :, self.num_time_features:self.num_time_features + 1], 
             x_feat=encoder_inputs[:, :, -self.num_feat_dynamic_real:][:, :, self.num_time_features + 1:],
             x_static=encoder_inputs[:, :, self.input_size*len(self.lags_seq):-self.num_feat_dynamic_real]
         )
@@ -1878,6 +1889,11 @@ class SpacetimeformerModel(nn.Module):
                 subsequences_length=1 + k,
                 shift=1,
             )
+            
+            lagged_sequence = torch.cat([lagged_sequence,
+                              torch.zeros((lagged_sequence.shape[0], 
+                                           self.prediction_length - (k+1), 
+                                           *lagged_sequence.shape[2:]))], axis=1)
 
             # shape [n_continuity_groups*n_parallel_samples, context_length, size of lagged repeated_past_target]
             lags_shape = lagged_sequence.shape
@@ -1893,12 +1909,16 @@ class SpacetimeformerModel(nn.Module):
             # shape [n_continuity_groups*n_parallel_samples, 1, d_model]
             # output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
             # embed target sequence
+            # TODO where does the future masking happen, is it enough to set zeros QUESTION
             rep_feat = repeated_features[:, :k+1, expanded_static_feat.shape[-1]:]
+            rep_feat = torch.cat([rep_feat, 
+                        torch.zeros((rep_feat.shape[0], self.prediction_length - (k + 1), rep_feat.shape[2]))], axis=1)
             dec_vt_emb, dec_s_emb, _, dec_mask_seq = self.dec_embedding(
                 y=reshaped_lagged_sequence, 
-                x_time=rep_feat[:, :, :self.num_time_features + 1], 
+                x_time=rep_feat[:, :, :self.num_time_features],
+                x_age=rep_feat[:, :, self.num_time_features:self.num_time_features + 1],
                 x_feat=rep_feat[:, :, self.num_time_features + 1:],
-                x_static=repeated_features[:, :k+1, :expanded_static_feat.shape[-1]]
+                x_static=repeated_features[:, :, :expanded_static_feat.shape[-1]]
             )
             
             # decode target sequence w/ encoded context
@@ -1911,16 +1931,20 @@ class SpacetimeformerModel(nn.Module):
                 output_cross_attn=False,
             )
             # TODO QUESTION should I be generating all predictions in horizon in one go, rather than with ascestral sampling?
-            # TODO QUESTION is there a neater way to do this within embedding that still captures temporal and spatial correlations?
+             
             dec_output = torch.transpose(dec_output, 1, 2)
-            dec_output = torch.transpose(nn.Linear(dec_output.shape[-1], 1)(dec_output), 1, 2)
+            # TODO QUESTION need to adapt reshape layer for different k, but does it have to be the same as that used in training?
+            # TODO QUESTION KASHIF how to make this adaptable to different prediction horizons, nominally is one shot prediction,
+            #      how to include all time steps for dimension mathcing, while maskign future ones???
+            dec_output = torch.transpose(self.reshape_layer(dec_output), 1, 2)
+            forecast_out = self.param_proj(dec_output[:, -1:])
 
             # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
-            params = self.param_proj(dec_output[:, -1:])
+            
             if output_distr_params:
-                future_params.append(tuple(param[::num_parallel_samples, :, :] for param in params))
+                future_params.append(tuple(param[::num_parallel_samples, :, :] for param in forecast_out))
             distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
-                params, scale=repeated_scale, loc=repeated_loc
+                forecast_out, scale=repeated_scale, loc=repeated_loc
             )
              
             next_sample = distr.sample()
