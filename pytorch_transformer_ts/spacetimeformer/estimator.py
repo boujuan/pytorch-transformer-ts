@@ -127,6 +127,10 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         )
         self.prediction_length = prediction_length
         self.distr_output = distr_output
+        self.target_shape = distr_output.event_shape
+        self.distr_output.args_dim = {k: int(v / input_size) for k, v in self.distr_output.args_dim.items()}
+        self.distr_output.dim = 1
+        
         # self.loss = loss
         self.attn_factor = attn_factor
         self.max_seq_len = max_seq_len
@@ -293,8 +297,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         shuffle_buffer_length: Optional[int] = None,
         **kwargs,
     ) -> Iterable:
-        # TODO why is this needed
-        data = Cyclic(data).stream()
+        # TODO can set number of epochs/steps per epoch in PyTorchLightningEstimator
+        data = Cyclic(data).stream() # continuously samples windows from dataset, bc these windows are sampled w replacement, so total number of windows is large, define epoch as 100 steps, each step samples some number of batches
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
@@ -313,6 +317,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         module: SpacetimeformerLightningModule,
         **kwargs,
     ) -> Iterable:
+        # want val dataloader to end, go over each time series, get last window and calculate likelihood wrt future inputs, deterministic
+        # WARNING: could be large if not limited by training arguments
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
         )
@@ -400,6 +406,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             recon_mask_drop_full=self.recon_mask_drop_full,
             ###########
             input_size=self.input_size,
+            target_shape=self.target_shape,
             distr_output=self.distr_output,
             lags_seq=self.lags_seq,
             scaling=self.scaling,

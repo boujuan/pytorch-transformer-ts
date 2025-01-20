@@ -724,7 +724,10 @@ class InformerModel(nn.Module):
         if output_distr_params:
             future_params = []
 
-        # greedy decoding (,ansectral sampling)
+        # ansectral sampling (sample-based from dist and plug back in) (not greedy - taking maximum likelihood value and plug in)
+        # original was one-shot, w/ zeros/-1 in target inputs, passed into decoder, returned output as prediction, also in training, outputs were point values
+        # this version bc now we have capacity to add other features and condition output based on this
+        # use smaller context len during inference
         for k in range(self.prediction_length):
             # self._check_shapes(repeated_past_target, next_sample, next_features)
             # sequence = torch.cat((repeated_past_target, next_sample), dim=1)

@@ -831,7 +831,8 @@ class AutoformerModel(nn.Module):
         )
         seasonal_init, trend_init = self.decomp(enc_input)
 
-        # decoder input
+        # decoder input, assumes fixed length (hence zeros), when use predictor - reset prediction_length, different training/prediction pred_len of an issue with positiona_encoding
+        # look at linear interpolation time encoding, ROPE
         trend_init = torch.cat([trend_init[:, -self.label_length :, :], mean], dim=1)
         seasonal_init = torch.cat(
             [seasonal_init[:, -self.label_length :, :], zeros], dim=1
@@ -865,7 +866,7 @@ class AutoformerModel(nn.Module):
         # Future samples
         samples = distr.sample()
 
-        # TODO QUESTION KASHIF why no looping over to make predictions?
+        # TODO QUESTION why no looping over to make predictions?
         if output_distr_params:
             return params
             # return params = tuple(param.reshape((-1, 1, self.prediction_length) + self.target_shape) for param in params)
