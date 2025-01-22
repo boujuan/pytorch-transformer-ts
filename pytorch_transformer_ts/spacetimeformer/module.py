@@ -748,11 +748,10 @@ class Embedding(nn.Module):
             self.local_emb = nn.Embedding(
                 num_embeddings=max_seq_len, embedding_dim=d_model
             )
-        # TODO test for lags_seq > 1
         y_emb_inp_dim = d_y if self.method == "temporal" else 1
         # input dim = input_size + time_Feature + age feature + dynamic real features + static_Features
         self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_feat + d_x_static + d_y_lagged, d_model)
-        # TODO am i still getting the spatio temporal correlations for the not y vars like this??
+        
         if self.method == "spatio-temporal":
             # self.space_emb = nn.Embedding(num_embeddings=d_y, embedding_dim=d_model)
             self.space_emb = nn.Embedding(num_embeddings=d_y, embedding_dim=d_model)
@@ -804,11 +803,12 @@ class Embedding(nn.Module):
         # NaNs should probably be set to a magic number value
         # in the dataset and passed to the null_value arg.
         
-        # TODO repeat x_static for each time step in both embedding funcs
-        y = torch.cat((y, x_feat, x_static), dim=-1) # CHANGE
         y = torch.nan_to_num(y)
         x_time = torch.nan_to_num(x_time)
         x_age = torch.nan_to_num(x_age)
+        x_feat = torch.nan_to_num(x_feat)
+        x_static = torch.nan_to_num(x_static)
+        y_lagged = torch.nan_to_num(y_lagged)
 
         if self.is_encoder:
             # optionally mask the context sequence for reconstruction
@@ -831,14 +831,13 @@ class Embedding(nn.Module):
         if not self.use_time:
             x_time = torch.zeros_like(x_time)
             x_age = torch.zeros_like(x_age)
-        # time_emb = self.time_emb(x_time) + self.age_emb(x_age)
-        # TODO just concatenate to time_emb
-        time_emb = torch.cat((self.time_emb(x_time), x_age), dim=-1)
+        
+        x_emb = torch.cat((self.time_emb(x_time), x_age, x_feat, x_static, y_lagged), dim=-1)
 
         if not self.use_val:
             y = torch.zeros_like(y)
 
-        val_time_inp = torch.cat((y, time_emb), dim=-1)
+        val_time_inp = torch.cat((y, x_emb), dim=-1)
         val_time_emb = self.val_time_emb(val_time_inp)
 
         # "given" embedding. not important for temporal emb
@@ -887,20 +886,17 @@ class Embedding(nn.Module):
         x_time = torch.nan_to_num(x_time)
         x_age = torch.nan_to_num(x_age)
         x_static = torch.nan_to_num(x_static)
+        y_lagged = torch.nan_to_num(y_lagged)
         x_time = repeat(x_time, f"batch len x_dim -> batch ({dy} len) x_dim")
         x_age = repeat(x_age, f"batch len x_dim -> batch ({dy} len) x_dim")
         x_feat = repeat(x_feat, f"batch len x_dim -> batch ({dy} len) x_dim")
         x_static = repeat(x_static, f"batch len x_dim -> batch ({dy} len) x_dim")
         y_lagged = repeat(y_lagged, f"batch len x_dim -> batch ({dy} len) x_dim")
-        # time_emb = self.time_emb(x_time) + self.age_emb(x_age)
         
-        # TODO just concatenate to time_emb
         x_emb = torch.cat((self.time_emb(x_time), x_age, x_feat, x_static, y_lagged), dim=-1)
 
         # protect against NaNs in y, but keep track for Given emb
          
-        # TODO HIGH cull output size of decoder
-        # y = torch.cat((y, x_feat, x_static), dim=-1) # CHANGE
         true_null = torch.isnan(y)
         y = torch.nan_to_num(y)
         if not self.use_val:
@@ -1407,7 +1403,9 @@ class SpacetimeformerModel(nn.Module):
 
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
         # make sure zero is first lag
-        del self.lags_seq[self.lags_seq.index(0)]
+        # CHANGE
+        if 0 in self.lags_seq:
+            del self.lags_seq[self.lags_seq.index(0)]
         self.lags_seq.insert(0, 0)
         self.num_parallel_samples = num_parallel_samples
         self.history_length = context_length + max(self.lags_seq)
@@ -1462,7 +1460,7 @@ class SpacetimeformerModel(nn.Module):
             d_x_time=self.num_time_features, # time features excluding age
             d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # subtracdt time features and age
             d_x_static=sum(self.embedding_dimension) + self.num_feat_static_real + self.input_size * 2,
-            d_y_lagged=self.input_size * (len(self.lags_seq) - 1),
+            d_y_lagged=self.input_size * len(self.lags_seq),
             d_model=d_model,
             time_emb_dim=time_emb_dim,
             downsample_convs=initial_downsample_convs,
@@ -1484,7 +1482,7 @@ class SpacetimeformerModel(nn.Module):
             d_x_time=self.num_time_features, # time features excluding age
             d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # subtract time features and age
             d_x_static=sum(self.embedding_dimension) + self.num_feat_static_real + self.input_size * 2,
-            d_y_lagged=self.input_size * (len(self.lags_seq) - 1), 
+            d_y_lagged=self.input_size * len(self.lags_seq), 
             d_model=d_model,
             time_emb_dim=time_emb_dim,
             downsample_convs=initial_downsample_convs,
@@ -1672,6 +1670,7 @@ class SpacetimeformerModel(nn.Module):
         future_time_feat: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
     ):
+        # TODO check that all of past_target is being used, and update inputs to enc_embedding and dec_embedding as necessary
         # time feature
         time_feat = (
             torch.cat(
@@ -1749,7 +1748,6 @@ class SpacetimeformerModel(nn.Module):
         return transformer_inputs, loc, scale, static_feat
 
     def output_params(self, transformer_inputs):
-        
         enc_vt_emb, enc_s_emb, _, enc_mask_seq  \
             = self.enc_embedding(
                 y=transformer_inputs[:, :self.context_length,  :self.input_size], 
@@ -1759,7 +1757,6 @@ class SpacetimeformerModel(nn.Module):
                 x_feat=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:][:, :, self.num_time_features + 1:],
                 x_static=transformer_inputs[:, :self.context_length, self.input_size*len(self.lags_seq):-self.num_feat_dynamic_real]
         )
-        
         
         dec_vt_emb, dec_s_emb, _, dec_mask_seq \
             = self.dec_embedding(
@@ -1849,6 +1846,7 @@ class SpacetimeformerModel(nn.Module):
         # time_feat = encoder_inputs[:, :, -self.num_feat_dynamic_real:] 
 
         # embed context sequence
+        # TODO where is y and y_lagged in transformer inputs, change for every embedding
         enc_vt_emb, enc_s_emb, enc_var_idx, enc_mask_seq = self.enc_embedding(
             y=encoder_inputs[:, :, :self.input_size], 
             y_lagged=encoder_inputs[:, :self.context_length, self.input_size:self.input_size*len(self.lags_seq)],

@@ -1,5 +1,7 @@
 from typing import Any, Dict, Iterable, List, Optional
 
+import polars as pl
+
 import torch
 from gluonts.core.component import validated
 from gluonts.dataset.common import Dataset
@@ -16,6 +18,7 @@ from gluonts.transform import (
     AddObservedValuesIndicator,
     AddTimeFeatures,
     AsNumpyArray,
+    AsLazyFrame,
     Chain,
     ExpectedNumInstanceSampler,
     InstanceSplitter,
@@ -60,7 +63,6 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
         # Spacetimeformer arguments
-        max_seq_len: int = None,
         attn_factor: int = 5,
         start_token_len: int = 0,
         time_emb_dim: int = 6,
@@ -131,9 +133,10 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         self.distr_output.args_dim = {k: int(v / input_size) for k, v in self.distr_output.args_dim.items()}
         self.distr_output.dim = 1
         
+        self.max_seq_len = self.context_length + self.prediction_length
+        
         # self.loss = loss
         self.attn_factor = attn_factor
-        self.max_seq_len = max_seq_len
         self.start_token_len = start_token_len
         self.time_emb_dim = time_emb_dim
         self.num_encoder_layers = num_encoder_layers
@@ -203,7 +206,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             min_future=prediction_length
         )
 
-    def create_transformation(self) -> Transformation:
+    def create_transformation(self, use_lazyframe=True) -> Transformation:
         remove_field_names = []
         if self.num_feat_static_real == 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)
@@ -232,14 +235,33 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
                     field=FieldName.FEAT_STATIC_REAL,
                     expected_ndim=1,
                 ),
-                AsNumpyArray(
+                # AsNumpyArray(
+                #     field=FieldName.TARGET,
+                #     # in the following line, we add 1 for the time dimension
+                #     expected_ndim=1 + len(self.distr_output.event_shape),
+                # ),
+                # AsLazyFrame(
+                #     field=FieldName.FEAT_STATIC_CAT,
+                #     expected_ndim=1,
+                #     dtype=pl.Int
+                # ),
+                # AsLazyFrame(
+                #     field=FieldName.FEAT_STATIC_REAL,
+                #     expected_ndim=1
+                # ),
+                AsLazyFrame(
                     field=FieldName.TARGET,
-                    # in the following line, we add 1 for the time dimension
+                    expected_ndim=1 + len(self.distr_output.event_shape)
+                ) if use_lazyframe else AsNumpyArray(
+                    field=FieldName.TARGET,
+                    # in the following line, we add 1 for the time dimension 
                     expected_ndim=1 + len(self.distr_output.event_shape),
+                    # expected_ndim=1 + 1 + len(self.distr_output.event_shape),
                 ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
                     output_field=FieldName.OBSERVED_VALUES,
+                    dtype=pl.Float32 if use_lazyframe else np.float32
                 ),
                 AddTimeFeatures(
                     start_field=FieldName.START,

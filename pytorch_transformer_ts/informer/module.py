@@ -397,6 +397,11 @@ class InformerModel(nn.Module):
             else [min(50, (cat + 1) // 2) for cat in cardinality]
         )
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
+        # make sure zero is first lag
+        # CHANGE
+        if 0 in self.lags_seq:
+            del self.lags_seq[self.lags_seq.index(0)]
+        self.lags_seq.insert(0, 0)
         self.num_parallel_samples = num_parallel_samples
         self.history_length = context_length + max(self.lags_seq)
         self.embedder = FeatureEmbedder(
@@ -629,6 +634,7 @@ class InformerModel(nn.Module):
         # self._check_shapes(prior_input, inputs, features)
 
         # sequence = torch.cat((prior_input, inputs), dim=1)
+        # TODO QUESTION KASHIF - this neglects the last element of inputs i.e inputs[:, -1, :]
         lagged_sequence = self.get_lagged_subsequences(
             sequence=inputs,
             subsequences_length=subsequences_length,

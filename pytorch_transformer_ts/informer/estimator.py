@@ -1,5 +1,8 @@
 from typing import Any, Dict, Iterable, List, Optional
 
+import polars as pl
+import numpy as np
+
 import torch
 from gluonts.core.component import validated
 from gluonts.dataset.common import Dataset
@@ -16,6 +19,7 @@ from gluonts.transform import (
     AddObservedValuesIndicator,
     AddTimeFeatures,
     AsNumpyArray,
+    AsLazyFrame,
     Chain,
     ExpectedNumInstanceSampler,
     InstanceSplitter,
@@ -128,21 +132,22 @@ class InformerEstimator(PyTorchLightningEstimator):
         self.num_parallel_samples = num_parallel_samples
         self.batch_size = batch_size
         self.num_batches_per_epoch = num_batches_per_epoch
-
+        
+        # TODO if idx = 0 is returned from sampler then full entry[ts_field] is returned (from slice [...,:idx])
         self.train_sampler = train_sampler or ExpectedNumInstanceSampler(
-            num_instances=1.0, min_future=prediction_length
+            num_instances=1.0, min_future=prediction_length,
         )
         self.validation_sampler = validation_sampler or ValidationSplitSampler(
-            min_future=prediction_length
+            min_future=prediction_length,
         )
 
-    def create_transformation(self) -> Transformation:
+    def create_transformation(self, use_lazyframe=True) -> Transformation:
         remove_field_names = []
         if self.num_feat_static_real == 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)
         if self.num_feat_dynamic_real == 0:
             remove_field_names.append(FieldName.FEAT_DYNAMIC_REAL)
-
+        
         return Chain(
             [RemoveFields(field_names=remove_field_names)]
             + (
@@ -165,19 +170,24 @@ class InformerEstimator(PyTorchLightningEstimator):
                     field=FieldName.FEAT_STATIC_REAL,
                     expected_ndim=1,
                 ),
-                AsNumpyArray(
+                
+                # AsLazyFrame(
+                #     field=FieldName.FEAT_STATIC_REAL,
+                #     expected_ndim=1
+                # ),
+                AsLazyFrame(
+                    field=FieldName.TARGET,
+                    expected_ndim=1 + len(self.distr_output.event_shape)
+                ) if use_lazyframe else AsNumpyArray(
                     field=FieldName.TARGET,
                     # in the following line, we add 1 for the time dimension 
                     expected_ndim=1 + len(self.distr_output.event_shape),
                     # expected_ndim=1 + 1 + len(self.distr_output.event_shape),
                 ),
-                # ExpandDimArray( # CHANGE
-                #     field=FieldName.TARGET,
-                #     axis=0 if self.distr_output.event_shape[0] == 1 else None,
-                # ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
                     output_field=FieldName.OBSERVED_VALUES,
+                    dtype=pl.Float32 if use_lazyframe else np.float32
                 ),
                 AddTimeFeatures(
                     start_field=FieldName.START,
@@ -185,6 +195,7 @@ class InformerEstimator(PyTorchLightningEstimator):
                     output_field=FieldName.FEAT_TIME,
                     time_features=self.time_features,
                     pred_length=self.prediction_length,
+                    # dtype=pl.Float32
                 ),
                 AddAgeFeature(
                     target_field=FieldName.TARGET,
@@ -273,7 +284,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         **kwargs # CHANGE
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
-
+        
         return PyTorchPredictor(
             input_transform=transformation + prediction_splitter,
             input_names=PREDICTION_INPUT_NAMES,

@@ -490,6 +490,11 @@ class AutoformerModel(nn.Module):
             else [min(50, (cat + 1) // 2) for cat in cardinality]
         )
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
+        # make sure zero is first lag
+        # CHANGE
+        if 0 in self.lags_seq:
+            del self.lags_seq[self.lags_seq.index(0)]
+        self.lags_seq.insert(0, 0)
         self.num_parallel_samples = num_parallel_samples
         self.history_length = context_length + max(self.lags_seq)
         self.embedder = FeatureEmbedder(
