@@ -43,6 +43,13 @@ class TACTiSModel(nn.Module):
         else:
             self.scaler = NOPScaler(keepdim=True)
 
+        if num_feat_static_cat > 0:
+            self.static_feat_embedding = nn.Embedding(
+                num_embeddings=sum(cardinality), embedding_dim=embedding_dimension[0] if embedding_dimension else 32
+            )
+        else:
+            self.static_feat_embedding = None
+
         self.tactis = TACTiS(
             num_series=num_series,
             flow_series_embedding_dim=embedding_dimension,
@@ -99,16 +106,31 @@ class TACTiSModel(nn.Module):
         future_target: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         past_target_scaled, loc, scale = self.scaler(past_target, past_observed_values)
-        
-        # Concatenate past and future time features
-        time_feat = torch.cat((past_time_feat, future_time_feat), dim=1)
 
+        # 1. Define hist_time, hist_value, pred_time, pred_value
+        hist_time = past_time_feat.permute(0, 2, 1)  # Assuming (batch, time, feat) -> (batch, series, time)
+        hist_value = past_target_scaled.unsqueeze(1) # Assuming shape (batch, time) -> (batch, series=1, time)
+        pred_time = future_time_feat.permute(0, 2, 1)  # (batch, time, feat) -> (batch, series, time)
+
+        if future_target is not None:
+            future_target_scaled, _, _ = self.scaler(future_target, torch.ones_like(future_target))
+            pred_value = future_target_scaled.unsqueeze(1)  # (batch, time) -> (batch, series=1, time)
+        else:
+            pred_value = None
+
+        # 2. Handle static features (if needed)
+        # Example: Embed and concatenate to hist_value
+        if self.num_feat_static_cat > 0:
+            static_feat_emb = self.static_feat_embedding(past_static_feat) # Assuming you add an embedding layer
+            static_feat_emb = static_feat_emb.unsqueeze(2).expand(-1, -1, hist_value.shape[2]) # Expand to match time dimension
+            hist_value = torch.cat([hist_value, static_feat_emb], dim=1) # Concatenate along series dimension
+
+        # 3. Call tactis.forward with the correct arguments
         nn_out = self.tactis(
-            past_target_scaled,
-            past_time_feat,
-            past_static_feat,
-            future_time_feat,
-            past_observed_values,
+            hist_time,
+            hist_value,
+            pred_time,
+            pred_value
         )
 
         # Slice output to obtain only the prediction length

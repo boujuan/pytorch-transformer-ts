@@ -58,21 +58,21 @@ def create_transformation(
         time_features: Optional[List[TimeFeature]] = None,
     ) -> Transformation:
         remove_field_names = []
-        if num_feat_static_real == 0:
+        if num_feat_static_real <= 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)
-        if num_feat_dynamic_real == 0:
+        if num_feat_dynamic_real <= 0:
             remove_field_names.append(FieldName.FEAT_DYNAMIC_REAL)
 
         return Chain(
             [RemoveFields(field_names=remove_field_names)]
             + (
-                [SetField(output_field=FieldName.FEAT_STATIC_CAT, value=[0])]
-                if not num_feat_static_cat > 0
+                [SetField(output_field=FieldName.FEAT_STATIC_CAT, value=[0] * num_feat_static_cat)]
+                if num_feat_static_cat > 0
                 else []
             )
             + (
-                [SetField(output_field=FieldName.FEAT_STATIC_REAL, value=[0.0])]
-                if not num_feat_static_real > 0
+                [SetField(output_field=FieldName.FEAT_STATIC_REAL, value=[0.0] * num_feat_static_real)]
+                if num_feat_static_real > 0
                 else []
             )
             + [
