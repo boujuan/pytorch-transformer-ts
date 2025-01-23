@@ -62,7 +62,14 @@ class InformerLightningModule(pl.LightningModule):
         future_target = batch["future_target"]
         past_observed_values = batch["past_observed_values"]
         future_observed_values = batch["future_observed_values"]
-
+        
+        # TODO
+        for k, v in batch.items():
+            if v.is_cuda:
+                print(f"batch['{k}'] is on gpu")
+            else:
+                print(f"batch['{k}'] is NOT on gpu")
+        
         transformer_inputs, loc, scale, _ = self.model.create_network_inputs(
             feat_static_cat,
             feat_static_real,
