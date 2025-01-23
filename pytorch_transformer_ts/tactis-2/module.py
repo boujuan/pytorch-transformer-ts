@@ -3,6 +3,7 @@ import torch.nn as nn
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
 from gluonts.core.component import validated
+from typing import List, Optional
 
 # Import TACTiS from the new tactis.py file
 from .tactis import TACTiS
@@ -20,14 +21,19 @@ class TACTiSModel(nn.Module):
         num_feat_static_cat: int,
         cardinality: List[int],
         # TACTiS arguments
-        num_series: int,
+        num_series: int, # Redundant, already inferred from cardinality ideally, but kept for compatibility
+        flow_series_embedding_dim: int,
+        copula_series_embedding_dim: int,
+        flow_input_encoder_layers: int,
+        copula_input_encoder_layers: int,
         num_layers_encoder: int,
-        num_layers_decoder: int,
+        num_decoder_layers: int,
         num_parallel_samples: int = 100,
-        embedding_dimension: Optional[List[int]] = None,
+        embedding_dimension: Optional[List[int]] = None, # Redundant, embedding dims should be infered from model_params
         scaling: Optional[str] = "mean",
         distr_output: DistributionOutput = StudentTOutput(),
-        lags_seq: Optional[List[int]] = None,
+        lags_seq: Optional[List[int]] = None, # Not used in TACTIS directly, remove if not needed
+        model_parameters: Optional[Dict[str, Any]] = None, # To pass model params as dict for clarity
         **kwargs,
     ) -> None:
         super().__init__()
@@ -36,6 +42,7 @@ class TACTiSModel(nn.Module):
         self.distr_output = distr_output
         self.target_shape = distr_output.event_shape
         self.num_parallel_samples = num_parallel_samples
+        
         if scaling == "mean":
             self.scaler = MeanScaler(keepdim=True)
         elif scaling == "std":
@@ -50,51 +57,53 @@ class TACTiSModel(nn.Module):
         else:
             self.static_feat_embedding = None
 
-        self.tactis = TACTiS(
-            num_series=num_series,
-            flow_series_embedding_dim=embedding_dimension,
-            copula_series_embedding_dim=embedding_dimension,
-            flow_input_encoder_layers=num_layers_encoder,
-            copula_input_encoder_layers=num_layers_encoder,
-            bagging_size=None,
-            input_encoding_normalization=True,
-            data_normalization="standardization",
-            loss_normalization="series",
-            positional_encoding={
+        # Use model_parameters dict directly, fallback to individual params if not provided
+        tactis_params = model_parameters if model_parameters else {
+            "num_series": num_series,
+            "flow_series_embedding_dim": flow_series_embedding_dim,
+            "copula_series_embedding_dim": copula_series_embedding_dim,
+            "flow_input_encoder_layers": flow_input_encoder_layers,
+            "copula_input_encoder_layers": copula_input_encoder_layers,
+            "input_encoding_normalization": True,
+            "data_normalization": "standardization",
+            "loss_normalization": "series",
+            "bagging_size": None, # Or get from config if needed
+            "positional_encoding":{
                 "embedding_dim": 32,
-                "max_len": 2048,
             },
-            flow_encoder={
-                "embedding_dim": 32,
-                "num_heads": 4,
-                "num_layers": num_layers_encoder,
-                "dropout": 0.1,
+            "flow_encoder":{
+                "attention_layers": num_layers_encoder,
+                "attention_heads": 4,
+                "attention_dim": 32,
+                "attention_feedforward_dim": 32,
             },
-            copula_encoder={
-                "embedding_dim": 32,
-                "num_heads": 4,
-                "num_layers": num_layers_encoder,
-                "dropout": 0.1,
+            "copula_encoder":{
+                "attention_layers": num_layers_encoder,
+                "attention_heads": 4,
+                "attention_dim": 32,
+                "attention_feedforward_dim": 32,
             },
-            flow_temporal_encoder=None,
-            copula_temporal_encoder=None,
-            copula_decoder={
-                "marginal_dist_type": "piecewise_linear",
-                "marginal_dist_args": {
-                    "num_pieces": 32,
-                },
+            "copula_decoder":{
                 "attentional_copula": {
                     "input_dim": 32,
-                    "num_heads": 4,
-                    "num_layers": num_layers_decoder,
-                    "dropout": 0.1,
+                    "attention_heads": 4,
+                    "attention_layers": num_layers_decoder,
+                    "mlp_layers": 2,
+                    "mlp_dim": 32,
+                    "resolution": 50,
+                    "activation_function": "relu"
                 },
-                "copula_type": "gaussian",
-                "copula_args": {},
+                "dsf_marginal": {
+                    "mlp_layers": 2,
+                    "mlp_dim": 32,
+                    "flow_layers": 4,
+                    "flow_hid_dim": 32,
+                },
             },
-            skip_copula=False,
-            experiment_mode="forecasting",
-        )
+            "skip_copula": False, # Or get from config
+            "experiment_mode": "forecasting", # Or get from config
+        }
+        self.tactis = TACTiS(**tactis_params)
 
     def forward(
         self,
