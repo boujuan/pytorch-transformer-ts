@@ -24,7 +24,6 @@ from gluonts.transform import (
     Transformation,
     ValidationSplitSampler,
     VstackFeatures,
-    ExpandDimArray
 )
 from gluonts.transform.sampler import InstanceSampler
 
