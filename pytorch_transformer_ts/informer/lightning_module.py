@@ -1,23 +1,23 @@
 import pytorch_lightning as pl
 import torch
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
 
-from module import InformerModel
-
+# CHANGE
+from pytorch_transformer_ts.informer.module import InformerModel
 
 class InformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: InformerModel,
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        model: dict,
+        # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = model
-        self.loss = loss
+        self.model = InformerModel(**model)
+        # self.loss = loss CHANGE
         self.lr = lr
         self.weight_decay = weight_decay
 
@@ -30,6 +30,7 @@ class InformerLightningModule(pl.LightningModule):
             on_epoch=True,
             on_step=False,
             prog_bar=True,
+            sync_dist=True # CHANGE
         )
         return train_loss
 
@@ -37,7 +38,12 @@ class InformerLightningModule(pl.LightningModule):
         """Execute validation step"""
         with torch.inference_mode():
             val_loss = self(batch)
-        self.log("val_loss", val_loss, on_epoch=True, on_step=False, prog_bar=True)
+        self.log(
+            "val_loss", 
+            val_loss,
+            on_epoch=True,
+            on_step=True, # CHANGE 
+            prog_bar=True)
         return val_loss
 
     def configure_optimizers(self):
@@ -47,7 +53,7 @@ class InformerLightningModule(pl.LightningModule):
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
-
+    # for training
     def forward(self, batch):
         feat_static_cat = batch["feat_static_cat"]
         feat_static_real = batch["feat_static_real"]
@@ -57,7 +63,7 @@ class InformerLightningModule(pl.LightningModule):
         future_target = batch["future_target"]
         past_observed_values = batch["past_observed_values"]
         future_observed_values = batch["future_observed_values"]
-
+        
         transformer_inputs, loc, scale, _ = self.model.create_network_inputs(
             feat_static_cat,
             feat_static_real,
@@ -67,10 +73,12 @@ class InformerLightningModule(pl.LightningModule):
             future_time_feat,
             future_target,
         )
-        params = self.model.output_params(transformer_inputs)
-        distr = self.model.output_distribution(params, loc=loc, scale=scale)
 
-        loss_values = self.loss(distr, future_target)
+        params = self.model.output_params(transformer_inputs)
+        # distr = self.model.output_distribution(params, loc=loc, scale=scale)
+        
+        # loss_values = self.loss(distr, future_target) CHANGE
+        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale)
 
         if len(self.model.target_shape) == 0:
             loss_weights = future_observed_values

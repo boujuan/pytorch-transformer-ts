@@ -1,23 +1,23 @@
 import pytorch_lightning as pl
 import torch
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
 
-from module import AutoformerModel
+from pytorch_transformer_ts.autoformer.module import AutoformerModel
 
 
 class AutoformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: AutoformerModel,
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        model: dict,
+        # loss: DistributionLoss = NegativeLogLikelihood(),
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        self.model = model
-        self.loss = loss
+        self.model = AutoformerModel(**model)
+        # self.loss = loss
         self.lr = lr
         self.weight_decay = weight_decay
 
@@ -30,6 +30,7 @@ class AutoformerLightningModule(pl.LightningModule):
             on_epoch=True,
             on_step=False,
             prog_bar=True,
+            sync_dist=True
         )
         return train_loss
 
@@ -74,9 +75,9 @@ class AutoformerLightningModule(pl.LightningModule):
             future_target,
         )
         params = self.model.output_params(autoformer_inputs, dynamic_features)
-        distr = self.model.output_distribution(params, loc=loc, scale=scale)
+        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale)
 
-        loss_values = self.loss(distr, future_target)
+        # loss_values = self.loss(distr, future_target)
 
         if len(self.model.target_shape) == 0:
             loss_weights = future_observed_values

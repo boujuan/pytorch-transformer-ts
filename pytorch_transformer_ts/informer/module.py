@@ -1,6 +1,6 @@
 from math import sqrt
 from typing import List, Optional
-
+from collections import defaultdict
 import numpy as np
 import torch
 import torch.nn as nn
@@ -182,7 +182,13 @@ class ProbAttention(nn.Module):
 
 class AttentionLayer(nn.Module):
     def __init__(
-        self, attention, d_model, n_heads, d_keys=None, d_values=None, mix=False
+        self, 
+        attention, 
+        d_model, 
+        n_heads, 
+        d_keys=None, 
+        d_values=None, 
+        mix=False
     ):
         super(AttentionLayer, self).__init__()
 
@@ -347,7 +353,6 @@ class Decoder(nn.Module):
 
         return x
 
-
 class InformerModel(nn.Module):
     @validated()
     def __init__(
@@ -361,7 +366,7 @@ class InformerModel(nn.Module):
         cardinality: List[int],
         # Informer arguments
         d_model: int,
-        nhead: int,
+        n_heads: int,
         num_encoder_layers: int,
         num_decoder_layers: int,
         dim_feedforward: int,
@@ -392,6 +397,11 @@ class InformerModel(nn.Module):
             else [min(50, (cat + 1) // 2) for cat in cardinality]
         )
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
+        # make sure zero is first lag
+        # CHANGE
+        if 0 in self.lags_seq:
+            del self.lags_seq[self.lags_seq.index(0)]
+        self.lags_seq.insert(0, 0)
         self.num_parallel_samples = num_parallel_samples
         self.history_length = context_length + max(self.lags_seq)
         self.embedder = FeatureEmbedder(
@@ -405,7 +415,15 @@ class InformerModel(nn.Module):
         else:
             self.scaler = NOPScaler(keepdim=True, dim=1)
 
-        # total feature size
+        # total feature size, this takes encoder input and decoder input 
+        # lags are values of same vector pasted in, making input vector larger. with lags, 
+        # can take past values and add it to vector even with small context size,
+        # but given frequency of time series, lags depend on this, 
+        # totals input feature size, for each time point will have vector of this size, with more lagged features need smaller context window
+        # input = targets for each element in lags_seq 
+        # + dynamic/static real features 
+        # + embedded cardinal features
+        # + loc and scale for each target
         self.embed = nn.Linear(
             self.input_size * len(self.lags_seq) + self._number_of_features, d_model
         )
@@ -429,7 +447,7 @@ class InformerModel(nn.Module):
                             output_attention=False,
                         ),
                         d_model,
-                        nhead,
+                        n_heads,
                         mix=False,
                     ),
                     d_model,
@@ -457,7 +475,7 @@ class InformerModel(nn.Module):
                             output_attention=False,
                         ),
                         d_model,
-                        nhead,
+                        n_heads,
                         mix=True,
                     ),
                     AttentionLayer(
@@ -468,7 +486,7 @@ class InformerModel(nn.Module):
                             output_attention=False,
                         ),
                         d_model,
-                        nhead,
+                        n_heads,
                         mix=False,
                     ),
                     d_model,
@@ -487,7 +505,7 @@ class InformerModel(nn.Module):
             sum(self.embedding_dimension)
             + self.num_feat_dynamic_real
             + self.num_feat_static_real
-            + self.input_size * 2  # the log(scale) and log(abs(loc)) features
+            + self.input_size * 2  # the log(scale) and log(abs(loc)) features 
         )
 
     @property
@@ -525,6 +543,7 @@ class InformerModel(nn.Module):
 
         lagged_values = []
         for lag_index in indices:
+            lag_index = max(0, lag_index) # CHANGE
             begin_index = -lag_index - subsequences_length
             end_index = -lag_index if lag_index > 0 else None
             lagged_values.append(sequence[:, begin_index:end_index, ...])
@@ -615,6 +634,7 @@ class InformerModel(nn.Module):
         # self._check_shapes(prior_input, inputs, features)
 
         # sequence = torch.cat((prior_input, inputs), dim=1)
+        # TODO QUESTION KASHIF - this neglects the last element of inputs i.e inputs[:, -1, :]
         lagged_sequence = self.get_lagged_subsequences(
             sequence=inputs,
             subsequences_length=subsequences_length,
@@ -635,12 +655,22 @@ class InformerModel(nn.Module):
         dec_input = projected_inputs[:, self.context_length :, ...]
 
         enc_out, _ = self.encoder(enc_input)
-        dec_output = self.decoder(dec_input, enc_out)
+        dec_output = self.decoder(dec_input, enc_out) # [batch, pred_length, d_model]
 
-        return self.param_proj(dec_output)
+        return self.param_proj(dec_output) # this is the head after the decoder
+
+    @torch.jit.ignore
+    def output_loss(
+        self, params, future_target, loc=None, scale=None, trailing_n=None
+    ) -> torch.distributions.Distribution:
+        sliced_params = params
+        if trailing_n is not None:
+            sliced_params = [p[:, -trailing_n:] for p in params]
+        return self.distr_output.loss(target=future_target, distr_args=sliced_params, loc=loc, scale=scale)
 
     @torch.jit.ignore
     def output_distribution(
+        # self, params, scale=None, trailing_n=None
         self, params, loc=None, scale=None, trailing_n=None
     ) -> torch.distributions.Distribution:
         sliced_params = params
@@ -648,7 +678,7 @@ class InformerModel(nn.Module):
             sliced_params = [p[:, -trailing_n:] for p in params]
         return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
 
-    # for prediction
+    # for prediction 
     def forward(
         self,
         feat_static_cat: torch.Tensor,
@@ -658,7 +688,9 @@ class InformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
-    ) -> torch.Tensor:
+        output_distr_params: Optional[bool] = False 
+    ) -> torch.Tensor: # CHANGE THROUGHTOUT THIS FUNC
+
         if num_parallel_samples is None:
             num_parallel_samples = self.num_parallel_samples
 
@@ -672,13 +704,13 @@ class InformerModel(nn.Module):
 
         enc_out, _ = self.encoder(self.embed(encoder_inputs))
 
-        repeated_loc = loc.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
+        repeated_loc = loc.repeat_interleave(repeats=num_parallel_samples, dim=0)
         repeated_scale = scale.repeat_interleave(
-            repeats=self.num_parallel_samples, dim=0
+            repeats=num_parallel_samples, dim=0
         )
 
         repeated_past_target = (
-            past_target.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
+            past_target.repeat_interleave(repeats=num_parallel_samples, dim=0)
             - repeated_loc
         ) / repeated_scale
 
@@ -687,50 +719,67 @@ class InformerModel(nn.Module):
         )
         features = torch.cat((expanded_static_feat, future_time_feat), dim=-1)
         repeated_features = features.repeat_interleave(
-            repeats=self.num_parallel_samples, dim=0
+            repeats=num_parallel_samples, dim=0
         )
 
         repeated_enc_out = enc_out.repeat_interleave(
-            repeats=self.num_parallel_samples, dim=0
+            repeats=num_parallel_samples, dim=0
         )
 
         future_samples = []
+        if output_distr_params:
+            future_params = []
 
-        # greedy decoding
+        # ansectral sampling (sample-based from dist and plug back in) (not greedy - taking maximum likelihood value and plug in)
+        # original was one-shot, w/ zeros/-1 in target inputs, passed into decoder, returned output as prediction, also in training, outputs were point values
+        # this version bc now we have capacity to add other features and condition output based on this
+        # use smaller context len during inference
         for k in range(self.prediction_length):
             # self._check_shapes(repeated_past_target, next_sample, next_features)
             # sequence = torch.cat((repeated_past_target, next_sample), dim=1)
-
+            
             lagged_sequence = self.get_lagged_subsequences(
                 sequence=repeated_past_target,
                 subsequences_length=1 + k,
                 shift=1,
             )
 
+            # shape [n_continuity_groups*n_parallel_samples, context_length, size of lagged repeated_past_target]
             lags_shape = lagged_sequence.shape
+
+            # shape [n_continuity_groups*n_parallel_samples, context_length * size of lagged repeated_past_target]
             reshaped_lagged_sequence = lagged_sequence.reshape(
                 lags_shape[0], lags_shape[1], -1
             )
-
+            # shape [n_continuity_groups*n_parallel_samples, 1, total input size]
             decoder_input = torch.cat(
                 (reshaped_lagged_sequence, repeated_features[:, : k + 1]), dim=-1
             )
+            # shape [n_continuity_groups*n_parallel_samples, 1, d_model]
+            output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
 
-            output = self.decoder(self.embed(decoder_input), repeated_enc_out)
-
+            # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
             params = self.param_proj(output[:, -1:])
-            distr = self.output_distribution(
+            if output_distr_params:
+                future_params.append(tuple(param[::num_parallel_samples, :, :] for param in params))
+            distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
                 params, scale=repeated_scale, loc=repeated_loc
             )
+             
             next_sample = distr.sample()
-
             repeated_past_target = torch.cat(
                 (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
                 dim=1,
             )
             future_samples.append(next_sample)
-
-        concat_future_samples = torch.cat(future_samples, dim=1)
-        return concat_future_samples.reshape(
-            (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,
-        )
+            
+        # from gluonts.model.forecast_generator import _unpack
+        if output_distr_params:
+            param_keys = list(distr.base_dist.arg_constraints.keys())
+            concat_future_params = tuple(torch.cat([params[p] for params in future_params], dim=1) for p in range(len(param_keys)))
+            return concat_future_params
+        else:
+            concat_future_samples = torch.cat(future_samples, dim=1)
+            return concat_future_samples.reshape(
+                (-1, num_parallel_samples, self.prediction_length) + self.target_shape,
+            )

@@ -490,6 +490,11 @@ class AutoformerModel(nn.Module):
             else [min(50, (cat + 1) // 2) for cat in cardinality]
         )
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
+        # make sure zero is first lag
+        # CHANGE
+        if 0 in self.lags_seq:
+            del self.lags_seq[self.lags_seq.index(0)]
+        self.lags_seq.insert(0, 0)
         self.num_parallel_samples = num_parallel_samples
         self.history_length = context_length + max(self.lags_seq)
         self.embedder = FeatureEmbedder(
@@ -627,6 +632,7 @@ class AutoformerModel(nn.Module):
 
         lagged_values = []
         for lag_index in indices:
+            lag_index = max(0, lag_index) # CHANGE
             begin_index = -lag_index - subsequences_length
             end_index = -lag_index if lag_index > 0 else None
             lagged_values.append(sequence[:, begin_index:end_index, ...])
@@ -769,6 +775,15 @@ class AutoformerModel(nn.Module):
         return self.param_proj(dec_out[:, -self.prediction_length :, :])
 
     @torch.jit.ignore
+    def output_loss(
+        self, params, future_target, loc=None, scale=None, trailing_n=None
+    ) -> torch.distributions.Distribution:
+        sliced_params = params
+        if trailing_n is not None:
+            sliced_params = [p[:, -trailing_n:] for p in params]
+        return self.distr_output.loss(target=future_target, distr_args=sliced_params, loc=loc, scale=scale)
+
+    @torch.jit.ignore
     def output_distribution(
         self, params, loc=None, scale=None, trailing_n=None
     ) -> torch.distributions.Distribution:
@@ -787,6 +802,7 @@ class AutoformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
+        output_distr_params: Optional[bool] = False 
     ) -> torch.Tensor:
         if num_parallel_samples is None:
             num_parallel_samples = self.num_parallel_samples
@@ -820,7 +836,8 @@ class AutoformerModel(nn.Module):
         )
         seasonal_init, trend_init = self.decomp(enc_input)
 
-        # decoder input
+        # decoder input, assumes fixed length (hence zeros), when use predictor - reset prediction_length, different training/prediction pred_len of an issue with positiona_encoding
+        # look at linear interpolation time encoding, ROPE
         trend_init = torch.cat([trend_init[:, -self.label_length :, :], mean], dim=1)
         seasonal_init = torch.cat(
             [seasonal_init[:, -self.label_length :, :], zeros], dim=1
@@ -854,6 +871,11 @@ class AutoformerModel(nn.Module):
         # Future samples
         samples = distr.sample()
 
-        return samples.reshape(
-            (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,
-        )
+        # TODO QUESTION why no looping over to make predictions?
+        if output_distr_params:
+            return params
+            # return params = tuple(param.reshape((-1, 1, self.prediction_length) + self.target_shape) for param in params)
+        else:
+            return samples.reshape(
+                (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,
+            )

@@ -1,5 +1,7 @@
 from typing import Any, Dict, Iterable, List, Optional
 
+import polars as pl
+
 import torch
 from gluonts.core.component import validated
 from gluonts.dataset.common import Dataset
@@ -10,12 +12,13 @@ from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.transform import (
     AddAgeFeature,
     AddObservedValuesIndicator,
     AddTimeFeatures,
     AsNumpyArray,
+    AsLazyFrame,
     Chain,
     ExpectedNumInstanceSampler,
     InstanceSplitter,
@@ -28,8 +31,8 @@ from gluonts.transform import (
 )
 from gluonts.transform.sampler import InstanceSampler
 
-from lightning_module import AutoformerLightningModule
-from module import AutoformerModel
+from pytorch_transformer_ts.autoformer.lightning_module import AutoformerLightningModule
+from pytorch_transformer_ts.autoformer.module import AutoformerModel
 
 PREDICTION_INPUT_NAMES = [
     "feat_static_cat",
@@ -69,7 +72,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        # loss: DistributionLoss = NegativeLogLikelihood(),
         scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
@@ -92,7 +95,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         )
         self.prediction_length = prediction_length
         self.distr_output = distr_output
-        self.loss = loss
+        # self.loss = loss
 
         self.input_size = input_size
         self.n_heads = n_heads
@@ -130,7 +133,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             min_future=prediction_length
         )
 
-    def create_transformation(self) -> Transformation:
+    def create_transformation(self, use_lazyframe=True) -> Transformation:
         remove_field_names = []
         if self.num_feat_static_real == 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)
@@ -159,14 +162,33 @@ class AutoformerEstimator(PyTorchLightningEstimator):
                     field=FieldName.FEAT_STATIC_REAL,
                     expected_ndim=1,
                 ),
-                AsNumpyArray(
+                # AsNumpyArray(
+                #     field=FieldName.TARGET,
+                #     # in the following line, we add 1 for the time dimension
+                #     expected_ndim=1 + len(self.distr_output.event_shape),
+                # ),
+                # AsLazyFrame(
+                #     field=FieldName.FEAT_STATIC_CAT,
+                #     expected_ndim=1,
+                #     dtype=pl.Int
+                # ),
+                # AsLazyFrame(
+                #     field=FieldName.FEAT_STATIC_REAL,
+                #     expected_ndim=1
+                # ),
+                AsLazyFrame(
                     field=FieldName.TARGET,
-                    # in the following line, we add 1 for the time dimension
+                    expected_ndim=1 + len(self.distr_output.event_shape)
+                ) if use_lazyframe else AsNumpyArray(
+                    field=FieldName.TARGET,
+                    # in the following line, we add 1 for the time dimension 
                     expected_ndim=1 + len(self.distr_output.event_shape),
+                    # expected_ndim=1 + 1 + len(self.distr_output.event_shape),
                 ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
                     output_field=FieldName.OBSERVED_VALUES,
+                    dtype=pl.Float32 if use_lazyframe else np.float32
                 ),
                 AddTimeFeatures(
                     start_field=FieldName.START,
@@ -243,6 +265,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         module: AutoformerLightningModule,
         **kwargs,
     ) -> Iterable:
+        # data = Cyclic(data).stream()
         instances = self._create_instance_splitter(module, "validation").apply(
             data, is_train=True
         )
@@ -251,12 +274,14 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             field_names=TRAINING_INPUT_NAMES,
             output_type=torch.tensor,
+            # num_batches_per_epoch=self.num_batches_per_epoch, #CHANGE
         )
 
     def create_predictor(
         self,
         transformation: Transformation,
         module: AutoformerLightningModule,
+        **kwargs
     ) -> PyTorchPredictor:
         prediction_splitter = self._create_instance_splitter(module, "test")
 
@@ -267,10 +292,11 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
+            **kwargs
         )
 
     def create_lightning_module(self) -> AutoformerLightningModule:
-        model = AutoformerModel(
+        model_params = dict(
             freq=self.freq,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
@@ -298,4 +324,5 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             num_parallel_samples=self.num_parallel_samples,
         )
 
-        return AutoformerLightningModule(model=model, loss=self.loss)
+        # return AutoformerLightningModule(model=model, loss=self.loss)
+        return AutoformerLightningModule(model=model_params)
