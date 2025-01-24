@@ -43,7 +43,8 @@ class InformerLightningModule(pl.LightningModule):
             val_loss,
             on_epoch=True,
             on_step=True, # CHANGE 
-            prog_bar=True)
+            prog_bar=True,
+            sync_dist=True)
         return val_loss
 
     def configure_optimizers(self):

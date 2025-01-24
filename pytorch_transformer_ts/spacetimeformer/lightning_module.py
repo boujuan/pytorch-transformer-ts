@@ -40,10 +40,12 @@ class SpacetimeformerLightningModule(pl.LightningModule):
         with torch.inference_mode():
             val_loss = self(batch)
         self.log(
-            "val_loss", val_loss, 
+            "val_loss", 
+            val_loss, 
                 on_epoch=True, 
                 on_step=True, 
-                prog_bar=True)
+                prog_bar=True,
+                sync_dist=True)
         return val_loss
 
     def configure_optimizers(self):
