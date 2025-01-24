@@ -31,6 +31,7 @@ class SpacetimeformerLightningModule(pl.LightningModule):
             on_epoch=True,
             on_step=False,
             prog_bar=True,
+            sync_dist=True
         )
         return train_loss
 
