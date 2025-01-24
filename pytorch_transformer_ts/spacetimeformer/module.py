@@ -910,7 +910,7 @@ class Embedding(nn.Module):
 
         # concat time_emb, y --> FF --> val_time_emb
         val_time_inp = torch.cat((y, x_emb), dim=-1)
-        val_time_emb = self.val_time_emb(val_time_inp)
+        val_time_emb = self.val_time_emb(val_time_inp) # y_emb_inp_dim (1) + time_dim (24) + 1 + d_x_feat (6) + d_x_static (14) + d_y_lagged (138)
 
         # "given" embedding
         if self.use_given:
@@ -1460,7 +1460,7 @@ class SpacetimeformerModel(nn.Module):
             d_x_time=self.num_time_features, # time features excluding age
             d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # subtracdt time features and age
             d_x_static=sum(self.embedding_dimension) + self.num_feat_static_real + self.input_size * 2,
-            d_y_lagged=self.input_size * len(self.lags_seq),
+            d_y_lagged=self.input_size * (len(self.lags_seq) - 1), # subtract the zero lag
             d_model=d_model,
             time_emb_dim=time_emb_dim,
             downsample_convs=initial_downsample_convs,
@@ -1482,7 +1482,7 @@ class SpacetimeformerModel(nn.Module):
             d_x_time=self.num_time_features, # time features excluding age
             d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # subtract time features and age
             d_x_static=sum(self.embedding_dimension) + self.num_feat_static_real + self.input_size * 2,
-            d_y_lagged=self.input_size * len(self.lags_seq), 
+            d_y_lagged=self.input_size * (len(self.lags_seq) - 1), # subtract the 0 lag 
             d_model=d_model,
             time_emb_dim=time_emb_dim,
             downsample_convs=initial_downsample_convs,
@@ -1512,7 +1512,7 @@ class SpacetimeformerModel(nn.Module):
             "performer_attn_kernel": performer_attn_kernel,
             "performer_redraw_interval": performer_redraw_interval,
         }
-        # TODO check if time features go into encoder layer in informer
+        
         self.encoder = Encoder(
             attn_layers=[
                 EncoderLayer(
@@ -1670,7 +1670,7 @@ class SpacetimeformerModel(nn.Module):
         future_time_feat: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
     ):
-        # TODO check that all of past_target is being used, and update inputs to enc_embedding and dec_embedding as necessary
+        # TODO QUESTION KASHIF why isn't all of past_target is being used via a 0 in seq_len and update inputs to enc_embedding and dec_embedding as necessary
         # time feature
         time_feat = (
             torch.cat(
@@ -1791,7 +1791,7 @@ class SpacetimeformerModel(nn.Module):
         # Note rather than a linear project to 1 output dim for each flattened spatio-temporal value, output to number of distr params
         # dec_output = torch.transpose(dec_output, 1, 2)
         # dec_output = torch.transpose(self.reshape_layer(dec_output), 1, 2)
-        forecast_out = self.param_proj(dec_output) # TODO this should output #distr_params  (3) for each element in 1th dim
+        forecast_out = self.param_proj(dec_output) # this outputs #distr_params (3) for each element in 1th dim
         dim_string = lambda param: ' '.join([f"dy{s}" for s in range(len(param.shape[2:]))])
         forecast_out = tuple(
             rearrange(param, 
@@ -1846,7 +1846,7 @@ class SpacetimeformerModel(nn.Module):
         # time_feat = encoder_inputs[:, :, -self.num_feat_dynamic_real:] 
 
         # embed context sequence
-        # TODO where is y and y_lagged in transformer inputs, change for every embedding
+        
         enc_vt_emb, enc_s_emb, enc_var_idx, enc_mask_seq = self.enc_embedding(
             y=encoder_inputs[:, :, :self.input_size], 
             y_lagged=encoder_inputs[:, :self.context_length, self.input_size:self.input_size*len(self.lags_seq)],
@@ -1925,7 +1925,7 @@ class SpacetimeformerModel(nn.Module):
         # shape [n_continuity_groups*n_parallel_samples, 1, d_model]
         # output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
         # embed target sequence
-        # TODO where does the future masking happen, is it enough to set zeros QUESTION
+        # TODO where does the future masking happen QUESTION
         rep_feat = repeated_features[:, :, expanded_static_feat.shape[-1]:]
         dec_vt_emb, dec_s_emb, _, dec_mask_seq = self.dec_embedding(
             y=reshaped_lagged_sequence[:, :, :self.input_size],
