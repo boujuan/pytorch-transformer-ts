@@ -6,7 +6,7 @@ from gluonts.core.component import validated
 from typing import List, Optional, Dict, Any
 
 # Import TACTiS from the new tactis.py file
-from .tactis import TACTiS
+from pytorch_transformer_ts.tactis_2.tactis import TACTiS
 
 class TACTiSModel(nn.Module):
 

@@ -8,10 +8,10 @@ from copy import deepcopy
 # from .positional_encoding import PositionalEncoding
 # from .normalization import NormalizationLayer
 
-from TACTiS.tactis.model.encoder import Encoder, TemporalEncoder
-from TACTiS.tactis.model.decoder import Decoder, CopulaDecoder
-from TACTiS.tactis.model.positional_encoding import PositionalEncoding
-from TACTiS.tactis.model.normalization import NormalizationLayer
+from pytorch_transformer_ts.tactis_2.model.encoder import Encoder, TemporalEncoder
+from pytorch_transformer_ts.tactis_2.model.decoder import Decoder, CopulaDecoder
+from pytorch_transformer_ts.tactis_2.model.positional_encoding import PositionalEncoding
+from pytorch_transformer_ts.tactis_2.model.normalization import NormalizationLayer
 
 class NormalizationIdentity(nn.Module):
     """

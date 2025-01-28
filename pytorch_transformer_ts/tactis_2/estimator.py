@@ -27,8 +27,8 @@ from gluonts.transform import (
 )
 from gluonts.transform.sampler import InstanceSampler
 
-from lightning_module import TACTiSLightningModule
-from module import TACTiSModel
+from pytorch_transformer_ts.tactis_2.lightning_module import TACTiSLightningModule
+from pytorch_transformer_ts.tactis_2.module import TACTiSModel
 
 PREDICTION_INPUT_NAMES = [
     "past_target",

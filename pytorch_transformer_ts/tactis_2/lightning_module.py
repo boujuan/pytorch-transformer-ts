@@ -2,7 +2,7 @@ import pytorch_lightning as pl
 import torch
 from gluonts.torch.util import weighted_average
 
-from .module import TACTiSModel # Import TACTiSModel from module.py
+from pytorch_transformer_ts.tactis_2.module import TACTiSModel # Import TACTiSModel from module.py
 
 class TACTiSLightningModule(pl.LightningModule):
     def __init__(
