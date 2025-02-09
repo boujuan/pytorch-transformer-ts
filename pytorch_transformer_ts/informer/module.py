@@ -439,18 +439,18 @@ class InformerModel(nn.Module):
         self.encoder = Encoder(
             [
                 EncoderLayer(
-                    AttentionLayer(
-                        Attn(
+                    attention=AttentionLayer(
+                        attention=Attn(
                             mask_flag=False,
                             factor=factor,
                             attention_dropout=dropout,
                             output_attention=False,
                         ),
-                        d_model,
-                        n_heads,
+                        d_model=d_model,
+                        n_heads=n_heads,
                         mix=False,
                     ),
-                    d_model,
+                    d_model=d_model,
                     d_ff=dim_feedforward,
                     dropout=dropout,
                     activation=activation,
@@ -467,29 +467,29 @@ class InformerModel(nn.Module):
         self.decoder = Decoder(
             [
                 DecoderLayer(
-                    AttentionLayer(
-                        Attn(
+                    self_attention=AttentionLayer(
+                        attention=Attn(
                             mask_flag=True,
                             factor=factor,
                             attention_dropout=dropout,
                             output_attention=False,
                         ),
-                        d_model,
-                        n_heads,
+                        d_model=d_model,
+                        n_heads=n_heads,
                         mix=True,
                     ),
-                    AttentionLayer(
-                        FullAttention(
+                    cross_attention=AttentionLayer(
+                        attention=FullAttention(
                             mask_flag=False,
                             factor=factor,
                             attention_dropout=dropout,
                             output_attention=False,
                         ),
-                        d_model,
-                        n_heads,
+                        d_model=d_model,
+                        n_heads=n_heads,
                         mix=False,
                     ),
-                    d_model,
+                    d_model=d_model,
                     d_ff=dim_feedforward,
                     dropout=dropout,
                     activation=activation,
