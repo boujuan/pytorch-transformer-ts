@@ -133,6 +133,20 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         self.validation_sampler = validation_sampler or ValidationSplitSampler(
             min_future=prediction_length
         )
+    
+    @staticmethod
+    def get_params(trial, context_length_choices):
+        """ generate dictionary of tunable parameters compatible with optuna TODO"""
+        return {
+            "context_length": trial.suggest_categorical("context_length", context_length_choices),
+            # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
+            "batch_size": trial.suggest_int("batch_size", 128, 256, step=64),
+            "num_encoder_layers": trial.suggest_int("num_encoder_layers", 2, 8, step=2),
+            "num_decoder_layers": trial.suggest_int("num_decoder_layers", 2, 8, step=2),
+            "dim_feedforward": trial.suggest_categorical("dim_feedforward", [32, 64, 128]),
+            "n_heads": trial.suggest_int("n_heads", 4, 8, step=2)
+            # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
+        }
 
     def create_transformation(self, use_lazyframe=True) -> Transformation:
         remove_field_names = []
