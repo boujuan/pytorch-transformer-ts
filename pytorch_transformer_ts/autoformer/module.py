@@ -856,26 +856,23 @@ class AutoformerModel(nn.Module):
         dec_out = trend_part + seasonal_part
         params = self.param_proj(dec_out[:, -self.prediction_length :, :])
 
-        repeated_params = [
-            s.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
-            for s in params
-        ]
-
-        repeated_scale = scale.repeat_interleave(
-            repeats=self.num_parallel_samples, dim=0
-        )
-        repeated_loc = loc.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
-
-        distr = self.output_distribution(repeated_params, loc=repeated_loc, scale=repeated_scale)
-
-        # Future samples
-        samples = distr.sample()
-
         # TODO QUESTION why no looping over to make predictions?
         if output_distr_params:
             return params
             # return params = tuple(param.reshape((-1, 1, self.prediction_length) + self.target_shape) for param in params)
         else:
+            # Future samples
+            repeated_params = [
+            s.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
+            for s in params
+            ]
+
+            repeated_scale = scale.repeat_interleave(
+                repeats=self.num_parallel_samples, dim=0
+            )
+            repeated_loc = loc.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
+            distr = self.output_distribution(repeated_params, loc=repeated_loc, scale=repeated_scale)
+            samples = distr.sample()
             return samples.reshape(
                 (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,
             )
