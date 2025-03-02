@@ -26,8 +26,6 @@ class TACTiS2LightningModule(pl.LightningModule):
         ----------
         model: TACTiS2Model
             The TACTiS2 model to train
-        loss: DistributionLoss
-            Loss function to use
         lr: float
             Learning rate
         weight_decay: float
@@ -38,9 +36,8 @@ class TACTiS2LightningModule(pl.LightningModule):
             Epoch at which to transition to stage 2
         """
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=['model'])
         self.model = model
-        self.loss = loss
         self.lr = lr
         self.weight_decay = weight_decay
         self.stage = stage
