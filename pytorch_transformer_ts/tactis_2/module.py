@@ -127,12 +127,20 @@ class TACTiS2Model(nn.Module):
             input_encoding_normalization=input_encoding_normalization,
             data_normalization=data_normalization,
             loss_normalization=loss_normalization,
-            flow_encoder=flow_encoder_config,
-            copula_encoder=copula_encoder_config,
-            marginal=marginal_config,
-            copula=copula_config,
-            skip_copula=True,  # Start with only flow components
-            experiment_mode="forecasting",
+            flow_encoder_attention_layers=flow_encoder_config["attention_layers"],
+            flow_encoder_attention_heads=flow_encoder_config["attention_heads"],
+            flow_encoder_attention_dim=flow_encoder_config["attention_dim"],
+            flow_encoder_attention_feedforward_dim=flow_encoder_config["attention_feedforward_dim"],
+            flow_encoder_dropout=flow_encoder_config["dropout"],
+            copula_encoder_attention_layers=copula_encoder_config["attention_layers"],
+            copula_encoder_attention_heads=copula_encoder_config["attention_heads"],
+            copula_encoder_attention_dim=copula_encoder_config["attention_dim"],
+            copula_encoder_attention_feedforward_dim=copula_encoder_config["attention_feedforward_dim"],
+            copula_encoder_dropout=copula_encoder_config["dropout"],
+            flow_layers=marginal_config["flow_layers"],
+            flow_hid_dim=marginal_config["flow_hid_dim"],
+            copula_resolution=copula_config["resolution"],
+            skip_copula=True,
         )
         
         # Output projection for compatibility with GluonTS
