@@ -11,7 +11,6 @@ from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.transform import (
     AddAgeFeature,
     AddObservedValuesIndicator,
@@ -80,7 +79,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         stage2_start_epoch: int = 10,
         # Other parameters for the model
         distr_output: Optional[DistributionOutput] = None,
-        loss: Optional[DistributionLoss] = None,
         scaling: bool = True,
         num_parallel_samples: int = 100,
         batch_size: int = 32,
@@ -114,7 +112,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.stage2_start_epoch = stage2_start_epoch
         
         self.distr_output = distr_output or StudentTOutput()
-        self.loss = loss or NegativeLogLikelihood()
         self.scaling = scaling
         self.num_parallel_samples = num_parallel_samples
         
@@ -394,7 +391,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         return TACTiS2LightningModule(
             model=model,
-            loss=self.loss,
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
         )
