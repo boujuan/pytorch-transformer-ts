@@ -87,6 +87,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         input_size: int = 1,
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
+        train_sampler: Optional[InstanceSampler] = None,
+        validation_sampler: Optional[InstanceSampler] = None,
     ) -> None:
         context_length = context_length or 2 * prediction_length
         
@@ -129,6 +131,14 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         trainer_kwargs = trainer_kwargs or {}
         self.trainer_kwargs = trainer_kwargs
+        
+        self.train_sampler = train_sampler or ExpectedNumInstanceSampler(
+            num_instances=1.0, 
+            min_future=prediction_length
+        )
+        self.validation_sampler = validation_sampler or ValidationSplitSampler(
+            min_future=prediction_length
+        )
         
         super().__init__(trainer_kwargs=trainer_kwargs)
 
@@ -229,13 +239,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         assert mode in ["training", "validation", "test"]
         
         instance_sampler = {
-            "training": ExpectedNumInstanceSampler(
-                num_instances=1.0,
-                min_future=self.prediction_length,
-            ),
-            "validation": ValidationSplitSampler(
-                min_future=self.prediction_length,
-            ),
+            "training": self.train_sampler,
+            "validation": self.validation_sampler,
             "test": TestSplitSampler(),
         }[mode]
         
