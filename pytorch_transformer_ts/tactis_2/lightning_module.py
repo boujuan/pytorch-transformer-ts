@@ -1,6 +1,6 @@
 import pytorch_lightning as pl
 import torch
-from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
+# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
 
 from .module import TACTiS2Model
@@ -13,7 +13,7 @@ class TACTiS2LightningModule(pl.LightningModule):
     def __init__(
         self,
         model: TACTiS2Model,
-        loss: DistributionLoss = NegativeLogLikelihood(),
+        # loss: DistributionLoss = NegativeLogLikelihood(),
         lr: float = 1e-3,
         weight_decay: float = 1e-8,
         stage: int = 1,  # Start with stage 1 (flow-only)
