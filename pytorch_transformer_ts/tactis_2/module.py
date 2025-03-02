@@ -117,6 +117,43 @@ class TACTiS2Model(nn.Module):
             "max_u": 1.0,
         }
         
+        flow_encoder_dict = {
+            "attention_layers": flow_encoder_config["attention_layers"],
+            "attention_heads": flow_encoder_config["attention_heads"], 
+            "attention_dim": flow_encoder_config["attention_dim"],
+            "attention_feedforward_dim": flow_encoder_config["attention_feedforward_dim"],
+            "dropout": flow_encoder_config["dropout"]
+        }
+        
+        copula_encoder_dict = {
+            "attention_layers": copula_encoder_config["attention_layers"],
+            "attention_heads": copula_encoder_config["attention_heads"],
+            "attention_dim": copula_encoder_config["attention_dim"],
+            "attention_feedforward_dim": copula_encoder_config["attention_feedforward_dim"],
+            "dropout": copula_encoder_config["dropout"]
+        }
+        
+        dsf_marginal_dict = {
+            "mlp_layers": marginal_config["mlp_layers"],
+            "mlp_dim": marginal_config["mlp_dim"],
+            "flow_layers": marginal_config["flow_layers"],
+            "flow_hid_dim": marginal_config["flow_hid_dim"]
+        }
+        
+        attentional_copula_dict = {
+            "resolution": copula_config["resolution"],
+            "attention_layers": copula_config["attention_layers"],
+            "attention_heads": copula_config["attention_heads"],
+            "attention_dim": copula_config["attention_dim"],
+            "min_u": copula_config["min_u"],
+            "max_u": copula_config["max_u"]
+        }
+        
+        copula_decoder_dict = {
+            "dsf_marginal": dsf_marginal_dict,
+            "attentional_copula": attentional_copula_dict
+        }
+        
         self.tactis = TACTiS(
             num_series=input_size,
             flow_series_embedding_dim=flow_series_embedding_dim,
@@ -127,20 +164,11 @@ class TACTiS2Model(nn.Module):
             input_encoding_normalization=input_encoding_normalization,
             data_normalization=data_normalization,
             loss_normalization=loss_normalization,
-            flow_encoder_attention_layers=flow_encoder_config["attention_layers"],
-            flow_encoder_attention_heads=flow_encoder_config["attention_heads"],
-            flow_encoder_attention_dim=flow_encoder_config["attention_dim"],
-            flow_encoder_attention_feedforward_dim=flow_encoder_config["attention_feedforward_dim"],
-            flow_encoder_dropout=flow_encoder_config["dropout"],
-            copula_encoder_attention_layers=copula_encoder_config["attention_layers"],
-            copula_encoder_attention_heads=copula_encoder_config["attention_heads"],
-            copula_encoder_attention_dim=copula_encoder_config["attention_dim"],
-            copula_encoder_attention_feedforward_dim=copula_encoder_config["attention_feedforward_dim"],
-            copula_encoder_dropout=copula_encoder_config["dropout"],
-            flow_layers=marginal_config["flow_layers"],
-            flow_hid_dim=marginal_config["flow_hid_dim"],
-            copula_resolution=copula_config["resolution"],
-            skip_copula=True,
+            positional_encoding={"dropout": 0.1, "max_length": 5000},
+            flow_encoder=flow_encoder_dict,
+            copula_encoder=copula_encoder_dict,
+            copula_decoder=copula_decoder_dict,
+            skip_copula=True
         )
         
         # Output projection for compatibility with GluonTS
