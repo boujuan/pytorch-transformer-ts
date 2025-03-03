@@ -1,161 +1,221 @@
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import numpy as np
+
 from gluonts.core.component import validated
+from gluonts.dataset.field_names import FieldName
 from gluonts.time_feature import get_lags_for_frequency
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.modules.feature import FeatureEmbedder
-from gluonts.torch.scaler import MeanScaler, NOPScaler
+from gluonts.torch.scaler import Scaler, MeanScaler, StdScaler, NOPScaler
 
 from .tactis2 import TACTiS
 
 class TACTiS2Model(nn.Module):
     """
-    Module class that wraps the TACTiS model for use with the pytorch-transformer-ts framework.
+    Module connecting TACTiS2 model to GluonTS framework, handling data transformations.
+    
+    This module bridges between the core TACTiS2 model and the GluonTS API expectations,
+    managing input/output transformations, scaling, and distribution parameters.
     """
     
     @validated()
     def __init__(
         self,
-        freq: str,
+        # Data dimensions
+        num_series: int,
         context_length: int,
         prediction_length: int,
-        num_feat_dynamic_real: int = 1,
-        num_feat_static_real: int = 1,
-        num_feat_static_cat: int = 1,
-        cardinality: List[int] = [1],
-        embedding_dimension: Optional[List[int]] = None,
         # TACTiS specific parameters
-        flow_series_embedding_dim: int = 32,
-        copula_series_embedding_dim: int = 32,
-        flow_input_encoder_layers: int = 1,
-        copula_input_encoder_layers: int = 1,
+        flow_series_embedding_dim: int,
+        copula_series_embedding_dim: int,
+        flow_input_encoder_layers: int,
+        copula_input_encoder_layers: int,
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
         data_normalization: str = "none",
         loss_normalization: str = "series",
-        # Other parameters
-        distr_output: Optional[DistributionOutput] = None,
-        input_size: int = 1,
+        # GluonTS compatability parameters
+        cardinality: List[int] = [1],
+        num_feat_dynamic_real: int = 0,
+        num_feat_static_real: int = 0,
+        num_feat_static_cat: int = 0,
+        embedding_dimension: Optional[List[int]] = None,
+        distr_output: DistributionOutput = StudentTOutput(),
+        scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
-        scaling: bool = True,
         num_parallel_samples: int = 100,
-    ):
+    ) -> None:
+        """
+        Initialize the TACTiS2Model.
+        
+        Parameters
+        ----------
+        num_series
+            Number of time series (variables) to forecast.
+        context_length
+            Length of the input context (history).
+        prediction_length
+            Length of the forecast horizon.
+        flow_series_embedding_dim
+            Dimension of the flow series embedding.
+        copula_series_embedding_dim
+            Dimension of the copula series embedding.
+        flow_input_encoder_layers
+            Number of layers in the flow input encoder.
+        copula_input_encoder_layers
+            Number of layers in the copula input encoder.
+        bagging_size
+            Size of the bagging ensemble. If None, no bagging is performed.
+        input_encoding_normalization
+            Whether to normalize the input encoding.
+        data_normalization
+            Type of data normalization to apply. Options: "none", "standard", "series".
+        loss_normalization
+            Type of loss normalization to apply. Options: "none", "series".
+        cardinality
+            List of cardinalities of the categorical features.
+        num_feat_dynamic_real
+            Number of dynamic real features.
+        num_feat_static_real
+            Number of static real features.
+        num_feat_static_cat
+            Number of static categorical features.
+        embedding_dimension
+            List of embedding dimensions for categorical features.
+        distr_output
+            Distribution to use for probabilistic forecasting.
+        scaling
+            Type of scaling to apply to the target. Options: "mean", "std", None.
+        lags_seq
+            Sequence of lags to use as features.
+        num_parallel_samples
+            Number of samples to generate in parallel during inference.
+        """
         super().__init__()
         
+        self.num_series = num_series
         self.context_length = context_length
         self.prediction_length = prediction_length
-        self.scaling = scaling
+        
+        # GluonTS compatibility parameters
+        self.num_feat_dynamic_real = num_feat_dynamic_real
+        self.num_feat_static_real = num_feat_static_real
+        self.num_feat_static_cat = num_feat_static_cat
+        self.embedding_dimension = embedding_dimension
+        self.cardinality = cardinality
+        self.distr_output = distr_output
         self.num_parallel_samples = num_parallel_samples
-        self.training_stage = 1  # Start with flow training only
         
-        if distr_output is None:
-            if input_size > 1:
-                self.distr_output = MultivariateGaussianOutput(dim=input_size)
-            else:
-                self.distr_output = StudentTOutput()
-        else:
-            self.distr_output = distr_output
-            
-        self.target_shape = (input_size,) if input_size > 1 else ()
-        
-        # Compute lag indices
-        if lags_seq is None:
-            lags_seq = get_lags_for_frequency(freq_str=freq)
-        self.lags_seq = lags_seq
-        
-        # Set up scalers
-        if scaling:
+        # Set up scaling
+        self.scaling = scaling
+        if scaling == "mean":
             self.scaler = MeanScaler(dim=1, keepdim=True)
+        elif scaling == "std":
+            self.scaler = StdScaler(dim=1, keepdim=True)
         else:
             self.scaler = NOPScaler(dim=1, keepdim=True)
             
-        # Set up feature embedders
-        self.embedder = FeatureEmbedder(
-            cardinalities=cardinality,
-            embedding_dims=embedding_dimension if embedding_dimension is not None else [min(50, (c + 1) // 2) for c in cardinality],
-        )
+        # Create embeddings for static categorical features if needed
+        if self.num_feat_static_cat > 0:
+            self.embedder = nn.ModuleList([
+                nn.Embedding(cardinality, embedding_dim)
+                for cardinality, embedding_dim in zip(
+                    self.cardinality, 
+                    self.embedding_dimension if self.embedding_dimension is not None else
+                    [min(50, (cat + 1) // 2) for cat in self.cardinality]
+                )
+            ])
+            self.embedding_dim = sum(
+                embedding_dim 
+                for embedding_dim in (
+                    self.embedding_dimension if self.embedding_dimension is not None else
+                    [min(50, (cat + 1) // 2) for cat in self.cardinality]
+                )
+            )
+        else:
+            self.embedder = None
+            self.embedding_dim = 0
+            
+        # Set up lags_seq
+        self.lags_seq = lags_seq or [0]
         
-        # Compute total number of features
-        self.num_feat_static_cat = num_feat_static_cat
-        self.num_feat_static_real = num_feat_static_real
-        self.num_feat_dynamic_real = num_feat_dynamic_real
+        # Create the core TACTiS model
+        # Create dictionaries for TACTiS component configurations - can extend as needed
         
-        # Set up TACTiS model with specific configuration for time series forecasting
-        # Using default encoder/decoder configurations adapted for the GluonTS framework
-        flow_encoder_config = {
-            "attention_layers": 2,
+        # Define default configurations for each component
+        positional_encoding_args = {
+            "embedding_dim": max(flow_series_embedding_dim, copula_series_embedding_dim),
+            "dropout": 0.1,
+            "max_len": 5000,
+        }
+        
+        flow_encoder_args = {
+            "attention_layers": flow_input_encoder_layers,
             "attention_heads": 4,
-            "attention_dim": 32,
-            "attention_feedforward_dim": 128,
+            "attention_dim": flow_series_embedding_dim,
+            "attention_feedforward_dim": flow_series_embedding_dim * 4,
             "dropout": 0.1,
         }
         
-        copula_encoder_config = {
-            "attention_layers": 2,
+        copula_encoder_args = {
+            "attention_layers": copula_input_encoder_layers,
             "attention_heads": 4,
-            "attention_dim": 32,
-            "attention_feedforward_dim": 128,
+            "attention_dim": copula_series_embedding_dim,
+            "attention_feedforward_dim": copula_series_embedding_dim * 4,
             "dropout": 0.1,
         }
         
-        marginal_config = {
-            "mlp_layers": 2,
-            "mlp_dim": 64,
-            "flow_layers": 3, 
-            "flow_hid_dim": 16,
+        flow_temporal_encoder_args = {
+            "attention_layers": 2,
+            "attention_heads": 4,
+            "attention_dim": flow_series_embedding_dim,
+            "attention_feedforward_dim": flow_series_embedding_dim * 4,
+            "dropout": 0.1,
         }
         
-        copula_config = {
-            "resolution": 32,
+        copula_temporal_encoder_args = {
             "attention_layers": 2,
-            "attention_heads": 4, 
-            "attention_dim": 32,
+            "attention_heads": 4,
+            "attention_dim": copula_series_embedding_dim,
+            "attention_feedforward_dim": copula_series_embedding_dim * 4,
+            "dropout": 0.1,
+        }
+        
+        copula_decoder_args = {
+            "flow_input_dim": flow_series_embedding_dim,
+            "copula_input_dim": copula_series_embedding_dim,
             "min_u": 0.0,
             "max_u": 1.0,
+            "skip_sampling_marginal": False,
+            "attentional_copula": {
+                "input_dim": copula_series_embedding_dim,
+                "attention_heads": 4,
+                "attention_layers": 2,
+                "attention_dim": copula_series_embedding_dim,
+                "mlp_layers": 2,
+                "mlp_dim": copula_series_embedding_dim * 4,
+                "resolution": 128,
+                "dropout": 0.1,
+                "attention_mlp_class": "_easy_mlp",
+                "activation_function": "relu",
+            },
+            "dsf_marginal": {
+                "context_dim": flow_series_embedding_dim,
+                "mlp_layers": 2,
+                "mlp_dim": flow_series_embedding_dim * 4,
+                "flow_layers": 2,
+                "flow_hid_dim": flow_series_embedding_dim,
+            },
+            "skip_copula": False,
         }
         
-        flow_encoder_dict = {
-            "attention_layers": flow_encoder_config["attention_layers"],
-            "attention_heads": flow_encoder_config["attention_heads"], 
-            "attention_dim": flow_encoder_config["attention_dim"],
-            "attention_feedforward_dim": flow_encoder_config["attention_feedforward_dim"],
-            "dropout": flow_encoder_config["dropout"]
-        }
-        
-        copula_encoder_dict = {
-            "attention_layers": copula_encoder_config["attention_layers"],
-            "attention_heads": copula_encoder_config["attention_heads"],
-            "attention_dim": copula_encoder_config["attention_dim"],
-            "attention_feedforward_dim": copula_encoder_config["attention_feedforward_dim"],
-            "dropout": copula_encoder_config["dropout"]
-        }
-        
-        dsf_marginal_dict = {
-            "mlp_layers": marginal_config["mlp_layers"],
-            "mlp_dim": marginal_config["mlp_dim"],
-            "flow_layers": marginal_config["flow_layers"],
-            "flow_hid_dim": marginal_config["flow_hid_dim"]
-        }
-        
-        attentional_copula_dict = {
-            "resolution": copula_config["resolution"],
-            "attention_layers": copula_config["attention_layers"],
-            "attention_heads": copula_config["attention_heads"],
-            "attention_dim": copula_config["attention_dim"],
-            "min_u": copula_config["min_u"],
-            "max_u": copula_config["max_u"]
-        }
-        
-        copula_decoder_dict = {
-            "dsf_marginal": dsf_marginal_dict,
-            "attentional_copula": attentional_copula_dict
-        }
-        
+        # Initialize the TACTiS model
         self.tactis = TACTiS(
-            num_series=input_size,
+            num_series=num_series,
             flow_series_embedding_dim=flow_series_embedding_dim,
             copula_series_embedding_dim=copula_series_embedding_dim,
             flow_input_encoder_layers=flow_input_encoder_layers,
@@ -164,16 +224,70 @@ class TACTiS2Model(nn.Module):
             input_encoding_normalization=input_encoding_normalization,
             data_normalization=data_normalization,
             loss_normalization=loss_normalization,
-            positional_encoding={"dropout": 0.1, "max_length": 5000},
-            flow_encoder=flow_encoder_dict,
-            copula_encoder=copula_encoder_dict,
-            copula_decoder=copula_decoder_dict,
-            skip_copula=True
+            positional_encoding=positional_encoding_args,
+            flow_encoder=flow_encoder_args,
+            copula_encoder=copula_encoder_args,
+            flow_temporal_encoder=flow_temporal_encoder_args,
+            copula_temporal_encoder=copula_temporal_encoder_args,
+            copula_decoder=copula_decoder_args,
+            experiment_mode="forecasting",
         )
+    
+    @property
+    def _past_length(self) -> int:
+        """
+        Return the required length of the input.
         
-        # Output projection for compatibility with GluonTS
-        hidden_dim = flow_series_embedding_dim * 4  # Use a sufficiently large hidden dim
-        self.param_proj = self.distr_output.get_args_proj(hidden_dim)
+        Returns
+        -------
+        The required length of the past input.
+        """
+        return self.context_length + max(self.lags_seq)
+    
+    def get_lagged_subsequences(
+        self, sequence: torch.Tensor, subsequences_length: int, shift: int = 0
+    ) -> torch.Tensor:
+        """
+        Create lagged subsequences of a given sequence.
+        
+        Parameters
+        ----------
+        sequence
+            The input sequence (batch, time, variables).
+        subsequences_length
+            Length of each subsequence.
+        shift
+            Shift for the subsequences.
+        
+        Returns
+        -------
+        Lagged subsequences of the input.
+        """
+        batch_size = sequence.shape[0]
+        
+        # Shift for lags
+        indices = [l - shift for l in self.lags_seq]
+        
+        # Check if we need padding
+        pad_length = max(-min(indices) + subsequences_length, 0)
+        if pad_length > 0:
+            # Add padding
+            padding = torch.zeros(
+                batch_size, pad_length, sequence.shape[2], device=sequence.device
+            )
+            sequence = torch.cat([padding, sequence], dim=1)
+            indices = [l + pad_length for l in indices]
+            
+        # Create subsequences
+        lagged_values = []
+        for lag_index in indices:
+            begin_index = -lag_index - subsequences_length
+            end_index = -lag_index if lag_index > 0 else None
+            
+            subsequence = sequence[:, begin_index:end_index, :]
+            lagged_values.append(subsequence)
+            
+        return torch.cat(lagged_values, dim=-1)
     
     def create_network_inputs(
         self,
@@ -184,88 +298,161 @@ class TACTiS2Model(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
-    ) -> Tuple:
+    ):
         """
-        Create inputs for the TACTiS network.
-        """
-        # Static features
-        embedded_cat = self.embedder(feat_static_cat)
-        static_feat = torch.cat([embedded_cat, feat_static_real], dim=1)
+        Create the inputs for the network.
         
-        # Scale if needed
-        if self.scaling:
-            past_target_scaled, loc, scale = self.scaler(past_target, past_observed_values)
-        else:
-            past_target_scaled = past_target
-            loc = torch.zeros_like(past_target).mean(dim=1, keepdim=True)
-            scale = torch.ones_like(past_target).mean(dim=1, keepdim=True)
-        
-        # Reshape to TACTiS expected format if needed
-        if len(self.target_shape) == 0:
-            past_target_scaled = past_target_scaled.unsqueeze(-1)
-            if future_target is not None:
-                future_target_scaled = (future_target - loc) / scale
-                future_target_scaled = future_target_scaled.unsqueeze(-1)
-        else:
-            if future_target is not None:
-                future_target_scaled = (future_target - loc) / scale
-        
-        # Prepare time features
-        past_time_feat_reshaped = past_time_feat
-        if future_time_feat is not None:
-            future_time_feat_reshaped = future_time_feat
+        Parameters
+        ----------
+        feat_static_cat
+            Static categorical features (batch, num_features).
+        feat_static_real
+            Static real features (batch, num_features).
+        past_time_feat
+            Past time features (batch, time, num_features).
+        past_target
+            Past target values (batch, time, variables).
+        past_observed_values
+            Indicator for observed values in the past (batch, time, variables).
+        future_time_feat
+            Future time features (batch, prediction_length, num_features).
+        future_target
+            Future target values (batch, prediction_length, variables).
             
-            # For TACTiS, we need time indices
-            hist_time = torch.arange(past_target.shape[1], device=past_target.device).unsqueeze(0).expand(past_target.shape[0], -1)
-            pred_time = torch.arange(past_target.shape[1], past_target.shape[1] + future_time_feat.shape[1], 
-                                    device=past_target.device).unsqueeze(0).expand(past_target.shape[0], -1)
+        Returns
+        -------
+        Dict with prepared inputs for the network.
+        """
+        # Handle static features
+        if self.num_feat_static_cat > 0:
+            # Get embeddings for categorical features
+            embedded_cat = torch.cat(
+                [embed(feat_static_cat[:, i]) for i, embed in enumerate(self.embedder)],
+                dim=1
+            )
         else:
-            future_target_scaled = None
-            future_time_feat_reshaped = None
-            hist_time = torch.arange(past_target.shape[1], device=past_target.device).unsqueeze(0).expand(past_target.shape[0], -1)
-            pred_time = None
+            embedded_cat = None
+            
+        # Static real features
+        if self.num_feat_static_real > 0:
+            static_real = feat_static_real
+        else:
+            static_real = None
+            
+        # Scale the target - take only observed values into account
+        scaled_past_target, loc, scale = self.scaler(
+            past_target,
+            past_observed_values,
+        )
         
-        return (hist_time, past_target_scaled.transpose(1,2), pred_time, future_target_scaled.transpose(1,2) if future_target_scaled is not None else None), loc, scale, static_feat, past_time_feat_reshaped
-    
-    def output_params(self, inputs, static_feat=None):
+        # Create lagged features
+        subsequences_length = self.context_length
+        lagged_sequence = self.get_lagged_subsequences(
+            sequence=scaled_past_target,
+            subsequences_length=subsequences_length,
+        )
+        
+        # Time features
+        time_feat = past_time_feat[:, -subsequences_length:, ...]
+        
+        # Prepare input history tensor for TACTiS
+        history_values = scaled_past_target[:, -subsequences_length:, ...]  # (batch, context_length, variables)
+        
+        # Create timestamps for input to TACTiS
+        # TACTiS expects integer timesteps, so we create sequential values
+        batch_size = history_values.shape[0]
+        history_time = torch.arange(
+            0, self.context_length, device=history_values.device
+        ).unsqueeze(0).repeat(batch_size, 1)  # (batch, context_length)
+        
+        # Prepare future timestamps
+        future_time = torch.arange(
+            self.context_length, 
+            self.context_length + self.prediction_length, 
+            device=history_values.device
+        ).unsqueeze(0).repeat(batch_size, 1)  # (batch, prediction_length)
+        
+        # For training, we need future values too
+        if future_target is not None:
+            future_values = future_target
+            if self.scaling != "none":
+                future_values = (future_values - loc) / scale
+        else:
+            future_values = None
+            
+        return dict(
+            past_target=history_values.transpose(1, 2),  # TACTiS expects (batch, variables, time)
+            past_observed_values=past_observed_values.transpose(1, 2),
+            hist_time=history_time,
+            pred_time=future_time,
+            future_target=future_values.transpose(1, 2) if future_values is not None else None,
+            scaled_past_target=scaled_past_target,
+            loc=loc,
+            scale=scale,
+            lagged_sequence=lagged_sequence,
+            time_feat=time_feat,
+            static_feat=static_real,
+            embedded_cat=embedded_cat,
+        )
+
+    def output_params(self, network_input):
         """
-        Produce parameters for the output distribution.
+        Compute the parameters of the output distribution.
+        
+        Parameters
+        ----------
+        network_input
+            Output from create_network_inputs.
+            
+        Returns
+        -------
+        Parameters of the output distribution.
         """
-        # For compatibility with GluonTS - in actual use we'd use the TACTiS distribution directly
-        hist_time, hist_value, pred_time, pred_value = inputs
-        
-        # Get encoder output
-        output = self.tactis.forward(hist_time, hist_value, pred_time, pred_value)[0]
-        
-        # Project to distribution parameters
-        # Convert shape from [batch, pred_len, series] to [batch, pred_len, param_dim]
-        batch_size, pred_len, num_series = output.shape
-        output = output.reshape(batch_size * pred_len, num_series)
-        params = self.param_proj(output)
-        
-        # Reshape params for distribution
-        return params.reshape(batch_size, pred_len, -1)
-    
+        if network_input["future_target"] is not None:
+            # Training mode - compute loss
+            loss = self.tactis.forward(
+                hist_time=network_input["hist_time"],
+                hist_value=network_input["past_target"],
+                pred_time=network_input["pred_time"],
+                pred_value=network_input["future_target"],
+            )
+            return loss
+        else:
+            # Inference mode - sample from the distribution
+            samples = self.tactis.sample(
+                num_samples=self.num_parallel_samples,
+                hist_time=network_input["hist_time"],
+                hist_value=network_input["past_target"],
+                pred_time=network_input["pred_time"],
+            )
+            
+            # Rescale the samples if needed
+            if self.scaling != "none":
+                samples = samples * network_input["scale"].unsqueeze(0).unsqueeze(-1) + network_input["loc"].unsqueeze(0).unsqueeze(-1)
+                
+            # Return samples in the format expected by GluonTS
+            # (samples, batch, variables, prediction_length)
+            return samples.transpose(2, 3)
+            
     def output_distribution(self, params, loc=None, scale=None):
         """
-        Create output distribution from parameters.
+        Create the output distribution from the parameters.
+        
+        Parameters
+        ----------
+        params
+            Parameters of the distribution or samples from the distribution.
+        loc
+            Location parameter for scaling.
+        scale
+            Scale parameter for scaling.
+            
+        Returns
+        -------
+        Distribution with the given parameters.
         """
         return self.distr_output.distribution(params, loc=loc, scale=scale)
-    
-    def output_loss(self, params, target, loc=None, scale=None):
-        """
-        Compute loss directly - alternative to distribution-based loss.
-        """
-        distr = self.output_distribution(params, loc=loc, scale=scale)
-        return -distr.log_prob(target)
-    
-    def set_training_stage(self, stage):
-        """
-        Switch between flow-only (stage 1) and full model (stage 2) training.
-        """
-        self.training_stage = stage
-        self.tactis.set_stage(stage)
-    
+            
     def forward(
         self,
         feat_static_cat: torch.Tensor,
@@ -276,43 +463,59 @@ class TACTiS2Model(nn.Module):
         future_time_feat: torch.Tensor,
         future_target: Optional[torch.Tensor] = None,
         num_parallel_samples: Optional[int] = None,
-        output_distr_params: Optional[bool] = False,
+        output_distr_params: Optional[bool] = False
     ) -> torch.Tensor:
         """
-        Forward pass for inference.
+        Forward pass through the model.
+        
+        Parameters
+        ----------
+        feat_static_cat
+            Static categorical features.
+        feat_static_real
+            Static real features.
+        past_time_feat
+            Past time features.
+        past_target
+            Past target values.
+        past_observed_values
+            Indicator for observed values in the past.
+        future_time_feat
+            Future time features.
+        future_target
+            Future target values (optional, only used during training).
+        num_parallel_samples
+            Number of samples to generate in parallel for inference.
+        output_distr_params
+            Whether to output distribution parameters.
+            
+        Returns
+        -------
+        Either the loss (during training) or samples (during inference).
         """
-        if num_parallel_samples is None:
-            num_parallel_samples = self.num_parallel_samples
-
-        inputs, loc, scale, static_feat, _ = self.create_network_inputs(
+        if num_parallel_samples is not None:
+            self.num_parallel_samples = num_parallel_samples
+            
+        # Create the inputs for the network
+        network_input = self.create_network_inputs(
             feat_static_cat=feat_static_cat,
             feat_static_real=feat_static_real,
             past_time_feat=past_time_feat,
             past_target=past_target,
             past_observed_values=past_observed_values,
             future_time_feat=future_time_feat,
+            future_target=future_target,
         )
         
-        # Output distribution parameters if requested
+        # Compute the distribution parameters
+        params = self.output_params(network_input)
+        
         if output_distr_params:
-            params = self.output_params(inputs, static_feat)
             return params
         
-        # Generate samples using TACTiS
-        hist_time, hist_value, pred_time, _ = inputs
-        samples = self.tactis.sample(
-            num_samples=num_parallel_samples,
-            hist_time=hist_time,
-            hist_value=hist_value,
-            pred_time=pred_time,
-        )
-        
-        # Scale samples back
-        # TACTiS samples are [num_samples, batch, series, pred_len]
-        # We need to transpose to [batch, num_samples, pred_len, series]
-        samples = samples.permute(1, 0, 3, 2)
-        
-        # Scale back
-        scaled_samples = samples * scale.unsqueeze(1) + loc.unsqueeze(1)
-        
-        return scaled_samples
+        if network_input["future_target"] is not None:
+            # In training, return the loss
+            return params
+        else:
+            # In inference, return the samples
+            return params
