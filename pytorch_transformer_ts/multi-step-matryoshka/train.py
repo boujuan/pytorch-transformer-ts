@@ -267,8 +267,7 @@ def train(args):
         print("logger.log_dir : ", logger.log_dir)
         print("os.path.exists(logger.log_dir) : ", os.path.exists(logger.log_dir))
 
-        if not os.path.exists(logger.log_dir):
-            os.makedirs(logger.log_dir)
+        os.makedirs(logger.log_dir, exist_ok=True)
         with open(f'{logger.log_dir}/{name}.json', 'w') as f:
             json.dump(agg_metrics, f)
 
