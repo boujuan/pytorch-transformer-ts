@@ -723,6 +723,10 @@ class Embedding(nn.Module):
     ):
         super().__init__()
         
+        self.augment_y = False # if true, add y_lagged and x_feat to y, otherwise add to x
+        
+        self.augment_y = self.augment_y and is_encoder
+         
         assert method in ["spatio-temporal", "temporal"]
         if data_dropout is None:
             self.data_drop = lambda y: y
@@ -748,15 +752,31 @@ class Embedding(nn.Module):
             self.local_emb = nn.Embedding(
                 num_embeddings=max_seq_len, embedding_dim=d_model
             )
-        y_emb_inp_dim = d_y if self.method == "temporal" else 1
+        
         # input dim = input_size + time_Feature + age feature + dynamic real features + static_Features
-        self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_feat + d_x_static + d_y_lagged, d_model)
+        # NOTE non augmented version differs from original implementation bc:
+        #       1) we add 1 for age to the time dimension,
+        #       2) we add the lagged values 
+        #       3) we add the static values (log(scale), log(abs(loc)) features, static features, dynamic real features that also influence output such as nacelle direction)
+        
+        if self.augment_y:
+            y_emb_inp_dim = d_y + d_x_feat + d_y_lagged if self.method == "temporal" else 1 
+            self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_static, d_model)
+        else:
+            y_emb_inp_dim = d_y if self.method == "temporal" else 1 # spatio temporal embedding will capture 1 value for each point in time and space
+            self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_feat + d_x_static + d_y_lagged, d_model)
+            
+        # self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_static + d_y_lagged, d_model)
         
         if self.method == "spatio-temporal":
             # self.space_emb = nn.Embedding(num_embeddings=d_y, embedding_dim=d_model)
-            self.space_emb = nn.Embedding(num_embeddings=d_y, embedding_dim=d_model)
-            # split_length_into = d_y
-            split_length_into = d_y
+            # NOTE TODO this differs from og impl bc dy would include dy_c for encoder
+            if self.augment_y:
+                split_length_into = d_y + d_x_feat + d_y_lagged
+            else:
+                split_length_into = d_y
+            
+            self.space_emb = nn.Embedding(num_embeddings=split_length_into, embedding_dim=d_model)
         else:
             split_length_into = 1
 
@@ -802,7 +822,7 @@ class Embedding(nn.Module):
         # concept there isn't much else we can do here.
         # NaNs should probably be set to a magic number value
         # in the dataset and passed to the null_value arg.
-        
+        # TODO this should match embedding below 
         y = torch.nan_to_num(y)
         x_time = torch.nan_to_num(x_time)
         x_age = torch.nan_to_num(x_age)
@@ -865,11 +885,19 @@ class Embedding(nn.Module):
         batch, length, dy = y.shape
         _, _, dx_feat = x_feat.shape
         _, _, dx_static = x_static.shape
+        _, _, dy_lagged = y_lagged.shape 
 
         # position emb ("local_emb")
+        # TODO NOTE: non augmented version differs from original implementation here bc dy is only the outputs, not also dy_c, should I add dx_feat here?
+        if self.augment_y:
+            y_dim = dy + dx_feat + dy_lagged
+        else:
+            y_dim = dy
+            
         local_pos = repeat(
-            torch.arange(length).to(x_time.device), f"length -> {batch} ({dy} length)" # CHANGE
-        )
+                torch.arange(length).to(x_time.device), f"length -> {batch} ({y_dim} length)" # CHANGE
+        ) 
+        
         if self.position_emb == "t2v":
             # periodic pos emb
             local_emb = self.local_emb(local_pos.float().unsqueeze(-1).float())[
@@ -886,35 +914,72 @@ class Embedding(nn.Module):
         x_time = torch.nan_to_num(x_time)
         x_age = torch.nan_to_num(x_age)
         x_static = torch.nan_to_num(x_static)
-        y_lagged = torch.nan_to_num(y_lagged)
-        x_time = repeat(x_time, f"batch len x_dim -> batch ({dy} len) x_dim")
-        x_age = repeat(x_age, f"batch len x_dim -> batch ({dy} len) x_dim")
-        x_feat = repeat(x_feat, f"batch len x_dim -> batch ({dy} len) x_dim")
-        x_static = repeat(x_static, f"batch len x_dim -> batch ({dy} len) x_dim")
-        y_lagged = repeat(y_lagged, f"batch len x_dim -> batch ({dy} len) x_dim")
         
-        x_emb = torch.cat((self.time_emb(x_time), x_age, x_feat, x_static, y_lagged), dim=-1)
-
-        # protect against NaNs in y, but keep track for Given emb
-         
-        true_null = torch.isnan(y)
-        y = torch.nan_to_num(y)
-        if not self.use_val:
-            y = torch.zeros_like(y)
+        # TODO non augmented differs from og impl bc we repeat age, x_feat, x_static, and y_lagged too
+        #      SHOULD x_static be repeated for each dy like this
+        if self.augment_y:
+            y_dim = dy + dx_feat + dy_lagged
+        else:
+            y_dim = dy
+            
+        x_time = repeat(x_time, f"batch len x_dim -> batch ({y_dim} len) x_dim")
+        x_age = repeat(x_age, f"batch len x_dim -> batch ({y_dim} len) x_dim")
+        x_static = repeat(x_static, f"batch len x_dim -> batch ({y_dim} len) x_dim")
         
-        y_original = y.clone()
-        y_original = Flatten(y_original)
-        y = self.data_drop(y)
-        y = Flatten(y)
-        mask = self.make_mask(y)
+        if self.augment_y:
+            
+            x_emb = torch.cat((self.time_emb(x_time), x_age, x_static), dim=-1)
+            
+            # protect against NaNs in y, but keep track for Given emb
+            y = torch.cat([y, x_feat, y_lagged], dim=-1)
+            true_null = torch.isnan(y)
+            y = torch.nan_to_num(y)
+            if not self.use_val:
+                y = torch.zeros_like(y)
+            
+            y_original = y.clone()
+            y_original = Flatten(y_original)
+            y = self.data_drop(y)
+            y = Flatten(y)
+            mask = self.make_mask(y)
+            
+        else:
+            y_lagged = torch.nan_to_num(y_lagged)
+            x_feat = torch.nan_to_num(x_feat)
+            
+            x_feat = repeat(x_feat, f"batch len x_dim -> batch ({dy} len) x_dim")
+            y_lagged = repeat(y_lagged, f"batch len x_dim -> batch ({dy} len) x_dim")
+            x_emb = torch.cat((self.time_emb(x_time), x_age, x_feat, x_static, y_lagged), dim=-1)
 
-        # concat time_emb, y --> FF --> val_time_emb
+            # protect against NaNs in y, but keep track for Given emb
+            true_null = torch.isnan(y)
+            y = torch.nan_to_num(y)
+            if not self.use_val:
+                y = torch.zeros_like(y)
+            
+            y_original = y.clone()
+            y_original = Flatten(y_original)
+            y = self.data_drop(y)
+            y = Flatten(y)
+            mask = self.make_mask(y)
+
+        # concat time_emb, y --> FF --> val_time_emi
+        # NOTE: this differs from the original spacetimeformer implementation bc we concatenate 
+        # the outputs y to the time embedding, in addition to the static vars, dynamic real features, and y_lagged
+        # 
         val_time_inp = torch.cat((y, x_emb), dim=-1)
         val_time_emb = self.val_time_emb(val_time_inp) # y_emb_inp_dim (1) + time_dim (24) + 1 + d_x_feat (6) + d_x_static (14) + d_y_lagged (138)
 
         # "given" embedding
         if self.use_given:
-            given = torch.ones((batch, length, dy)).long().to(x_time.device)  # start as True
+            # NOTE TODO this differs from og impl bc dy would include dy_c for encoder
+            if self.augment_y:
+                y_dim = dy + dx_feat + dy_lagged
+            else:
+                y_dim = dy
+            
+            given = torch.ones((batch, length, y_dim)).long().to(x_time.device)  # start as True
+            
             if not self.is_encoder:
                 # mask missing values that need prediction...
                 given[:, self.start_token_len :, :] = 0  # (False)
@@ -945,8 +1010,14 @@ class Embedding(nn.Module):
                 length //= 2
 
         # space embedding
+        # NOTE TODO this differs from og impl bc dy would include dy_c for encoder
+        if self.augment_y:
+            y_dim = dy + dx_feat + dy_lagged
+        else:
+            y_dim = dy
+            
         var_idx = repeat(
-            torch.arange(dy).long().to(x_time.device), f"dy -> {batch} (dy {length})"
+            torch.arange(y_dim).long().to(x_time.device), f"dy -> {batch} (dy {length})"
         )
 
         var_idx_true = var_idx.clone()
@@ -1262,20 +1333,17 @@ class AttentionLayer(nn.Module):
         self, 
         attention, 
         d_model, 
+        d_queries_keys, 
+        d_values,
         n_heads, 
-        d_keys=None, 
-        d_values=None,
         dropout_qkv=0.0,
         mix=False
     ):
         super(AttentionLayer, self).__init__()
 
-        d_keys = d_keys or (d_model // n_heads)
-        d_values = d_values or (d_model // n_heads)
-
         self.inner_attention = attention()
-        self.query_projection = nn.Linear(d_model, d_keys * n_heads)
-        self.key_projection = nn.Linear(d_model, d_keys * n_heads)
+        self.query_projection = nn.Linear(d_model, d_queries_keys * n_heads)
+        self.key_projection = nn.Linear(d_model, d_queries_keys * n_heads)
         self.value_projection = nn.Linear(d_model, d_values * n_heads)
         self.out_projection = nn.Linear(d_values * n_heads, d_model)
         self.dropout_qkv = nn.Dropout(dropout_qkv)
@@ -1375,8 +1443,8 @@ class SpacetimeformerModel(nn.Module):
         use_given: bool = True,
         recon_mask_skip_all: float = 1.0,
         recon_mask_max_seq_len: int = 5,
-        recon_mask_drop_seq: float = 0.1,
-        recon_mask_drop_standard: float = 0.2,
+        recon_mask_drop_seq: float = 0.2,
+        recon_mask_drop_standard: float = 0.1,
         recon_mask_drop_full: float = 0.05,
         # univariate input
         input_size: int = 1,
@@ -1456,6 +1524,7 @@ class SpacetimeformerModel(nn.Module):
 
         # embeddings. seperate enc/dec in case the variable indices are not aligned
         self.enc_embedding = Embedding(
+            # d_y=self.input_size + self.num_feat_dynamic_real - self.num_time_features - 1,
             d_y=self.input_size,
             d_x_time=self.num_time_features, # time features excluding age
             d_x_feat=self.num_feat_dynamic_real - self.num_time_features - 1, # subtracdt time features and age
@@ -1996,7 +2065,7 @@ class SpacetimeformerModel(nn.Module):
             Attn = AttentionLayer(
                 attention=partial(FullAttention, attention_dropout=dropout_attn_matrix),
                 d_model=d_model,
-                d_keys=d_qk,
+                d_queries_keys=d_qk,
                 d_values=d_v,
                 n_heads=n_heads,
                 mix=False,
@@ -2011,7 +2080,7 @@ class SpacetimeformerModel(nn.Module):
                     attention_dropout=dropout_attn_matrix,
                 ),
                 d_model=d_model,
-                d_keys=d_qk,
+                d_queries_keys=d_qk,
                 d_values=d_v,
                 n_heads=n_heads,
                 mix=False,
@@ -2027,7 +2096,7 @@ class SpacetimeformerModel(nn.Module):
                     feature_redraw_interval=performer_redraw_interval,
                 ),
                 d_model=d_model,
-                d_keys=d_qk,
+                d_queries_keys=d_qk,
                 d_values=d_v,
                 n_heads=n_heads,
                 mix=False,

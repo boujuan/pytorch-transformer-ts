@@ -125,8 +125,7 @@ if __name__ == "__main__":
 
     ## SETUP LOGGING
 
-    if not os.path.exists(config["experiment"]["log_dir"]):
-        os.makedirs(config["experiment"]["log_dir"])
+    os.makedirs(config["experiment"]["log_dir"], exist_ok=True)
     wandb_logger = WandbLogger(
         project="wf_forecasting",
         name=config["experiment"]["run_name"],

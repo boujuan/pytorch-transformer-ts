@@ -103,8 +103,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         use_given: bool = True,
         recon_mask_skip_all: float = 1.0,
         recon_mask_max_seq_len: int = 5,
-        recon_mask_drop_seq: float = 0.1,
-        recon_mask_drop_standard: float = 0.2,
+        recon_mask_drop_seq: float = 0.2,
+        recon_mask_drop_standard: float = 0.1,
         recon_mask_drop_full: float = 0.05,
         # loss: DistributionLoss = NegativeLogLikelihood(),
         scaling: Optional[str] = "std",
@@ -208,7 +208,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
     
     @staticmethod
     def get_params(trial, context_length_choices):
-        """ generate dictionary of tunable parameters compatible with optuna TODO """
+        """ generate dictionary of tunable parameters compatible with optuna TODO HIGH """
+        d_qkv = trial.suggest_categorical("d_qkv", [32, 64, 128])
         return {
             "context_length": trial.suggest_categorical("context_length", context_length_choices),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
@@ -217,8 +218,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             "num_decoder_layers": trial.suggest_int("num_decoder_layers", 2, 8, step=2),
             "dim_feedforward": trial.suggest_categorical("dim_feedforward", [32, 64, 128]),
             "d_model": trial.suggest_categorical("d_model", [32, 64, 128]),
-            "d_queries_keys": trial.suggest_categorical("d_qkv", [32, 64, 128]),
-            "d_values": trial.suggest_categorical("d_qkv", [32, 64, 128]),
+            "d_queries_keys": d_qkv,
+            "d_values": d_qkv,
             "n_heads": trial.suggest_int("n_heads", 4, 8, step=2)
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
         }

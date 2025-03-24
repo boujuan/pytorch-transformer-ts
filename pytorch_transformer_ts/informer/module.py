@@ -59,7 +59,8 @@ class FullAttention(nn.Module):
         _, S, _, D = values.shape
         scale = self.scale or 1.0 / sqrt(E)
 
-        scores = torch.einsum("blhe,bshe->bhls", queries, keys)
+        # compute dot product of queries and keys for each batch and head, for each token l in query and s in key
+        scores = torch.einsum("blhe,bshe->bhls", queries, keys) # batch, each head, number of queries, number of keys,
         if self.mask_flag:
             if attn_mask is None:
                 attn_mask = TriangularCausalMask(B, L, device=queries.device)
@@ -67,7 +68,7 @@ class FullAttention(nn.Module):
             scores.masked_fill_(attn_mask.mask, -np.inf)
 
         A = self.dropout(torch.softmax(scale * scores, dim=-1))
-        V = torch.einsum("bhls,bshd->blhd", A, values)
+        V = torch.einsum("bhls,bshd->blhd", A, values) # batch, number of queries, number of heads, value dimension
 
         if self.output_attention:
             return (V.contiguous(), A)
@@ -204,11 +205,12 @@ class AttentionLayer(nn.Module):
         self.mix = mix
 
     def forward(self, queries, keys, values, attn_mask):
+        # queries, keys, values = x, x, x in implementation of AttentionLayer
         B, L, _ = queries.shape
         _, S, _ = keys.shape
         H = self.n_heads
 
-        queries = self.query_projection(queries).view(B, L, H, -1)
+        queries = self.query_projection(queries).view(B, L, H, -1) 
         keys = self.key_projection(keys).view(B, S, H, -1)
         values = self.value_projection(values).view(B, S, H, -1)
 
@@ -262,9 +264,9 @@ class EncoderLayer(nn.Module):
         #     attn_mask = attn_mask
         # ))
         new_x, attn = self.attention(x, x, x, attn_mask=attn_mask)
-        x = x + self.dropout(new_x)
+        x = x + self.dropout(new_x) # residual addition
 
-        y = x = self.norm1(x)
+        y = x = self.norm1(x) # normalization
         y = self.dropout(self.activation(self.conv1(y.transpose(-1, 1))))
         y = self.dropout(self.conv2(y).transpose(-1, 1))
 
