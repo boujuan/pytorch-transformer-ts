@@ -1,4 +1,5 @@
-import pytorch_lightning as pl
+# Use the newer namespace consistent with Lightning > v2.0
+import lightning.pytorch as pl
 import torch
 # from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
