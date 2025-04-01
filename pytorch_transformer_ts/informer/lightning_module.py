@@ -66,12 +66,11 @@ class InformerLightningModule(pl.LightningModule):
         past_observed_values = batch["past_observed_values"]
         future_observed_values = batch["future_observed_values"]
         
-        # TODO HIGH REMOVE
-        past_time_feat = torch.broadcast_to(torch.linspace(0, past_time_feat.shape[-1], past_time_feat.shape[-1]), past_time_feat.shape)
-        past_target = torch.broadcast_to(torch.linspace(0, past_target.shape[-1], past_target.shape[-1]), past_target.shape)
-        future_time_feat = torch.broadcast_to(torch.linspace(0, future_time_feat.shape[-1], future_time_feat.shape[-1]), future_time_feat.shape)
-        future_target = torch.broadcast_to(torch.linspace(0, future_target.shape[-1], future_target.shape[-1]), future_target.shape)
-        past_time_feat = torch.broadcast_to(torch.linspace(0, past_time_feat.shape[-1], past_time_feat.shape[-1]), past_time_feat.shape)
+        # past_time_feat = torch.broadcast_to(torch.linspace(0, past_time_feat.shape[-1], past_time_feat.shape[-1]), past_time_feat.shape)
+        # past_target = torch.broadcast_to(torch.linspace(0, past_target.shape[-1], past_target.shape[-1]), past_target.shape)
+        # future_time_feat = torch.broadcast_to(torch.linspace(0, future_time_feat.shape[-1], future_time_feat.shape[-1]), future_time_feat.shape)
+        # future_target = torch.broadcast_to(torch.linspace(0, future_target.shape[-1], future_target.shape[-1]), future_target.shape)
+        # past_time_feat = torch.broadcast_to(torch.linspace(0, past_time_feat.shape[-1], past_time_feat.shape[-1]), past_time_feat.shape)
          
         transformer_inputs, loc, scale, _ = self.model.create_network_inputs(
             feat_static_cat,
