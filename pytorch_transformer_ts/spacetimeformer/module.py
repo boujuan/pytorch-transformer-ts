@@ -836,7 +836,7 @@ class Embedding(nn.Module):
         mask = self.make_mask(y)
 
         # position embedding ("local_emb")
-        local_pos = torch.arange(length).to(x_time.device)
+        local_pos = torch.arange(length) # CHANGE .to(x_time.device)
         if self.position_emb == "t2v":
             # first idx of Time2Vec output is unbounded so we drop it to
             # reuse code as a learnable pos embb
@@ -862,7 +862,7 @@ class Embedding(nn.Module):
 
         # "given" embedding. not important for temporal emb
         # when not using a start token
-        given = torch.ones((bs, length)).long().to(x_time.device)
+        given = torch.ones((bs, length)).long() # CHANGE .to(x_time.device)
         if not self.is_encoder and self.use_given:
             given[:, self.start_token_len :] = 0
         given_emb = self.given_emb(given)
@@ -894,8 +894,11 @@ class Embedding(nn.Module):
         else:
             y_dim = dy
             
+        # local_pos = repeat(
+        #         torch.arange(length).to(x_time.device), f"length -> {batch} ({y_dim} length)" # CHANGE
+        # ) 
         local_pos = repeat(
-                torch.arange(length).to(x_time.device), f"length -> {batch} ({y_dim} length)" # CHANGE
+                torch.arange(length), f"length -> {batch} ({y_dim} length)" # CHANGE
         ) 
         
         if self.position_emb == "t2v":
@@ -978,7 +981,7 @@ class Embedding(nn.Module):
             else:
                 y_dim = dy
             
-            given = torch.ones((batch, length, y_dim)).long().to(x_time.device)  # start as True
+            given = torch.ones((batch, length, y_dim)).long() # CHANGE .to(x_time.device)  # start as True
             
             if not self.is_encoder:
                 # mask missing values that need prediction...
@@ -1016,8 +1019,11 @@ class Embedding(nn.Module):
         else:
             y_dim = dy
             
+        # var_idx = repeat(
+        #     torch.arange(y_dim).long().to(x_time.device), f"dy -> {batch} (dy {length})"
+        # )
         var_idx = repeat(
-            torch.arange(y_dim).long().to(x_time.device), f"dy -> {batch} (dy {length})"
+            torch.arange(y_dim).long(), f"dy -> {batch} (dy {length})" # CHANGE
         )
 
         var_idx_true = var_idx.clone()
@@ -1033,7 +1039,7 @@ class TriangularCausalMask:
         with torch.no_grad():
             self._mask = torch.triu(
                 torch.ones(mask_shape, dtype=torch.bool), diagonal=1
-            ).to(device)
+            ) # .to(device) CHANGE
 
     @property
     def mask(self):
@@ -1045,8 +1051,8 @@ class ProbMask:
         _mask_ex = _mask[None, None, :].expand(B, H, L, scores.shape[-1])
         indicator = _mask_ex[
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
-        ].to(device)
-        self._mask = indicator.view(scores.shape).to(device)
+        ] # .to(device) CHANGE
+        self._mask = indicator.view(scores.shape) # .to(device) CHANGE
 
     @property
     def mask(self):
@@ -1126,12 +1132,12 @@ class ReconstructionDropout(nn.Module):
             # mask full timesteps
             full_timestep_mask = torch.bernoulli(
                 (1.0 - self.drop_full_timesteps) * torch.ones(bs, length, 1)
-            ).to(dev)
+            ) # CHANGE .to(dev)
 
             # mask each element indp
             standard_mask = torch.bernoulli(
                 (1.0 - self.drop_standard) * torch.ones(bs, length, dim)
-            ).to(dev)
+            ) # CHANGE .to(dev)
 
             # subsequence mask
             seq_mask = (
@@ -1148,7 +1154,7 @@ class ReconstructionDropout(nn.Module):
             # the usual activation strength adjustment makes sense here)
             skip_all_drop_mask = torch.bernoulli(
                 1.0 - self.skip_all_drop * torch.ones(bs, 1, 1)
-            ).to(dev)
+            ) # CHANGE.to(dev)
 
             mask = 1.0 - (
                 (1.0 - (full_timestep_mask * standard_mask * seq_mask))
@@ -1175,7 +1181,7 @@ class RandomMask(nn.Module):
             return y
         mask = torch.bernoulli((1.0 - self.prob) * torch.ones(bs, length, 1))
         mask.requires_grad = False
-        mask = mask.to(y.device)
+        mask = mask # CHANGE .to(y.device)
         masked_y = (y * mask) + (self.change_to_val * (1.0 - mask))
         return masked_y
 
@@ -1250,7 +1256,7 @@ class ProbAttention(nn.Module):
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
         ] = torch.matmul(attn, V).type_as(context_in)
         if self.output_attention:
-            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn).to(attn.device)
+            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn) # CHANGE .to(attn.device)
             attns[
                 torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
             ] = attn
@@ -1369,7 +1375,7 @@ class AttentionLayer(nn.Module):
 
         if output_attn and attn is None:
             onehot_values = (
-                torch.eye(S).unsqueeze(0).repeat(B, 1, 1).unsqueeze(2).to(values.device)
+                torch.eye(S).unsqueeze(0).repeat(B, 1, 1).unsqueeze(2) # CHANGE .to(values.device)
             )
             with torch.no_grad():
                 attn, _ = self.inner_attention(
@@ -2211,7 +2217,7 @@ class ProbAttention(nn.Module):
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
         ] = torch.matmul(attn, V).type_as(context_in)
         if self.output_attention:
-            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn).to(attn.device)
+            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn) # CHANGE.to(attn.device)
             attns[
                 torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
             ] = attn

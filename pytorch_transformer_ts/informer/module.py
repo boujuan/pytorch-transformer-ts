@@ -11,14 +11,13 @@ from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
 
-
 class TriangularCausalMask:
     def __init__(self, B, L, device="cpu"):
         mask_shape = [B, 1, L, L]
         with torch.no_grad():
             self._mask = torch.triu(
-                torch.ones(mask_shape, dtype=torch.bool), diagonal=1
-            ).to(device)
+                torch.ones(mask_shape, dtype=torch.bool), diagonal=1)\
+            # .to(device) # TODO
 
     @property
     def mask(self):
@@ -27,12 +26,13 @@ class TriangularCausalMask:
 
 class ProbMask:
     def __init__(self, B, H, L, index, scores, device="cpu"):
-        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).to(device).triu(1)
+        # _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).to(device).triu(1) # CHANGE
+        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).triu(1)
         _mask_ex = _mask[None, None, :].expand(B, H, L, scores.shape[-1])
         indicator = _mask_ex[
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
-        ].to(device)
-        self._mask = indicator.view(scores.shape).to(device)
+        ] #.to(device)
+        self._mask = indicator.view(scores.shape) #.to(device) #CHANGE
 
     @property
     def mask(self):
@@ -143,7 +143,7 @@ class ProbAttention(nn.Module):
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
         ] = torch.matmul(attn, V).type_as(context_in)
         if self.output_attention:
-            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn).to(attn.device)
+            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn) # .to(attn.device) CHANGE
             attns[
                 torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
             ] = attn
@@ -400,10 +400,11 @@ class InformerModel(nn.Module):
         )
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
         # make sure zero is first lag
-        # CHANGE
-        if 0 in self.lags_seq:
-            del self.lags_seq[self.lags_seq.index(0)]
-        self.lags_seq.insert(0, 0)
+        # CHANGE TODO high add back in
+        # if 0 in self.lags_seq:
+        #     del self.lags_seq[self.lags_seq.index(0)]
+        # self.lags_seq.insert(0, 0)
+        
         self.num_parallel_samples = num_parallel_samples
         self.history_length = context_length + max(self.lags_seq)
         self.embedder = FeatureEmbedder(
@@ -545,7 +546,8 @@ class InformerModel(nn.Module):
 
         lagged_values = []
         for lag_index in indices:
-            lag_index = max(0, lag_index) # CHANGE
+            # lag_index = max(0, lag_index) # CHANGE
+            assert lag_index >= 0
             begin_index = -lag_index - subsequences_length
             end_index = -lag_index if lag_index > 0 else None
             lagged_values.append(sequence[:, begin_index:end_index, ...])
@@ -695,6 +697,9 @@ class InformerModel(nn.Module):
 
         if num_parallel_samples is None:
             num_parallel_samples = self.num_parallel_samples
+        
+        # assert past_time_feat.shape[1] == self.context_length
+        # assert future_time_feat.shape[1] == self.prediction_length
 
         encoder_inputs, loc, scale, static_feat = self.create_network_inputs(
             feat_static_cat,
