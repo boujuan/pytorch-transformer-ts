@@ -212,7 +212,7 @@ class TriangularCausalMask:
         with torch.no_grad():
             self._mask = torch.triu(
                 torch.ones(mask_shape, dtype=torch.bool), diagonal=1
-            ).to(device)
+            ).type_ #.to(device) CHANGE
 
     @property
     def mask(self):

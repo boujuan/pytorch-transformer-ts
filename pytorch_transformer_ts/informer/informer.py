@@ -5,25 +5,21 @@ import multiprocessing
 import matplotlib.dates as mdates
 from matplotlib import pyplot as plt
 from itertools import islice
-import numpy as np
+from line_profiler import profile
 
 # %%
 from gluonts.evaluation import make_evaluation_predictions, Evaluator
 # from gluonts.dataset.repository.datasets import get_dataset
 from gluonts.multivariate.datasets.dataset import datasets 
-from gluonts.dataset.pandas import IterableLazyFrame
-import pandas as pd
-import polars as pl
 from estimator import InformerEstimator
 from lightning_module import InformerLightningModule
 from lightning.pytorch import seed_everything
-from wind_forecasting.preprocessing.data_module import DataModule
 
 from gluonts.model.forecast_generator import SampleForecastGenerator, DistributionForecastGenerator
 from gluonts.torch.distributions import LowRankMultivariateNormalOutput
 
-checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts/lightning_logs/version_26/checkpoints/epoch=49-step=5000.ckpt'
-
+# checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts/lightning_logs/version_88/checkpoints/epoch=0-step=10.ckpt'
+checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts/lightning_logs/version_90/checkpoints/epoch=0-step=2.ckpt'
 # %%
 # torch.manual_seed(0)
 # np.random.seed(0)
@@ -33,8 +29,8 @@ seed_everything(0, workers=True)
 if True:
     # dataset = get_dataset("electricity")
     dataset = datasets["solar"]()
-    train_dataset = dataset.train_ds
-    test_dataset = dataset.test_ds
+    training_data = dataset.train_ds
+    test_data = dataset.test_ds
     freq = dataset.freq
     prediction_length = dataset.prediction_length
     context_length = dataset.prediction_length*7
@@ -44,18 +40,19 @@ if True:
     input_size = dataset.target_dim
     num_feat_dynamic_real = 0
     num_feat_static_real = 0
-   
+    
+    
     # d = 0
     # ds = train_dataset[d] 
-    training_data = [{
-            "target": IterableLazyFrame(data=pd.DataFrame(ds["target"].T, columns=np.arange(ds["target"].shape[0])), dtype=pl.Float32),
-            **{k: ds[k] for k in ds if k != "target"}
-            } for d, ds in enumerate(train_dataset)]
+    # training_data = [{
+    #         "target": IterableLazyFrame(data=pd.DataFrame(ds["target"].T, columns=np.arange(ds["target"].shape[0])), dtype=pl.Float32, load=True),
+    #         **{k: ds[k] for k in ds if k != "target"}
+    #         } for d, ds in enumerate(train_dataset)]
 
-    test_data = [{
-            "target": IterableLazyFrame(data=pd.DataFrame(ds["target"].T, columns=np.arange(ds["target"].shape[0])), dtype=pl.Float32),
-            **{k: ds[k] for k in ds if k != "target"}
-            } for d, ds in enumerate(test_dataset)]
+    # test_data = [{
+    #         "target": IterableLazyFrame(data=pd.DataFrame(ds["target"].T, columns=np.arange(ds["target"].shape[0])), dtype=pl.Float32, load=True),
+    #         **{k: ds[k] for k in ds if k != "target"}
+    #         } for d, ds in enumerate(test_dataset)]
 # else:
 #     with open("/Users/ahenry/Documents/toolboxes/wind_forecasting/examples/inputs/training_inputs_aoifemac_flasc.yaml", 'r') as file:
 #         config  = yaml.safe_load(file)
@@ -107,7 +104,7 @@ estimator = InformerEstimator(
     num_decoder_layers=2,
     n_heads=2,
     activation="relu",
-    
+    use_lazyframe=False,
     # training params
     batch_size=128,
     num_batches_per_epoch=100,
@@ -116,58 +113,61 @@ estimator = InformerEstimator(
 )
 
 # %%
+TEST = False
+
 predictor = estimator.train(
     training_data=training_data,
     # shuffle_buffer_length=1024,
     # ckpt_path=checkpoint
 )
-# %%
-model = InformerLightningModule.load_from_checkpoint(checkpoint)
-transformation = estimator.create_transformation(use_lazyframe=False)
-predictor = estimator.create_predictor(transformation, model, 
-                                        forecast_generator=SampleForecastGenerator(estimator.distr_output))
-forecast_it, ts_it = make_evaluation_predictions(
-    dataset=test_data,
-    predictor=predictor
-)
+if TEST:
+    # %%
+    model = InformerLightningModule.load_from_checkpoint(checkpoint)
+    transformation = estimator.create_transformation(use_lazyframe=False)
+    predictor = estimator.create_predictor(transformation, model, 
+                                            forecast_generator=DistributionForecastGenerator(estimator.distr_output))
+    forecast_it, ts_it = make_evaluation_predictions(
+        dataset=test_data,
+        predictor=predictor
+    )
 
-# %%
-forecasts = list(islice(forecast_it, 1))
+    # %%
+    forecasts = list(islice(forecast_it, 1))
 
-# %%
-tss = list(islice(ts_it, 1))
+    # %%
+    tss = list(islice(ts_it, 1))
 
-# %%
-# num_workers is limited to 10 if cpu has more cores
-num_workers = min(multiprocessing.cpu_count(), 10)
+    # %%
+    # num_workers is limited to 10 if cpu has more cores
+    num_workers = min(multiprocessing.cpu_count(), 10)
 
-evaluator = Evaluator(num_workers=None)
+    evaluator = Evaluator(num_workers=None)
 
-# %%
-agg_metrics, ts_metrics = evaluator(iter(tss), iter(forecasts))
+    # %%
+    agg_metrics, ts_metrics = evaluator(iter(tss), iter(forecasts))
 
-# %%
-agg_metrics
+    # %%
+    agg_metrics
 
-# %%
-plt.figure(figsize=(20, 15))
-date_formater = mdates.DateFormatter('%b, %d')
-plt.rcParams.update({'font.size': 15})
+    # %%
+    plt.figure(figsize=(20, 15))
+    date_formater = mdates.DateFormatter('%b, %d')
+    plt.rcParams.update({'font.size': 15})
 
-for idx, (forecast, ts) in islice(enumerate(zip(forecasts, tss)), 9):
-    ax = plt.subplot(3, 3, idx+1)
+    for idx, (forecast, ts) in islice(enumerate(zip(forecasts, tss)), 9):
+        ax = plt.subplot(3, 3, idx+1)
 
-    # Convert index for plot
-    ts = ts[-4 * dataset.metadata.prediction_length:].to_timestamp()
-    
-    ax.plot(ts, label="target")
-    forecast.plot( color='g')
-    ax.set_xticks(rotation=60)
-    ax.set_title(forecast.item_id)
-    ax.xaxis.set_major_formatter(date_formater)
+        # Convert index for plot
+        ts = ts[-4 * dataset.metadata.prediction_length:].to_timestamp()
+        
+        ax.plot(ts, label="target")
+        forecast.plot( color='g')
+        ax.set_xticks(rotation=60)
+        ax.set_title(forecast.item_id)
+        ax.xaxis.set_major_formatter(date_formater)
 
-plt.gcf().tight_layout()
-plt.legend()
-plt.show()
+    plt.gcf().tight_layout()
+    plt.legend()
+    plt.show()
 
 

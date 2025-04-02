@@ -10,6 +10,7 @@ from gluonts.time_feature import get_lags_for_frequency
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
+from line_profiler import profile
 
 class TriangularCausalMask:
     def __init__(self, B, L, device="cpu"):
@@ -398,7 +399,7 @@ class InformerModel(nn.Module):
         )
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
         # make sure zero is first lag
-        # CHANGE TODO high add back in
+        # CHANGE TODO high add back in, is it okay to include 0 in lags_seq??
         # if 0 in self.lags_seq:
         #     del self.lags_seq[self.lags_seq.index(0)]
         # self.lags_seq.insert(0, 0)

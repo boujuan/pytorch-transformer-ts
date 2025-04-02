@@ -2065,7 +2065,7 @@ class SpacetimeformerModel(nn.Module):
         performer_attn_kernel: str,
         performer_redraw_interval: int,
     ):
-
+        # TODO HIGH change this to prob or performer
         if attn_str == "full":
             # standard full (n^2) attention
             Attn = AttentionLayer(

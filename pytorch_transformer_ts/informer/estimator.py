@@ -2,6 +2,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import polars as pl
 import numpy as np
+from line_profiler import profile
 
 import torch
 from gluonts.core.component import validated
@@ -77,6 +78,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
+        use_lazyframe=False,
         # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
@@ -101,6 +103,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         self.prediction_length = prediction_length
         self.distr_output = distr_output
         # self.loss = loss CHANGE
+        self.use_lazyframe = use_lazyframe
 
         self.input_size = input_size
         self.d_model = d_model
@@ -144,19 +147,28 @@ class InformerEstimator(PyTorchLightningEstimator):
     @staticmethod
     def get_params(trial, context_length_choices):
         """ generate dictionary of tunable parameters compatible with optuna """
+        # in paper: batch-size=32, num_decoder_layers=2, num_epochs=8, learning rate starts at 1e-4 and decays by 0.5 every epoch
+        # encoder is a "3-layer stack and a 1-layer stack" e.g. num_encoder_layers=3
+        # d_model=512, num_heads=8, dim_feedforward=2048, lr=0.0001
         return {
             "context_length": trial.suggest_categorical("context_length", context_length_choices),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
-            "batch_size": trial.suggest_int("batch_size", 128, 256, step=64),
-            "num_encoder_layers": trial.suggest_int("num_encoder_layers", 2, 8, step=2),
-            "num_decoder_layers": trial.suggest_int("num_decoder_layers", 2, 8, step=2),
-            "dim_feedforward": trial.suggest_categorical("dim_feedforward", [32, 64, 128]),
-            "d_model": trial.suggest_categorical("d_model", [32, 64, 128]),
-            "n_heads": trial.suggest_int("n_heads", 4, 8, step=2)
+            "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
+            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", [2, 3, 4]),
+            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", [1, 2, 3]),
+            # "dim_feedforward": trial.suggest_categorical("dim_feedforward", [512, 1024, 2048]),
+            "d_model": trial.suggest_categorical("d_model", [128, 256, 512]),
+            "n_heads": trial.suggest_categorical("n_heads", [4, 6, 8])
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
         }
     
-    def create_transformation(self, use_lazyframe=True) -> Transformation:
+    # @profile 
+    def create_transformation(self, use_lazyframe=None) -> Transformation:
+        if use_lazyframe is None and hasattr(self, "use_lazyframe"):
+            use_lazyframe = self.use_lazyframe
+        else:
+            use_lazyframe = False
+        # this is called in src/gluonts/torch/model/estimator.py
         remove_field_names = []
         if self.num_feat_static_real == 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)
@@ -230,6 +242,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             ]
         )
 
+    # @profile
     def _create_instance_splitter(self, module: InformerLightningModule, mode: str):
         assert mode in ["training", "validation", "test"]
 
@@ -254,6 +267,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             dummy_value=self.distr_output.value_in_support,
         )
 
+    # @profile
     def create_training_data_loader(
         self,
         data: Dataset,
@@ -274,6 +288,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             num_batches_per_epoch=self.num_batches_per_epoch,
         )
 
+    # @profile
     def create_validation_data_loader(
         self,
         data: Dataset,
@@ -292,6 +307,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             # num_batches_per_epoch=self.num_batches_per_epoch,
         )
 
+    # @profile
     def create_predictor(
         self,
         transformation: Transformation,
@@ -310,6 +326,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             **kwargs
         )
 
+    # @profile
     def create_lightning_module(self) -> InformerLightningModule:
         model_params = dict(
             freq=self.freq,

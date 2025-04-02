@@ -6,6 +6,7 @@ from gluonts.torch.util import weighted_average
 
 # CHANGE
 from pytorch_transformer_ts.informer.module import InformerModel
+from line_profiler import profile
 
 class InformerLightningModule(pl.LightningModule):
     def __init__(
@@ -55,7 +56,9 @@ class InformerLightningModule(pl.LightningModule):
             lr=self.lr,
             weight_decay=self.weight_decay,
         )
+        
     # for training
+    @profile
     def forward(self, batch):
         feat_static_cat = batch["feat_static_cat"]
         feat_static_real = batch["feat_static_real"]

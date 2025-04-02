@@ -137,14 +137,15 @@ class AutoformerEstimator(PyTorchLightningEstimator):
     @staticmethod
     def get_params(trial, context_length_choices):
         """ generate dictionary of tunable parameters compatible with optuna TODO"""
+        # in paper: 2 encoder layers and 1 decoder layer. batch_size=32, init_lr=1e-4, early stopping with 10 epchs, dmodel=512, d_ff=2048
         return {
             "context_length": trial.suggest_categorical("context_length", context_length_choices),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
-            "batch_size": trial.suggest_int("batch_size", 128, 256, step=64),
-            "num_encoder_layers": trial.suggest_int("num_encoder_layers", 2, 8, step=2),
-            "num_decoder_layers": trial.suggest_int("num_decoder_layers", 2, 8, step=2),
-            "dim_feedforward": trial.suggest_categorical("dim_feedforward", [32, 64, 128]),
-            "n_heads": trial.suggest_int("n_heads", 4, 8, step=2)
+            "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
+            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", [2, 3, 4]),
+            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", [1, 2, 3]),
+            "d_model": trial.suggest_categorical("d_model", [128, 256, 512]),
+            "n_heads": trial.suggest_categorical("n_heads", [4, 6, 8])
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
         }
 

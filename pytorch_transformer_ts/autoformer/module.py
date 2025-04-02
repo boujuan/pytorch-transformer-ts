@@ -329,7 +329,8 @@ class AutoCorrelation(nn.Module):
             .unsqueeze(0)
             .unsqueeze(0)
             .repeat(batch, head, channel, 1)
-            .to(values.device)
+            .type_as(values)
+            # .to(values.device) # CHANGE
         )
         # find top k
         top_k = int(self.factor * math.log(length))
@@ -369,7 +370,8 @@ class AutoCorrelation(nn.Module):
             .unsqueeze(0)
             .unsqueeze(0)
             .repeat(batch, head, channel, 1)
-            .to(values.device)
+            .type_as(values)
+            # .to(values.device) #CHANGE
         )
         # find top k
         top_k = int(self.factor * math.log(length))
