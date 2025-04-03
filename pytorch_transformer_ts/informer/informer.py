@@ -109,7 +109,7 @@ estimator = InformerEstimator(
     # training params
     batch_size=128,
     num_batches_per_epoch=100,
-    trainer_kwargs=dict(max_epochs=44, accelerator='cpu', devices=12),
+    trainer_kwargs=dict(max_epochs=44, accelerator='cpu', devices=1),
     distr_output=LowRankMultivariateNormalOutput(dim=input_size, rank=8)
 )
 

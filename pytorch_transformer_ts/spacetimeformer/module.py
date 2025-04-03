@@ -1039,7 +1039,7 @@ class TriangularCausalMask:
         with torch.no_grad():
             self._mask = torch.triu(
                 torch.ones(mask_shape, dtype=torch.bool), diagonal=1
-            ).type_as(queries) # CHANGE.to(device)
+            ).type_as(queries.type(torch.bool)) # CHANGE.to(device)
 
     @property
     def mask(self):
@@ -1047,12 +1047,12 @@ class TriangularCausalMask:
 
 class ProbMask:
     def __init__(self, B, H, L, index, scores, values):
-        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).type_as(values).triu(1) # CHANGE .to(device).triu(1)
+        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).type_as(values.type(torch.bool)).triu(1) # CHANGE .to(device).triu(1)
         _mask_ex = _mask[None, None, :].expand(B, H, L, scores.shape[-1])
         indicator = _mask_ex[
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
         ].type_as(values) #.to(device)
-        self._mask = indicator.view(scores.shape).type_as(values) # .to(device)
+        self._mask = indicator.view(scores.shape).type_as(values.type(torch.bool)) # .to(device)
 
     @property
     def mask(self):
