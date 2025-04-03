@@ -327,7 +327,7 @@ class DSFMarginal(nn.Module):
             self.input_dim = input_dim
             self.dim_reducer = nn.Linear(input_dim, self.expected_context_dim)
             # Move to the same device as the input tensor
-            self.dim_reducer = self.dim_reducer.to(input_tensor.device)
+            self.dim_reducer = self.dim_reducer.type_as(input_tensor) # CHANGE to(input_tensor.device)
         
         # Apply dimension reduction if needed
         if self.dim_reducer is not None:

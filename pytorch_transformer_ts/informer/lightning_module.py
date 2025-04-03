@@ -6,19 +6,24 @@ from gluonts.torch.util import weighted_average
 
 # CHANGE
 from pytorch_transformer_ts.informer.module import InformerModel
-from line_profiler import profile
+
 
 class InformerLightningModule(pl.LightningModule):
     def __init__(
         self,
         model: dict,
         # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
-        lr: float = 1e-3,
+        lr: float = 1e-4,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters()
-        self.model = InformerModel(**model)
+        
+        if isinstance(model, dict):
+            self.model = InformerModel(**model)
+            self.save_hyperparameters()
+        else:
+            self.model = model
+            self.save_hyperparameters(ignore=["model"])
         # self.loss = loss CHANGE
         self.lr = lr
         self.weight_decay = weight_decay
@@ -58,7 +63,7 @@ class InformerLightningModule(pl.LightningModule):
         )
         
     # for training
-    @profile
+    
     def forward(self, batch):
         feat_static_cat = batch["feat_static_cat"]
         feat_static_real = batch["feat_static_real"]

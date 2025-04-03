@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import polars as pl
 import numpy as np
-from line_profiler import profile
+
 
 import torch
 from gluonts.core.component import validated
@@ -63,8 +63,8 @@ class InformerEstimator(PyTorchLightningEstimator):
         num_encoder_layers: int,
         num_decoder_layers: int,
         dim_feedforward: int,
-        d_model: int = 64,
-        n_heads: int = 4,
+        d_model: int = 512,
+        n_heads: int = 8,
         input_size: int = 1,
         activation: str = "gelu",
         dropout: float = 0.1,
@@ -162,7 +162,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
         }
     
-    # @profile 
+     
     def create_transformation(self, use_lazyframe=None) -> Transformation:
         if use_lazyframe is None and hasattr(self, "use_lazyframe"):
             use_lazyframe = self.use_lazyframe
@@ -242,7 +242,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             ]
         )
 
-    # @profile
+    
     def _create_instance_splitter(self, module: InformerLightningModule, mode: str):
         assert mode in ["training", "validation", "test"]
 
@@ -267,7 +267,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             dummy_value=self.distr_output.value_in_support,
         )
 
-    # @profile
+    
     def create_training_data_loader(
         self,
         data: Dataset,
@@ -288,7 +288,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             num_batches_per_epoch=self.num_batches_per_epoch,
         )
 
-    # @profile
+    
     def create_validation_data_loader(
         self,
         data: Dataset,
@@ -307,7 +307,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             # num_batches_per_epoch=self.num_batches_per_epoch,
         )
 
-    # @profile
+    
     def create_predictor(
         self,
         transformation: Transformation,
@@ -326,7 +326,6 @@ class InformerEstimator(PyTorchLightningEstimator):
             **kwargs
         )
 
-    # @profile
     def create_lightning_module(self) -> InformerLightningModule:
         model_params = dict(
             freq=self.freq,

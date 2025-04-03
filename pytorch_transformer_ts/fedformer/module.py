@@ -207,12 +207,12 @@ def get_filter(base, k):
 
 
 class TriangularCausalMask:
-    def __init__(self, B, L, device="cpu"):
+    def __init__(self, B, L, queries): # device="cpu"):
         mask_shape = [B, 1, L, L]
         with torch.no_grad():
             self._mask = torch.triu(
                 torch.ones(mask_shape, dtype=torch.bool), diagonal=1
-            ).type_ #.to(device) CHANGE
+            ).type_as(queries) #.to(device) CHANGE
 
     @property
     def mask(self):
@@ -1635,7 +1635,7 @@ class FullAttention(nn.Module):
 
         if self.mask_flag:
             if attn_mask is None:
-                attn_mask = TriangularCausalMask(B, L, device=queries.device)
+                attn_mask = TriangularCausalMask(B, L, queries) # CHANGE, device=queries.device)
 
             scores.masked_fill_(attn_mask.mask, -np.inf)
 

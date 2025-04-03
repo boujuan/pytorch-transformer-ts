@@ -836,7 +836,7 @@ class Embedding(nn.Module):
         mask = self.make_mask(y)
 
         # position embedding ("local_emb")
-        local_pos = torch.arange(length).to(x_time.device)
+        local_pos = torch.arange(length).type_as(x_time) # CHANGE to(x_time.device)
         if self.position_emb == "t2v":
             # first idx of Time2Vec output is unbounded so we drop it to
             # reuse code as a learnable pos embb
@@ -862,7 +862,7 @@ class Embedding(nn.Module):
 
         # "given" embedding. not important for temporal emb
         # when not using a start token
-        given = torch.ones((bs, length)).long().to(x_time.device)
+        given = torch.ones((bs, length)).type_as(x_time).long() # to(x_time.device)
         if not self.is_encoder and self.use_given:
             given[:, self.start_token_len :] = 0
         given_emb = self.given_emb(given)
@@ -894,12 +894,12 @@ class Embedding(nn.Module):
         else:
             y_dim = dy
             
-        local_pos = repeat(
-                torch.arange(length).to(x_time.device), f"length -> {batch} ({y_dim} length)"
-        ) 
         # local_pos = repeat(
-        #         torch.arange(length), f"length -> {batch} ({y_dim} length)" # CHANGE
+        #         torch.arange(length).to(x_time.device), f"length -> {batch} ({y_dim} length)"
         # ) 
+        local_pos = repeat(
+                torch.arange(length).type_as(x_time), f"length -> {batch} ({y_dim} length)" # CHANGE
+        ) 
         
         if self.position_emb == "t2v":
             # periodic pos emb
@@ -981,7 +981,7 @@ class Embedding(nn.Module):
             else:
                 y_dim = dy
             
-            given = torch.ones((batch, length, y_dim)).long().to(x_time.device)  # start as True
+            given = torch.ones((batch, length, y_dim)).type_as(x_time).long() # CHANGE .to(x_time.device)  # start as True
             
             if not self.is_encoder:
                 # mask missing values that need prediction...
@@ -1023,7 +1023,7 @@ class Embedding(nn.Module):
         #     torch.arange(y_dim).long().to(x_time.device), f"dy -> {batch} (dy {length})"
         # )
         var_idx = repeat(
-            torch.arange(y_dim).long(), f"dy -> {batch} (dy {length})" # CHANGE
+            torch.arange(y_dim).type_as(x_time).long(), f"dy -> {batch} (dy {length})" # CHANGE
         )
 
         var_idx_true = var_idx.clone()
@@ -1034,25 +1034,25 @@ class Embedding(nn.Module):
         return val_time_emb, space_emb, var_idx_true, mask
 
 class TriangularCausalMask:
-    def __init__(self, B, L, device="cpu"):
+    def __init__(self, B, L, queries):
         mask_shape = [B, 1, L, L]
         with torch.no_grad():
             self._mask = torch.triu(
                 torch.ones(mask_shape, dtype=torch.bool), diagonal=1
-            ).to(device)
+            ).type_as(queries) # CHANGE.to(device)
 
     @property
     def mask(self):
         return self._mask
 
 class ProbMask:
-    def __init__(self, B, H, L, index, scores, device="cpu"):
-        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).to(device).triu(1)
+    def __init__(self, B, H, L, index, scores, values):
+        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).type_as(values).triu(1) # CHANGE .to(device).triu(1)
         _mask_ex = _mask[None, None, :].expand(B, H, L, scores.shape[-1])
         indicator = _mask_ex[
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
-        ].to(device)
-        self._mask = indicator.view(scores.shape).to(device)
+        ].type_as(values) #.to(device)
+        self._mask = indicator.view(scores.shape).type_as(values) # .to(device)
 
     @property
     def mask(self):
@@ -1126,18 +1126,18 @@ class ReconstructionDropout(nn.Module):
 
     def forward(self, y):
         bs, length, dim = y.shape
-        dev = y.device
+        # dev = y.device
 
         if self.training and self.skip_all_drop < 1.0:
             # mask full timesteps
             full_timestep_mask = torch.bernoulli(
                 (1.0 - self.drop_full_timesteps) * torch.ones(bs, length, 1)
-            ).to(dev)
+            ).type_as(y) # CHANGE.to(dev)
 
             # mask each element indp
             standard_mask = torch.bernoulli(
                 (1.0 - self.drop_standard) * torch.ones(bs, length, dim)
-            ).to(dev)
+            ).type_as(y) # .to(dev)
 
             # subsequence mask
             seq_mask = (
@@ -1154,7 +1154,7 @@ class ReconstructionDropout(nn.Module):
             # the usual activation strength adjustment makes sense here)
             skip_all_drop_mask = torch.bernoulli(
                 1.0 - self.skip_all_drop * torch.ones(bs, 1, 1)
-            ).to(dev)
+            ).type_as(y) #.to(dev)
 
             mask = 1.0 - (
                 (1.0 - (full_timestep_mask * standard_mask * seq_mask))
@@ -1181,7 +1181,7 @@ class RandomMask(nn.Module):
             return y
         mask = torch.bernoulli((1.0 - self.prob) * torch.ones(bs, length, 1))
         mask.requires_grad = False
-        mask = mask.to(y.device)
+        mask = mask.type_as(y) # .to(y.device)
         masked_y = (y * mask) + (self.change_to_val * (1.0 - mask))
         return masked_y
 
@@ -1247,7 +1247,7 @@ class ProbAttention(nn.Module):
         B, H, L_V, D = V.shape
 
         if self.mask_flag:
-            attn_mask = ProbMask(B, H, L_Q, index, scores, device=V.device)
+            attn_mask = ProbMask(B, H, L_Q, index, scores, values=V)
             scores.masked_fill_(attn_mask.mask, -np.inf)
 
         attn = torch.softmax(scores, dim=-1)  # nn.Softmax(dim=-1)(scores)
@@ -1256,7 +1256,7 @@ class ProbAttention(nn.Module):
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
         ] = torch.matmul(attn, V).type_as(context_in)
         if self.output_attention:
-            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn).to(attn.device)
+            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn) # CHANGE.to(attn.device)
             attns[
                 torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
             ] = attn
@@ -1375,7 +1375,7 @@ class AttentionLayer(nn.Module):
 
         if output_attn and attn is None:
             onehot_values = (
-                torch.eye(S).unsqueeze(0).repeat(B, 1, 1).unsqueeze(2).to(values.device)
+                torch.eye(S).unsqueeze(0).repeat(B, 1, 1).unsqueeze(2).type_as(values) # CHANGE.to(values.device)
             )
             with torch.no_grad():
                 attn, _ = self.inner_attention(
@@ -1432,9 +1432,9 @@ class SpacetimeformerModel(nn.Module):
         start_token_len: int = 0,
         time_emb_dim: int = 6,
         pos_emb_type: str = "abs",
-        performer_redraw_interval: int = 1000,
+        performer_redraw_interval: int = 100,
         attn_time_windows: int = 1,
-        use_shifted_time_windows: bool = True,
+        use_shifted_time_windows: bool = False,
         embed_method: str = "spatio-temporal",
         norm: str = "batch",
         use_final_norm: bool = True,
@@ -1745,7 +1745,6 @@ class SpacetimeformerModel(nn.Module):
         future_time_feat: Optional[torch.Tensor] = None,
         future_target: Optional[torch.Tensor] = None,
     ):
-        # TODO QUESTION KASHIF why isn't all of past_target is being used via a 0 in seq_len and update inputs to enc_embedding and dec_embedding as necessary
         # time feature
         time_feat = (
             torch.cat(
@@ -2137,7 +2136,7 @@ class FullAttention(nn.Module):
         scores = torch.einsum("blhe,bshe->bhls", queries, keys)
         if self.mask_flag:
             if attn_mask is None:
-                attn_mask = TriangularCausalMask(B, L, device=queries.device)
+                attn_mask = TriangularCausalMask(B, L, queries=queries)
 
             scores.masked_fill_(attn_mask.mask, -np.inf)
 
@@ -2148,111 +2147,6 @@ class FullAttention(nn.Module):
             return (V.contiguous(), A)
         else:
             return (V.contiguous(), None)
-
-
-class ProbAttention(nn.Module):
-    def __init__(
-        self,
-        mask_flag=True,
-        factor=5,
-        scale=None,
-        attention_dropout=0.1,
-        output_attention=False,
-    ):
-        super(ProbAttention, self).__init__()
-        self.factor = factor
-        self.scale = scale
-        self.mask_flag = mask_flag
-        self.output_attention = output_attention
-        self.dropout = nn.Dropout(attention_dropout)
-
-    def _prob_QK(self, Q, K, sample_k, n_top):  # n_top: c*ln(L_q)
-        # Q [B, H, L, D]
-        B, H, L_K, E = K.shape
-        _, _, L_Q, _ = Q.shape
-
-        # calculate the sampled Q_K
-        K_expand = K.unsqueeze(-3).expand(B, H, L_Q, L_K, E)
-        index_sample = torch.randint(
-            L_K, (L_Q, sample_k)
-        )  # real U = U_part(factor*ln(L_k))*L_q
-        K_sample = K_expand[:, :, torch.arange(L_Q).unsqueeze(1), index_sample, :]
-        Q_K_sample = torch.matmul(Q.unsqueeze(-2), K_sample.transpose(-2, -1)).squeeze(
-            -2
-        )
-
-        # find the Top_k query with sparisty measurement
-        M = Q_K_sample.max(-1)[0] - torch.div(Q_K_sample.sum(-1), L_K)
-        M_top = M.topk(n_top, sorted=False)[1]
-
-        # use the reduced Q to calculate Q_K
-        Q_reduce = Q[
-            torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], M_top, :
-        ]  # factor*ln(L_q)
-        Q_K = torch.matmul(Q_reduce, K.transpose(-2, -1))  # factor*ln(L_q)*L_k
-
-        return Q_K, M_top
-
-    def _get_initial_context(self, V, L_Q):
-        B, H, L_V, D = V.shape
-        if not self.mask_flag:
-            # V_sum = V.sum(dim=-2)
-            V_sum = V.mean(dim=-2)
-            contex = V_sum.unsqueeze(-2).expand(B, H, L_Q, V_sum.shape[-1]).clone()
-        else:  # use mask
-            assert L_Q == L_V  # requires that L_Q == L_V, i.e. for self-attention only
-            contex = V.cumsum(dim=-2)
-        return contex
-
-    def _update_context(self, context_in, V, scores, index, L_Q, attn_mask):
-        B, H, L_V, D = V.shape
-
-        if self.mask_flag:
-            attn_mask = ProbMask(B, H, L_Q, index, scores, device=V.device)
-            scores.masked_fill_(attn_mask.mask, -np.inf)
-
-        attn = torch.softmax(scores, dim=-1)  # nn.Softmax(dim=-1)(scores)
-
-        context_in[
-            torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
-        ] = torch.matmul(attn, V).type_as(context_in)
-        if self.output_attention:
-            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn).to(attn.device)
-            attns[
-                torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
-            ] = attn
-            return (context_in, attns)
-        else:
-            return (context_in, None)
-
-    def forward(self, queries, keys, values, attn_mask):
-        B, L_Q, H, D = queries.shape
-        _, L_K, _, _ = keys.shape
-
-        queries = queries.transpose(2, 1)
-        keys = keys.transpose(2, 1)
-        values = values.transpose(2, 1)
-
-        U_part = self.factor * np.ceil(np.log1p(L_K)).astype("int").item()  # c*ln(L_k)
-        u = self.factor * np.ceil(np.log1p(L_Q)).astype("int").item()  # c*ln(L_q)
-
-        U_part = U_part if U_part < L_K else L_K
-        u = u if u < L_Q else L_Q
-
-        scores_top, index = self._prob_QK(queries, keys, sample_k=U_part, n_top=u)
-
-        # add scale factor
-        scale = self.scale or 1.0 / sqrt(D)
-        if scale is not None:
-            scores_top = scores_top * scale
-        # get the context
-        context = self._get_initial_context(values, L_Q)
-        # update the context with selected top_k queries
-        context, attn = self._update_context(
-            context, values, scores_top, index, L_Q, attn_mask
-        )
-
-        return context.transpose(2, 1).contiguous(), attn
 
 class ConvLayer(nn.Module):
     def __init__(self, c_in):

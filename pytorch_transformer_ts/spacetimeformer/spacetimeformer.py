@@ -11,15 +11,14 @@ from itertools import islice
 from gluonts.evaluation import make_evaluation_predictions, Evaluator
 # from gluonts.dataset.repository.datasets import get_dataset
 from gluonts.multivariate.datasets.dataset import datasets 
-from estimator import InformerEstimator
-from lightning_module import InformerLightningModule
+from estimator import SpacetimeformerEstimator
+from lightning_module import SpacetimeformerLightningModule
 from lightning.pytorch import seed_everything
 
 from gluonts.model.forecast_generator import SampleForecastGenerator, DistributionForecastGenerator
 from gluonts.torch.distributions import LowRankMultivariateNormalOutput
 
 # checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts/lightning_logs/version_88/checkpoints/epoch=0-step=10.ckpt'
-checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts-og/lightning_logs/version_1/checkpoints/epoch=43-step=4400.ckpt'
 # %%
 # torch.manual_seed(0)
 # np.random.seed(0)
@@ -85,7 +84,7 @@ if True:
 # training_data
 
 # %%
-estimator = InformerEstimator(
+estimator = SpacetimeformerEstimator(
     freq=freq,
     prediction_length=prediction_length,
     context_length=context_length,
@@ -100,11 +99,14 @@ estimator = InformerEstimator(
     
     # attention hyper-params
     dim_feedforward=32,
+    d_model=64,
+    d_qk=20,
+    d_v=20,
     num_encoder_layers=2,
     num_decoder_layers=2,
-    d_model=64,
     n_heads=2,
     activation="relu",
+    
     use_lazyframe=False,
     # training params
     batch_size=128,
@@ -124,7 +126,7 @@ predictor = estimator.train(
 )
 if TEST:
     # %%
-    model = InformerLightningModule.load_from_checkpoint(checkpoint)
+    model = SpacetimeformerLightningModule.load_from_checkpoint(checkpoint)
     transformation = estimator.create_transformation(use_lazyframe=False)
     predictor = estimator.create_predictor(transformation, model, 
                                             forecast_generator=DistributionForecastGenerator(estimator.distr_output))
@@ -171,5 +173,3 @@ if TEST:
     plt.gcf().tight_layout()
     plt.legend()
     plt.show()
-
-

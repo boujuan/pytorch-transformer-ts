@@ -10,14 +10,14 @@ from gluonts.time_feature import get_lags_for_frequency
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
-from line_profiler import profile
+
 
 class TriangularCausalMask:
-    def __init__(self, B, L, device="cpu"):
+    def __init__(self, B, L, queries):
         mask_shape = [B, 1, L, L]
         with torch.no_grad():
             self._mask = torch.triu(
-                torch.ones(mask_shape, dtype=torch.bool), diagonal=1).to(device)
+                torch.ones(mask_shape, dtype=torch.bool), diagonal=1).type_as(queries) # CHANGE.to(device)
 
     @property
     def mask(self):
@@ -25,13 +25,13 @@ class TriangularCausalMask:
 
 
 class ProbMask:
-    def __init__(self, B, H, L, index, scores, device="cpu"):
-        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).to(device).triu(1)
+    def __init__(self, B, H, L, index, scores, values): # CHANGE device="cpu"):
+        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).type_as(values).triu(1) # CHANGE to(device).triu(1)
         _mask_ex = _mask[None, None, :].expand(B, H, L, scores.shape[-1])
         indicator = _mask_ex[
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
-        ].to(device)
-        self._mask = indicator.view(scores.shape).to(device)
+        ].type_as(values) # .to(device)
+        self._mask = indicator.view(scores.shape).type_as(values) # to(device)
 
     @property
     def mask(self):
@@ -133,7 +133,7 @@ class ProbAttention(nn.Module):
         B, H, L_V, D = V.shape
 
         if self.mask_flag:
-            attn_mask = ProbMask(B, H, L_Q, index, scores, device=V.device)
+            attn_mask = ProbMask(B, H, L_Q, index, scores, values=V) # CHANGEdevice=V.device)
             scores.masked_fill_(attn_mask.mask, -np.inf)
 
         attn = torch.softmax(scores, dim=-1)  # nn.Softmax(dim=-1)(scores)
@@ -142,7 +142,7 @@ class ProbAttention(nn.Module):
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
         ] = torch.matmul(attn, V).type_as(context_in)
         if self.output_attention:
-            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn).to(attn.device)
+            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn) #.to(attn.device)
             attns[
                 torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
             ] = attn
@@ -637,7 +637,7 @@ class InformerModel(nn.Module):
         # self._check_shapes(prior_input, inputs, features)
 
         # sequence = torch.cat((prior_input, inputs), dim=1)
-        # TODO QUESTION KASHIF - this neglects the last element of inputs i.e inputs[:, -1, :]
+        # TODO QUESTION KASHIF - this neglects the last element of inputs i.e inputs[:, -1, :],  why isn't all of past_target is being used via a 0 in seq_len and update inputs to enc_embedding and dec_embedding as necessary
         lagged_sequence = self.get_lagged_subsequences(
             sequence=inputs,
             subsequences_length=subsequences_length,
