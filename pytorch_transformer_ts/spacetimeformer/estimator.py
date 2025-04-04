@@ -62,6 +62,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
+        use_lazyframe: bool = False,
         # Spacetimeformer arguments
         attn_factor: int = 5,
         start_token_len: int = 0,
@@ -123,6 +124,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         }
         super().__init__(trainer_kwargs=trainer_kwargs)
 
+        self.use_lazyframe = use_lazyframe
+        
         self.freq = freq
         self.context_length = (
             context_length if context_length is not None else prediction_length
@@ -208,7 +211,6 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
     
     @staticmethod
     def get_params(trial, context_length_choices):
-        """ generate dictionary of tunable parameters compatible with optuna """
         # in paper: lr=1e-4, 3 encoder layers, 3 decoder layers, 4 heads, d_v=d_qk=30, d_model=200, d_ff=800, attn_factor=5, dropout_emb=0.2, dropout_qkv=0.0, dropout_attn_matrix=0.0, dropout_ff=0.3, dropout_attn_out=0.0
         # global_self_attn=global_cross_attn=local_self_attn=performer, activation=gelu, norm=batch, 
         # batch_size=128
@@ -227,6 +229,10 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         }
         
     def create_transformation(self, use_lazyframe=True) -> Transformation:
+        if use_lazyframe is None and hasattr(self, "use_lazyframe"):
+            use_lazyframe = self.use_lazyframe
+        else:
+            use_lazyframe = False
         remove_field_names = []
         if self.num_feat_static_real == 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)

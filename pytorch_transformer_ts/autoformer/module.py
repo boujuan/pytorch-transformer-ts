@@ -412,7 +412,7 @@ class AutoCorrelation(nn.Module):
             .unsqueeze(0)
             .unsqueeze(0)
             .repeat(batch, head, channel, 1)
-            .type_as(values)
+            .type_as(values.type(torch.int64))
             # .to(values.device) # CHANGE
         )
         # find top k
@@ -577,9 +577,9 @@ class AutoformerModel(nn.Module):
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
         # make sure zero is first lag
         # CHANGE
-        if 0 in self.lags_seq:
-            del self.lags_seq[self.lags_seq.index(0)]
-        self.lags_seq.insert(0, 0)
+        # if 0 in self.lags_seq:
+        #     del self.lags_seq[self.lags_seq.index(0)]
+        # self.lags_seq.insert(0, 0)
         self.num_parallel_samples = num_parallel_samples
         self.history_length = context_length + max(self.lags_seq)
         self.embedder = FeatureEmbedder(
@@ -887,7 +887,7 @@ class AutoformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
-        output_distr_params: Optional[bool] = False 
+        output_distr_params: Optional[dict] = {} 
     ) -> torch.Tensor:
         if num_parallel_samples is None:
             num_parallel_samples = self.num_parallel_samples
@@ -940,23 +940,24 @@ class AutoformerModel(nn.Module):
         # output params
         dec_out = trend_part + seasonal_part
         params = self.param_proj(dec_out[:, -self.prediction_length :, :])
+        # Future samples
+        repeated_params = [
+        s.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
+        for s in params
+        ]
 
+        repeated_scale = scale.repeat_interleave(
+            repeats=self.num_parallel_samples, dim=0
+        )
+        repeated_loc = loc.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
+        distr = self.output_distribution(repeated_params, loc=repeated_loc, scale=repeated_scale)
         # TODO QUESTION why no looping over to make predictions?
+        # TODO high output rsults of output_distribution
         if output_distr_params:
-            return params
-            # return params = tuple(param.reshape((-1, 1, self.prediction_length) + self.target_shape) for param in params)
+            distr_params = list(distr.base_dist.arg_constraints.keys())
+            return tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
+                                           for tgt_key in distr_params)
         else:
-            # Future samples
-            repeated_params = [
-            s.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
-            for s in params
-            ]
-
-            repeated_scale = scale.repeat_interleave(
-                repeats=self.num_parallel_samples, dim=0
-            )
-            repeated_loc = loc.repeat_interleave(repeats=self.num_parallel_samples, dim=0)
-            distr = self.output_distribution(repeated_params, loc=repeated_loc, scale=repeated_scale)
             samples = distr.sample()
             return samples.reshape(
                 (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,

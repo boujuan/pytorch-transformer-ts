@@ -73,6 +73,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
+        use_lazyframe: bool = False,
         # loss: DistributionLoss = NegativeLogLikelihood(),
         scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
@@ -97,6 +98,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         self.prediction_length = prediction_length
         self.distr_output = distr_output
         # self.loss = loss
+        self.use_lazyframe = use_lazyframe
 
         self.input_size = input_size
         self.n_heads = n_heads
@@ -150,6 +152,10 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         }
 
     def create_transformation(self, use_lazyframe=True) -> Transformation:
+        if use_lazyframe is None and hasattr(self, "use_lazyframe"):
+            use_lazyframe = self.use_lazyframe
+        else:
+            use_lazyframe = False
         remove_field_names = []
         if self.num_feat_static_real == 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)

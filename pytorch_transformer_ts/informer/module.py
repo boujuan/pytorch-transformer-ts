@@ -545,7 +545,7 @@ class InformerModel(nn.Module):
 
         lagged_values = []
         for lag_index in indices:
-            # lag_index = max(0, lag_index) # CHANGE
+            lag_index = max(0, lag_index) # CHANGE
             assert lag_index >= 0
             begin_index = -lag_index - subsequences_length
             end_index = -lag_index if lag_index > 0 else None
@@ -691,9 +691,9 @@ class InformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
-        output_distr_params: Optional[bool] = False 
+        output_distr_params: Optional[dict] = {} 
     ) -> torch.Tensor: # CHANGE THROUGHTOUT THIS FUNC
-
+        
         if num_parallel_samples is None:
             num_parallel_samples = self.num_parallel_samples
         
@@ -763,15 +763,20 @@ class InformerModel(nn.Module):
             )
             # shape [n_continuity_groups*n_parallel_samples, 1, d_model]
             output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
-
+            
             # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
             params = self.param_proj(output[:, -1:])
-            if output_distr_params:
-                future_params.append(tuple(param[::num_parallel_samples, :, :] for param in params))
+            # adds scaled mean, variance, stddev params
             distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
                 params, scale=repeated_scale, loc=repeated_loc
             )
-             
+            
+            # attributes loc, cov_factor, cov_diag = params[0], params[1], params[2] before scaling
+            if output_distr_params:
+                distr_params = list(distr.base_dist.arg_constraints.keys())
+                future_params.append(tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
+                                           for tgt_key in distr_params))
+            
             next_sample = distr.sample()
             repeated_past_target = torch.cat(
                 (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
@@ -779,11 +784,8 @@ class InformerModel(nn.Module):
             )
             future_samples.append(next_sample)
             
-        # from gluonts.model.forecast_generator import _unpack
         if output_distr_params:
-            param_keys = list(distr.base_dist.arg_constraints.keys())
-            concat_future_params = tuple(torch.cat([params[p] for params in future_params], dim=1) for p in range(len(param_keys)))
-            return concat_future_params
+            return tuple(torch.cat([params[p] for params in future_params], dim=1) for p in range(len(distr_params)))
         else:
             concat_future_samples = torch.cat(future_samples, dim=1)
             return concat_future_samples.reshape(

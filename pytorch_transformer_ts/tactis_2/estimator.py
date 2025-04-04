@@ -79,6 +79,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         loss_normalization: str = "series",
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
+        use_lazyframe: bool = False,
         # Common parameters
         context_length: Optional[int] = None,
         num_feat_dynamic_real: int = 0,
@@ -109,6 +110,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.context_length = (
             context_length if context_length is not None else prediction_length
         )
+        
+        self.use_lazyframe = use_lazyframe
         
         # TACTiS2 specific parameters
         self.flow_series_embedding_dim = flow_series_embedding_dim
@@ -192,6 +195,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         A transformation pipeline that takes the raw data and converts it into the format
         expected by the model.
         """
+        if use_lazyframe is None and hasattr(self, "use_lazyframe"):
+            use_lazyframe = self.use_lazyframe
+        else:
+            use_lazyframe = False
         remove_field_names = []
         if self.num_feat_static_real == 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)

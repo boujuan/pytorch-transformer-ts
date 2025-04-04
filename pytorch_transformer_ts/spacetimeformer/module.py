@@ -258,7 +258,7 @@ class EncoderLayer(nn.Module):
         # uses pre-norm Transformer architecture
         attn = None
         if self.local_attention:
-            # attention on tokens of each variable ind. TODO change this to attend to all of turbine's variables?
+            # attention on tokens of each variable ind. TODO change this to attend to all of turbine's variables eg nd and ws?
             x1 = self.norm1(x)
             x1 = Localize(x1, self.d_y)
              
@@ -723,9 +723,11 @@ class Embedding(nn.Module):
     ):
         super().__init__()
         
-        self.augment_y = False # if true, add y_lagged and x_feat to y, otherwise add to x
-        
-        self.augment_y = self.augment_y and is_encoder
+        self.is_encoder = is_encoder
+        self.embed_type = "augment_x" # or "augment_y" or "augment_x" if true, add y_lagged and x_feat to y, otherwise add to x
+        assert self.embed_type in ["original", "augment_y", "augment_x"]
+        # if self.embed_type == "augment_y":
+        #     self.embed_type = "augment_y" if is_encoder else "augment_x"
          
         assert method in ["spatio-temporal", "temporal"]
         if data_dropout is None:
@@ -758,27 +760,33 @@ class Embedding(nn.Module):
         #       1) we add 1 for age to the time dimension,
         #       2) we add the lagged values 
         #       3) we add the static values (log(scale), log(abs(loc)) features, static features, dynamic real features that also influence output such as nacelle direction)
-        
-        if self.augment_y:
+        if self.embed_type == "augment_y":
             y_emb_inp_dim = d_y + d_x_feat + d_y_lagged if self.method == "temporal" else 1 
             self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_static, d_model)
-        else:
+        elif self.embed_type == "augment_x":
             y_emb_inp_dim = d_y if self.method == "temporal" else 1 # spatio temporal embedding will capture 1 value for each point in time and space
-            self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_feat + d_x_static + d_y_lagged, d_model)
+            # self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_feat + d_x_static + d_y_lagged, d_model)
+            self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_feat + d_y_lagged, d_model)
+        elif self.embed_type == "original":
+            y_emb_inp_dim = d_y if self.method == "temporal" else 1
+            self.val_time_emb = nn.Linear(y_emb_inp_dim, d_model)
             
         # self.val_time_emb = nn.Linear(y_emb_inp_dim + time_dim + 1 + d_x_static + d_y_lagged, d_model)
         
         if self.method == "spatio-temporal":
             # self.space_emb = nn.Embedding(num_embeddings=d_y, embedding_dim=d_model)
-            # NOTE TODO this differs from og impl bc dy would include dy_c for encoder
-            if self.augment_y:
+            if self.embed_type == "augment_y":
                 split_length_into = d_y + d_x_feat + d_y_lagged
-            else:
+            elif self.embed_type == "augment_x" or self.embed_type == "original":
                 split_length_into = d_y
-            
+                
             self.space_emb = nn.Embedding(num_embeddings=split_length_into, embedding_dim=d_model)
         else:
             split_length_into = 1
+            
+        self.static_embed = nn.Linear(
+            d_x_static, d_model
+        )
 
         self.start_token_len = start_token_len
         self.given_emb = nn.Embedding(num_embeddings=2, embedding_dim=d_model)
@@ -790,8 +798,7 @@ class Embedding(nn.Module):
         self.d_model = d_model
         self.null_value = null_value
         self.pad_value = pad_value
-        self.is_encoder = is_encoder
-
+        
         # turning off parts of the embedding is only really here for ablation studies
         self.use_val = use_val
         self.use_time = use_time
@@ -836,7 +843,7 @@ class Embedding(nn.Module):
         mask = self.make_mask(y)
 
         # position embedding ("local_emb")
-        local_pos = torch.arange(length).type_as(x_time) # CHANGE to(x_time.device)
+        local_pos = torch.arange(length).type_as(x_time.type(torch.int64)) # CHANGE to(x_time.device)
         if self.position_emb == "t2v":
             # first idx of Time2Vec output is unbounded so we drop it to
             # reuse code as a learnable pos embb
@@ -889,16 +896,16 @@ class Embedding(nn.Module):
 
         # position emb ("local_emb")
         # TODO NOTE: non augmented version differs from original implementation here bc dy is only the outputs, not also dy_c, should I add dx_feat here?
-        if self.augment_y:
+        if self.embed_type == "augment_y":
             y_dim = dy + dx_feat + dy_lagged
-        else:
+        elif self.embed_type == "augment_x" or self.embed_type == "original":
             y_dim = dy
             
         # local_pos = repeat(
         #         torch.arange(length).to(x_time.device), f"length -> {batch} ({y_dim} length)"
         # ) 
         local_pos = repeat(
-                torch.arange(length).type_as(x_time), f"length -> {batch} ({y_dim} length)" # CHANGE
+                torch.arange(length).type_as(x_time.type(torch.int64)), f"length -> {batch} ({y_dim} length)" # CHANGE
         ) 
         
         if self.position_emb == "t2v":
@@ -918,20 +925,13 @@ class Embedding(nn.Module):
         x_age = torch.nan_to_num(x_age)
         x_static = torch.nan_to_num(x_static)
         
-        # TODO non augmented differs from og impl bc we repeat age, x_feat, x_static, and y_lagged too
-        #      SHOULD x_static be repeated for each dy like this
-        if self.augment_y:
-            y_dim = dy + dx_feat + dy_lagged
-        else:
-            y_dim = dy
-            
         x_time = repeat(x_time, f"batch len x_dim -> batch ({y_dim} len) x_dim")
         x_age = repeat(x_age, f"batch len x_dim -> batch ({y_dim} len) x_dim")
-        x_static = repeat(x_static, f"batch len x_dim -> batch ({y_dim} len) x_dim")
+        # x_static = repeat(x_static, f"batch len x_dim -> batch ({y_dim} len) x_dim")
         
-        if self.augment_y:
+        if self.embed_type == "augment_y":
             
-            x_emb = torch.cat((self.time_emb(x_time), x_age, x_static), dim=-1)
+            x_emb = torch.cat((self.time_emb(x_time), x_age), dim=-1)
             
             # protect against NaNs in y, but keep track for Given emb
             y = torch.cat([y, x_feat, y_lagged], dim=-1)
@@ -946,13 +946,14 @@ class Embedding(nn.Module):
             y = Flatten(y)
             mask = self.make_mask(y)
             
-        else:
+        elif self.embed_type == "augment_x":
             y_lagged = torch.nan_to_num(y_lagged)
             x_feat = torch.nan_to_num(x_feat)
             
             x_feat = repeat(x_feat, f"batch len x_dim -> batch ({dy} len) x_dim")
             y_lagged = repeat(y_lagged, f"batch len x_dim -> batch ({dy} len) x_dim")
-            x_emb = torch.cat((self.time_emb(x_time), x_age, x_feat, x_static, y_lagged), dim=-1)
+            # x_emb = torch.cat((self.time_emb(x_time), x_age, x_feat, x_static, y_lagged), dim=-1)
+            x_emb = torch.cat((self.time_emb(x_time), x_age, x_feat, y_lagged), dim=-1)
 
             # protect against NaNs in y, but keep track for Given emb
             true_null = torch.isnan(y)
@@ -965,21 +966,19 @@ class Embedding(nn.Module):
             y = self.data_drop(y)
             y = Flatten(y)
             mask = self.make_mask(y)
+        
+        elif self.embed_type == "original":
+            pass
 
         # concat time_emb, y --> FF --> val_time_emi
         # NOTE: this differs from the original spacetimeformer implementation bc we concatenate 
         # the outputs y to the time embedding, in addition to the static vars, dynamic real features, and y_lagged
-        # 
+         
         val_time_inp = torch.cat((y, x_emb), dim=-1)
         val_time_emb = self.val_time_emb(val_time_inp) # y_emb_inp_dim (1) + time_dim (24) + 1 + d_x_feat (6) + d_x_static (14) + d_y_lagged (138)
-
+        static_emb = repeat(self.static_embed(x_static), f"batch len x_static_dim -> batch ({dy} len) x_static_dim")
         # "given" embedding
         if self.use_given:
-            # NOTE TODO this differs from og impl bc dy would include dy_c for encoder
-            if self.augment_y:
-                y_dim = dy + dx_feat + dy_lagged
-            else:
-                y_dim = dy
             
             given = torch.ones((batch, length, y_dim)).type_as(x_time).long() # CHANGE .to(x_time.device)  # start as True
             
@@ -1005,7 +1004,7 @@ class Embedding(nn.Module):
         else:
             given_emb = 0.0
 
-        val_time_emb = local_emb + val_time_emb + given_emb
+        val_time_emb = local_emb + val_time_emb + given_emb + static_emb
 
         if self.is_encoder:
             for conv in self.downsize_convs:
@@ -1013,11 +1012,6 @@ class Embedding(nn.Module):
                 length //= 2
 
         # space embedding
-        # NOTE TODO this differs from og impl bc dy would include dy_c for encoder
-        if self.augment_y:
-            y_dim = dy + dx_feat + dy_lagged
-        else:
-            y_dim = dy
             
         # var_idx = repeat(
         #     torch.arange(y_dim).long().to(x_time.device), f"dy -> {batch} (dy {length})"
@@ -1663,6 +1657,10 @@ class SpacetimeformerModel(nn.Module):
             norm_layer=Normalization(norm, d_model=d_model) if use_final_norm else None,
             emb_dropout=dropout_emb,
         )
+        # import pandas as pd
+        # pd.DataFrame({
+        #     "source": "new_2",
+        #     **{p_name: [p.shape] for p_name, p in self.named_parameters()}}).to_csv("/Users/ahenry/Desktop/params_new_2.csv")
         
         # self.reshape_layer = nn.Linear(self.prediction_length*(self.input_size * len(self.lags_seq) + self._number_of_features - (self.num_time_features + 1)), 
         #                                self.prediction_length)
@@ -1825,7 +1823,7 @@ class SpacetimeformerModel(nn.Module):
         enc_vt_emb, enc_s_emb, _, enc_mask_seq  \
             = self.enc_embedding(
                 y=transformer_inputs[:, :self.context_length,  :self.input_size], 
-                y_lagged=transformer_inputs[:, :self.context_length,  self.input_size:self.input_size*len(self.lags_seq)], 
+                y_lagged=transformer_inputs[:, :self.context_length, self.input_size:self.input_size*len(self.lags_seq)], 
                 x_time=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:][:, :, :self.num_time_features], 
                 x_age=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:][:, :, self.num_time_features:(self.num_time_features + 1)],
                 x_feat=transformer_inputs[:, :self.context_length, -self.num_feat_dynamic_real:][:, :, self.num_time_features + 1:],
@@ -1835,7 +1833,7 @@ class SpacetimeformerModel(nn.Module):
         dec_vt_emb, dec_s_emb, _, dec_mask_seq \
             = self.dec_embedding(
                 y=transformer_inputs[:, self.context_length:,  :self.input_size],
-                y_lagged=transformer_inputs[:, self.context_length:,  self.input_size:self.input_size*len(self.lags_seq)], 
+                y_lagged=transformer_inputs[:, self.context_length:, self.input_size:self.input_size*len(self.lags_seq)], 
                 x_time=transformer_inputs[:, self.context_length:, -self.num_feat_dynamic_real:][:, :, :self.num_time_features], 
                 x_age=transformer_inputs[:, self.context_length:, -self.num_feat_dynamic_real:][:, :, self.num_time_features:(self.num_time_features + 1)],
                 x_feat=transformer_inputs[:, self.context_length:, -self.num_feat_dynamic_real:][:, :, self.num_time_features + 1:],
@@ -1902,7 +1900,7 @@ class SpacetimeformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
-        output_distr_params: Optional[bool] = False 
+        output_distr_params: Optional[dict] = {} 
     ) -> torch.Tensor:
         
         if num_parallel_samples is None:
@@ -1920,7 +1918,6 @@ class SpacetimeformerModel(nn.Module):
         # time_feat = encoder_inputs[:, :, -self.num_feat_dynamic_real:] 
 
         # embed context sequence
-        
         enc_vt_emb, enc_s_emb, enc_var_idx, enc_mask_seq = self.enc_embedding(
             y=encoder_inputs[:, :, :self.input_size], 
             y_lagged=encoder_inputs[:, :self.context_length, self.input_size:self.input_size*len(self.lags_seq)],
@@ -1970,86 +1967,147 @@ class SpacetimeformerModel(nn.Module):
             repeats=self.num_parallel_samples, dim=0
         )
 
-        # future_samples = []
-        # if output_distr_params:
-        #     future_params = []
-
-        # ansectral sampling
-        # for k in range(self.prediction_length):
-            # self._check_shapes(repeated_past_target, next_sample, next_features)
-            # sequence = torch.cat((repeated_past_target, next_sample), dim=1)
-            
-        lagged_sequence = self.get_lagged_subsequences(
-            sequence=repeated_past_target,
-            subsequences_length=self.prediction_length,
-            shift=1,
-        )
-
-        # shape [n_continuity_groups*n_parallel_samples, context_length, size of lagged repeated_past_target]
-        lags_shape = lagged_sequence.shape
-
-        # shape [n_continuity_groups*n_parallel_samples, context_length * size of lagged repeated_past_target]
-        reshaped_lagged_sequence = lagged_sequence.reshape(
-            lags_shape[0], lags_shape[1], -1
-        )
-        # shape [n_continuity_groups*n_parallel_samples, 1, total inp size]
-        # decoder_input = torch.cat(
-        #     (reshaped_lagged_sequence, repeated_features[:, : k + 1]), dim=-1
-        # )
-        # shape [n_continuity_groups*n_parallel_samples, 1, d_model]
-        # output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
-        # embed target sequence
-        # TODO where does the future masking happen QUESTION
-        rep_feat = repeated_features[:, :, expanded_static_feat.shape[-1]:]
-        dec_vt_emb, dec_s_emb, _, dec_mask_seq = self.dec_embedding(
-            y=reshaped_lagged_sequence[:, :, :self.input_size],
-            y_lagged=reshaped_lagged_sequence[:, :, self.input_size:self.input_size*len(self.lags_seq)], 
-            x_time=rep_feat[:, :, :self.num_time_features],
-            x_age=rep_feat[:, :, self.num_time_features:self.num_time_features + 1],
-            x_feat=rep_feat[:, :, self.num_time_features + 1:],
-            x_static=repeated_features[:, :, :expanded_static_feat.shape[-1]]
-        )
         
-        # decode target sequence w/ encoded context, (batch_size, pred_len*(input_size * len(lag_seq) + self._input_features), output_dim)
-        dec_output, _ = self.decoder(
-            val_time_emb=dec_vt_emb,
-            space_emb=dec_s_emb,
-            cross=repeated_enc_out,
-            self_mask_seq=dec_mask_seq,
-            cross_mask_seq=repeated_enc_dec_mask_seq,
-            output_cross_attn=False,
-        )
-        # Note shouldnt I be generating all predictions in the horizon in one go, rather than with ascestral sampling?
-        #      YES don't need a loop, output_dim = pred_len * input_size * num_distr_params, select input_size from dec_output, then reshape
-        forecast_out = self.param_proj(dec_output)
-        dim_string = lambda param: ' '.join([f"dy{s}" for s in range(len(param.shape[2:]))])
-        forecast_out = tuple(
-            rearrange(param, 
-            f"batch (d_y length) {dim_string(param)} -> batch length d_y {dim_string(param)}", 
-            **{f"dy{s}": v for s, v in enumerate(param.shape[2:])}, length=self.prediction_length) for param in forecast_out)
-        forecast_out = tuple(param.squeeze(3) for param in forecast_out)
-        # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
-        
-        if output_distr_params:
-            next_params = tuple(param[::num_parallel_samples, :, :] for param in forecast_out)
-        distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
-            forecast_out, scale=repeated_scale, loc=repeated_loc
-        )
-            
-        next_sample = distr.sample()
-            
-        # from gluonts.model.forecast_generator import _unpack
-        if output_distr_params:
-            param_keys = list(distr.base_dist.arg_constraints.keys())
-            return tuple(next_params[p] for p in range(len(param_keys)))
-        else:
-            # concat_future_samples = torch.cat(future_samples, dim=1)
-            # return concat_future_samples.reshape(
-            #     (-1, num_parallel_samples, self.prediction_length) + self.target_shape,
-            # )
-            return next_sample.reshape(
-               (-1, num_parallel_samples, self.prediction_length) + (self.input_size,), 
+        if True:
+            lagged_sequence = self.get_lagged_subsequences(
+                sequence=repeated_past_target,
+                subsequences_length=self.prediction_length,
+                shift=1,
             )
+
+            # shape [n_continuity_groups*n_parallel_samples, context_length, size of lagged repeated_past_target]
+            lags_shape = lagged_sequence.shape
+
+            # shape [n_continuity_groups*n_parallel_samples, context_length * size of lagged repeated_past_target]
+            reshaped_lagged_sequence = lagged_sequence.reshape(
+                lags_shape[0], lags_shape[1], -1
+            )
+            
+            # embed target sequence
+            # TODO where does the future masking happen QUESTION
+            rep_feat = repeated_features[:, :, expanded_static_feat.shape[-1]:]
+            dec_vt_emb, dec_s_emb, _, dec_mask_seq = self.dec_embedding(
+                y=reshaped_lagged_sequence[:, :, :self.input_size],
+                y_lagged=reshaped_lagged_sequence[:, :, self.input_size:self.input_size*len(self.lags_seq)], 
+                x_time=rep_feat[:, :, :self.num_time_features],
+                x_age=rep_feat[:, :, self.num_time_features:self.num_time_features + 1],
+                x_feat=rep_feat[:, :, self.num_time_features + 1:],
+                x_static=repeated_features[:, :, :expanded_static_feat.shape[-1]]
+            )
+            
+            # decode target sequence w/ encoded context, (batch_size, pred_len*(input_size * len(lag_seq) + self._input_features), output_dim)
+            dec_output, _ = self.decoder(
+                val_time_emb=dec_vt_emb,
+                space_emb=dec_s_emb,
+                cross=repeated_enc_out,
+                self_mask_seq=dec_mask_seq,
+                cross_mask_seq=repeated_enc_dec_mask_seq,
+                output_cross_attn=False,
+            )
+            # Note shouldnt I be generating all predictions in the horizon in one go, rather than with ascestral sampling?
+            #      YES don't need a loop, output_dim = pred_len * input_size * num_distr_params, select input_size from dec_output, then reshape
+            params = self.param_proj(dec_output)
+            dim_string = lambda param: ' '.join([f"dy{s}" for s in range(len(param.shape[2:]))])
+            params = tuple(
+                rearrange(param, 
+                f"batch (d_y length) {dim_string(param)} -> batch length d_y {dim_string(param)}", 
+                **{f"dy{s}": v for s, v in enumerate(param.shape[2:])}, length=self.prediction_length) for param in params)
+            params = tuple(param.squeeze(3) for param in params)
+            # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
+            
+            distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
+                params, scale=repeated_scale, loc=repeated_loc
+            )
+            
+            if output_distr_params:
+                distr_params = list(distr.base_dist.arg_constraints.keys())
+                return tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
+                                            for tgt_key in distr_params)
+            else:
+                next_sample = distr.sample()
+                return next_sample.reshape(
+                (-1, num_parallel_samples, self.prediction_length) + (self.input_size,), 
+                )
+        else:
+            # TODO HIGH can we implement asectral sampling?
+            future_samples = []
+            if output_distr_params:
+                future_params = []
+                
+            for k in range(self.prediction_length):
+                # self._check_shapes(repeated_past_target, next_sample, next_features)
+                # sequence = torch.cat((repeated_past_target, next_sample), dim=1)
+                
+                lagged_sequence = self.get_lagged_subsequences(
+                    sequence=repeated_past_target,
+                    subsequences_length=1 + k,
+                    shift=1,
+                )
+
+                # shape [n_continuity_groups*n_parallel_samples, context_length, size of lagged repeated_past_target]
+                lags_shape = lagged_sequence.shape
+
+                # shape [n_continuity_groups*n_parallel_samples, context_length * size of lagged repeated_past_target]
+                reshaped_lagged_sequence = lagged_sequence.reshape(
+                    lags_shape[0], lags_shape[1], -1
+                )
+                
+                rep_feat = repeated_features[:, : k + 1, expanded_static_feat.shape[-1]:]
+                rep_static_feats = repeated_features[:, : k + 1, :expanded_static_feat.shape[-1]] 
+                dec_vt_emb, dec_s_emb, _, dec_mask_seq = self.dec_embedding(
+                    y=reshaped_lagged_sequence[:, :, :self.input_size],
+                    y_lagged=reshaped_lagged_sequence[:, :, self.input_size:self.input_size*len(self.lags_seq)], 
+                    x_time=rep_feat[:, :, :self.num_time_features],
+                    x_age=rep_feat[:, :, self.num_time_features:self.num_time_features + 1],
+                    x_feat=rep_feat[:, :, self.num_time_features + 1:],
+                    x_static=rep_static_feats
+                )
+                
+                # decode target sequence w/ encoded context, (batch_size, pred_len*(input_size * len(lag_seq) + self._input_features), output_dim)
+                dec_output, _ = self.decoder(
+                    val_time_emb=dec_vt_emb,
+                    space_emb=dec_s_emb,
+                    cross=repeated_enc_out,
+                    self_mask_seq=dec_mask_seq,
+                    cross_mask_seq=repeated_enc_dec_mask_seq,
+                    output_cross_attn=False,
+                )
+                
+                # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
+                params = self.param_proj(dec_output)
+                
+                dim_string = lambda param: ' '.join([f"dy{s}" for s in range(len(param.shape[2:]))])
+                params = tuple(
+                    rearrange(param, 
+                    f"batch (d_y length) {dim_string(param)} -> batch length d_y {dim_string(param)}", 
+                    **{f"dy{s}": v for s, v in enumerate(param.shape[2:])}, length=self.prediction_length) for param in params)
+                params = tuple(param.squeeze(3) for param in params)
+                
+                # adds scaled mean, variance, stddev params
+                distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
+                    params, scale=repeated_scale, loc=repeated_loc
+                )
+                
+                # attributes loc, cov_factor, cov_diag = params[0], params[1], params[2] before scaling
+                if output_distr_params:
+                    distr_params = list(distr.base_dist.arg_constraints.keys())
+                    future_params.append(tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
+                                            for tgt_key in distr_params))
+                
+                next_sample = distr.sample()
+                repeated_past_target = torch.cat(
+                    (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
+                    dim=1,
+                )
+                future_samples.append(next_sample)
+                
+            if output_distr_params:
+                return tuple(torch.cat([params[p] for params in future_params], dim=1) for p in range(len(distr_params)))
+            else:
+                concat_future_samples = torch.cat(future_samples, dim=1)
+                return concat_future_samples.reshape(
+                    (-1, num_parallel_samples, self.prediction_length) + self.target_shape,
+                )
 
     def _attn_switch(
         self,
@@ -2064,7 +2122,6 @@ class SpacetimeformerModel(nn.Module):
         performer_attn_kernel: str,
         performer_redraw_interval: int,
     ):
-        # TODO HIGH change this to prob or performer
         if attn_str == "full":
             # standard full (n^2) attention
             Attn = AttentionLayer(

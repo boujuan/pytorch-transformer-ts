@@ -8,7 +8,7 @@ from itertools import islice
 
 
 # %%
-from gluonts.evaluation import make_evaluation_predictions, Evaluator
+from gluonts.evaluation import MultivariateEvaluator, make_evaluation_predictions
 # from gluonts.dataset.repository.datasets import get_dataset
 from gluonts.multivariate.datasets.dataset import datasets 
 from estimator import InformerEstimator
@@ -19,14 +19,15 @@ from gluonts.model.forecast_generator import SampleForecastGenerator, Distributi
 from gluonts.torch.distributions import LowRankMultivariateNormalOutput
 
 # checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts/lightning_logs/version_88/checkpoints/epoch=0-step=10.ckpt'
-checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts-og/lightning_logs/version_1/checkpoints/epoch=43-step=4400.ckpt'
+# checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts/lightning_logs/version_18/checkpoints/epoch=42-step=4300.ckpt' # distributionforecast checkpoint
+checkpoint = '/Users/ahenry/Documents/toolboxes/pytorch-transformer-ts/lightning_logs/version_101/checkpoints/epoch=0-step=100.ckpt' # sampleforecats checkpoint
 # %%
 # torch.manual_seed(0)
 # np.random.seed(0)
 seed_everything(0, workers=True)
 # %%
 
-if True:
+if False:
     # dataset = get_dataset("electricity")
     dataset = datasets["solar"]()
     training_data = dataset.train_ds
@@ -77,7 +78,30 @@ if True:
 #     num_feat_static_cat = data_module.num_feat_static_cat
 #     input_size = data_module.num_target_vars
 #     num_feat_static_real = data_module.num_feat_static_real
-
+else:
+    import pandas as pd
+    data_path = "/Users/ahenry/Documents/toolboxes/wind_forecasting/examples/data/preprocessed_flasc_data/sample.csv"
+    wf_dataset = pd.read_csv(data_path)
+    train_split = 4000
+    freq = "60s"
+    prediction_length = 10
+    context_length = 20
+    wf_training_data = [{"item_id": "all_items",
+                        "feat_static_cat": [0],
+                        "target": wf_dataset.iloc[:train_split][[col for col in wf_dataset.columns if col.startswith("ws_")]].values.astype("float32").T,
+                        "start": pd.Period(pd.to_datetime(wf_dataset.iloc[:train_split]["time"].iloc[0]), freq=freq),
+                        "feat_dynamic_real": wf_dataset.iloc[:train_split][[col for col in wf_dataset.columns if col.startswith("nd_")]].values.astype("float32").T
+                        }]
+    wf_test_data = [{"item_id": "all_items",
+                    "feat_static_cat": [0],
+                        "target": wf_dataset.iloc[train_split:][[col for col in wf_dataset.columns if col.startswith("ws_")]].values.astype("float32").T,
+                        "start": pd.Period(pd.to_datetime(wf_dataset.iloc[train_split:]["time"].iloc[0]), freq=freq),
+                        "feat_dynamic_real": wf_dataset.iloc[train_split:][[col for col in wf_dataset.columns if col.startswith("nd_")]].values.astype("float32").T
+                        }]
+    input_size = len([col for col in wf_dataset.columns if col.startswith("ws_")])
+    num_feat_dynamic_real = len([col for col in wf_dataset.columns if col.startswith("nd_")])
+    cardinality = embedding_dimension = None
+    num_feat_static_real = 0
 # %%
 
 
@@ -99,6 +123,7 @@ estimator = InformerEstimator(
     embedding_dimension=embedding_dimension,
     
     # attention hyper-params
+    lags_seq=[0],
     dim_feedforward=32,
     num_encoder_layers=2,
     num_decoder_layers=2,
@@ -109,28 +134,33 @@ estimator = InformerEstimator(
     # training params
     batch_size=128,
     num_batches_per_epoch=100,
-    trainer_kwargs=dict(max_epochs=44, accelerator='cpu', devices=1),
+    trainer_kwargs=dict(max_epochs=1, accelerator='cpu', devices=1),
     distr_output=LowRankMultivariateNormalOutput(dim=input_size, rank=8)
 )
 
 # %%
-TEST = False 
+TEST = True 
 
 predictor = estimator.train(
-    training_data=training_data,
+    training_data=wf_training_data,
     # shuffle_buffer_length=1024,
     forecast_generator=DistributionForecastGenerator(estimator.distr_output),
-    # ckpt_path=checkpoint
+    # forecast_generator=SampleForecastGenerator(estimator.distr_output),
+    ckpt_path=checkpoint
 )
 if TEST:
     # %%
     model = InformerLightningModule.load_from_checkpoint(checkpoint)
     transformation = estimator.create_transformation(use_lazyframe=False)
     predictor = estimator.create_predictor(transformation, model, 
-                                            forecast_generator=DistributionForecastGenerator(estimator.distr_output))
+                                            forecast_generator=DistributionForecastGenerator(estimator.distr_output)
+                                            # forecast_generator=SampleForecastGenerator(estimator.distr_output)
+                                            )
     forecast_it, ts_it = make_evaluation_predictions(
-        dataset=test_data,
-        predictor=predictor
+        dataset=wf_test_data,
+        predictor=predictor,
+        output_distr_params={"loc": "mean", "cov_factor": "cov_factor", "cov_diag": "cov_diag"} # mapping from distr parameters (after transformation) to LowRankMultivariateNormalOutput (with rank=0) parameters 
+        # output_distr_params=False
     )
 
     # %%
@@ -141,9 +171,9 @@ if TEST:
 
     # %%
     # num_workers is limited to 10 if cpu has more cores
-    num_workers = min(multiprocessing.cpu_count(), 10)
+    num_workers = min(multiprocessing.cpu_count(), 1)
 
-    evaluator = Evaluator(num_workers=None)
+    evaluator = MultivariateEvaluator(num_workers=None)
 
     # %%
     agg_metrics, ts_metrics = evaluator(iter(tss), iter(forecasts))
@@ -152,19 +182,20 @@ if TEST:
     agg_metrics
 
     # %%
-    plt.figure(figsize=(20, 15))
+    fig, ax = plt.subplots(1, 1, figsize=(20, 15))
     date_formater = mdates.DateFormatter('%b, %d')
     plt.rcParams.update({'font.size': 15})
 
     for idx, (forecast, ts) in islice(enumerate(zip(forecasts, tss)), 9):
-        ax = plt.subplot(3, 3, idx+1)
+        # ax = plt.subplot(3, 3, idx+1)
+        # ax = plt.subplots(1, 1)
 
         # Convert index for plot
-        ts = ts[-4 * dataset.prediction_length:].to_timestamp()
-        
-        ax.plot(ts, label="target")
-        forecast.plot( color='g')
-        ax.set_xticks(rotation=60)
+        # ts = ts[-4 * dataset.prediction_length:].to_timestamp()
+        ts = ts.loc[ts.index.isin(forecast.index), :] 
+        ax.plot(ts.index.to_timestamp(), ts.values, linestyle='--')
+        ax.plot(forecast.index.to_timestamp(), forecast.distribution.loc)
+        # ax.set_xticks(ts.index, rotation=60)
         ax.set_title(forecast.item_id)
         ax.xaxis.set_major_formatter(date_formater)
 
