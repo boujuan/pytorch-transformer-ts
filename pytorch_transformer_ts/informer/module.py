@@ -11,13 +11,13 @@ from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
 
+
 class TriangularCausalMask:
-    def __init__(self, B, L, device="cpu"):
+    def __init__(self, B, L, queries):
         mask_shape = [B, 1, L, L]
         with torch.no_grad():
             self._mask = torch.triu(
-                torch.ones(mask_shape, dtype=torch.bool), diagonal=1)\
-            # .to(device) # TODO
+                torch.ones(mask_shape, dtype=torch.bool), diagonal=1).type_as(queries.type(torch.bool)) # CHANGE.to(device)
 
     @property
     def mask(self):
@@ -25,14 +25,13 @@ class TriangularCausalMask:
 
 
 class ProbMask:
-    def __init__(self, B, H, L, index, scores, device="cpu"):
-        # _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).to(device).triu(1) # CHANGE
-        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).triu(1)
+    def __init__(self, B, H, L, index, scores, values): # CHANGE device="cpu"):
+        _mask = torch.ones(L, scores.shape[-1], dtype=torch.bool).type_as(values.type(torch.bool)).triu(1) # CHANGE to(device).triu(1)
         _mask_ex = _mask[None, None, :].expand(B, H, L, scores.shape[-1])
         indicator = _mask_ex[
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
-        ] #.to(device)
-        self._mask = indicator.view(scores.shape) #.to(device) #CHANGE
+        ].type_as(values) # .to(device)
+        self._mask = indicator.view(scores.shape).type_as(values.type(torch.bool)) # to(device)
 
     @property
     def mask(self):
@@ -134,7 +133,7 @@ class ProbAttention(nn.Module):
         B, H, L_V, D = V.shape
 
         if self.mask_flag:
-            attn_mask = ProbMask(B, H, L_Q, index, scores, device=V.device)
+            attn_mask = ProbMask(B, H, L_Q, index, scores, values=V) # CHANGEdevice=V.device)
             scores.masked_fill_(attn_mask.mask, -np.inf)
 
         attn = torch.softmax(scores, dim=-1)  # nn.Softmax(dim=-1)(scores)
@@ -143,7 +142,7 @@ class ProbAttention(nn.Module):
             torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
         ] = torch.matmul(attn, V).type_as(context_in)
         if self.output_attention:
-            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn) # .to(attn.device) CHANGE
+            attns = (torch.ones([B, H, L_V, L_V]) / L_V).type_as(attn) #.to(attn.device)
             attns[
                 torch.arange(B)[:, None, None], torch.arange(H)[None, :, None], index, :
             ] = attn
@@ -400,7 +399,7 @@ class InformerModel(nn.Module):
         )
         self.lags_seq = lags_seq or get_lags_for_frequency(freq_str=freq)
         # make sure zero is first lag
-        # CHANGE TODO high add back in
+        # CHANGE TODO high add back in, is it okay to include 0 in lags_seq??
         # if 0 in self.lags_seq:
         #     del self.lags_seq[self.lags_seq.index(0)]
         # self.lags_seq.insert(0, 0)
@@ -546,7 +545,7 @@ class InformerModel(nn.Module):
 
         lagged_values = []
         for lag_index in indices:
-            # lag_index = max(0, lag_index) # CHANGE
+            lag_index = max(0, lag_index) # CHANGE
             assert lag_index >= 0
             begin_index = -lag_index - subsequences_length
             end_index = -lag_index if lag_index > 0 else None
@@ -638,7 +637,7 @@ class InformerModel(nn.Module):
         # self._check_shapes(prior_input, inputs, features)
 
         # sequence = torch.cat((prior_input, inputs), dim=1)
-        # TODO QUESTION KASHIF - this neglects the last element of inputs i.e inputs[:, -1, :]
+        # TODO QUESTION KASHIF - this neglects the last element of inputs i.e inputs[:, -1, :],  why isn't all of past_target is being used via a 0 in seq_len and update inputs to enc_embedding and dec_embedding as necessary
         lagged_sequence = self.get_lagged_subsequences(
             sequence=inputs,
             subsequences_length=subsequences_length,
@@ -692,9 +691,9 @@ class InformerModel(nn.Module):
         past_observed_values: torch.Tensor,
         future_time_feat: torch.Tensor,
         num_parallel_samples: Optional[int] = None,
-        output_distr_params: Optional[bool] = False 
+        output_distr_params: Optional[dict] = {} 
     ) -> torch.Tensor: # CHANGE THROUGHTOUT THIS FUNC
-
+        
         if num_parallel_samples is None:
             num_parallel_samples = self.num_parallel_samples
         
@@ -764,15 +763,20 @@ class InformerModel(nn.Module):
             )
             # shape [n_continuity_groups*n_parallel_samples, 1, d_model]
             output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
-
+            
             # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
             params = self.param_proj(output[:, -1:])
-            if output_distr_params:
-                future_params.append(tuple(param[::num_parallel_samples, :, :] for param in params))
+            # adds scaled mean, variance, stddev params
             distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
                 params, scale=repeated_scale, loc=repeated_loc
             )
-             
+            
+            # attributes loc, cov_factor, cov_diag = params[0], params[1], params[2] before scaling
+            if output_distr_params:
+                distr_params = list(distr.base_dist.arg_constraints.keys())
+                future_params.append(tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
+                                           for tgt_key in distr_params))
+            
             next_sample = distr.sample()
             repeated_past_target = torch.cat(
                 (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
@@ -780,11 +784,8 @@ class InformerModel(nn.Module):
             )
             future_samples.append(next_sample)
             
-        # from gluonts.model.forecast_generator import _unpack
         if output_distr_params:
-            param_keys = list(distr.base_dist.arg_constraints.keys())
-            concat_future_params = tuple(torch.cat([params[p] for params in future_params], dim=1) for p in range(len(param_keys)))
-            return concat_future_params
+            return tuple(torch.cat([params[p] for params in future_params], dim=1) for p in range(len(distr_params)))
         else:
             concat_future_samples = torch.cat(future_samples, dim=1)
             return concat_future_samples.reshape(

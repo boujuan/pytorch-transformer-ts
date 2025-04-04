@@ -62,6 +62,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
+        use_lazyframe: bool = False,
         # Spacetimeformer arguments
         attn_factor: int = 5,
         start_token_len: int = 0,
@@ -69,7 +70,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         num_encoder_layers: int = 2,
         num_decoder_layers: int = 3,
         dim_feedforward: int = 800,
-        d_model: int = 64,
+        d_model: int = 200,
         d_queries_keys: int = 30,
         d_values: int = 30,
         n_heads: int = 4,
@@ -86,9 +87,9 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         global_cross_attn: str = "performer",
         local_cross_attn: str = "performer",
         performer_attn_kernel: str = "relu",
-        performer_redraw_interval: int = 1000,
+        performer_redraw_interval: int = 100,
         attn_time_windows: int = 1,
-        use_shifted_time_windows: bool = True,
+        use_shifted_time_windows: bool = False,
         embed_method: str = "spatio-temporal",
         norm: str = "batch",
         use_final_norm: bool = True,
@@ -123,6 +124,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         }
         super().__init__(trainer_kwargs=trainer_kwargs)
 
+        self.use_lazyframe = use_lazyframe
+        
         self.freq = freq
         self.context_length = (
             context_length if context_length is not None else prediction_length
@@ -208,23 +211,28 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
     
     @staticmethod
     def get_params(trial, context_length_choices):
-        """ generate dictionary of tunable parameters compatible with optuna TODO HIGH """
-        d_qkv = trial.suggest_categorical("d_qkv", [32, 64, 128])
+        # in paper: lr=1e-4, 3 encoder layers, 3 decoder layers, 4 heads, d_v=d_qk=30, d_model=200, d_ff=800, attn_factor=5, dropout_emb=0.2, dropout_qkv=0.0, dropout_attn_matrix=0.0, dropout_ff=0.3, dropout_attn_out=0.0
+        # global_self_attn=global_cross_attn=local_self_attn=performer, activation=gelu, norm=batch, 
+        # batch_size=128
+        d_qkv = trial.suggest_categorical("d_model", [20, 30, 40])
         return {
             "context_length": trial.suggest_categorical("context_length", context_length_choices),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
-            "batch_size": trial.suggest_int("batch_size", 128, 256, step=64),
-            "num_encoder_layers": trial.suggest_int("num_encoder_layers", 2, 8, step=2),
-            "num_decoder_layers": trial.suggest_int("num_decoder_layers", 2, 8, step=2),
-            "dim_feedforward": trial.suggest_categorical("dim_feedforward", [32, 64, 128]),
-            "d_model": trial.suggest_categorical("d_model", [32, 64, 128]),
+            "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
+            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", [3, 5, 6]),
+            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", [3, 5, 6]),
+            "d_model": trial.suggest_categorical("d_model", [100, 150, 200]),
             "d_queries_keys": d_qkv,
             "d_values": d_qkv,
-            "n_heads": trial.suggest_int("n_heads", 4, 8, step=2)
+            "n_heads": trial.suggest_categorical("n_heads", [4, 6, 8])
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
         }
         
     def create_transformation(self, use_lazyframe=True) -> Transformation:
+        if use_lazyframe is None and hasattr(self, "use_lazyframe"):
+            use_lazyframe = self.use_lazyframe
+        else:
+            use_lazyframe = False
         remove_field_names = []
         if self.num_feat_static_real == 0:
             remove_field_names.append(FieldName.FEAT_STATIC_REAL)

@@ -463,7 +463,7 @@ class TACTiS2Model(nn.Module):
         future_time_feat: torch.Tensor,
         future_target: Optional[torch.Tensor] = None,
         num_parallel_samples: Optional[int] = None,
-        output_distr_params: Optional[bool] = False
+        output_distr_params: Optional[dict] = {}
     ) -> torch.Tensor:
         """
         Forward pass through the model.
@@ -507,7 +507,7 @@ class TACTiS2Model(nn.Module):
             future_target=future_target,
         )
         
-        # Compute the distribution parameters
+        # Compute the distribution parameters # TODO JUAN HIGH will this scale distr parameters? What distr parameters does it return
         params = self.output_params(network_input)
         
         if output_distr_params:

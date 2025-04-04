@@ -38,8 +38,12 @@ class TACTiS2LightningModule(pl.LightningModule):
             Epoch at which to switch to stage 2 (flow+copula) if starting with stage 1.
         """
         super().__init__()
-        self.save_hyperparameters(ignore=["model"])
-        self.model = model
+        if isinstance(model, dict):
+            self.model = TACTiS2Model(**model)
+            self.save_hyperparameters()
+        else:
+            self.model = model
+            self.save_hyperparameters(ignore=["model"])
         # self.loss = loss
         self.lr = lr
         self.weight_decay = weight_decay
