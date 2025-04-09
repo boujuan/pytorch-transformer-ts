@@ -138,7 +138,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
     
     @staticmethod
     def get_params(trial, context_length_choices):
-        """ generate dictionary of tunable parameters compatible with optuna TODO"""
+        """ generate dictionary of tunable parameters compatible with optuna"""
         # in paper: 2 encoder layers and 1 decoder layer. batch_size=32, init_lr=1e-4, early stopping with 10 epchs, dmodel=512, d_ff=2048
         return {
             "context_length": trial.suggest_categorical("context_length", context_length_choices),
