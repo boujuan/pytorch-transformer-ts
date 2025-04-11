@@ -210,13 +210,13 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         )
     
     @staticmethod
-    def get_params(trial, context_length_choices):
+    def get_params(trial):
         # in paper: lr=1e-4, 3 encoder layers, 3 decoder layers, 4 heads, d_v=d_qk=30, d_model=200, d_ff=800, attn_factor=5, dropout_emb=0.2, dropout_qkv=0.0, dropout_attn_matrix=0.0, dropout_ff=0.3, dropout_attn_out=0.0
         # global_self_attn=global_cross_attn=local_self_attn=performer, activation=gelu, norm=batch, 
         # batch_size=128
         d_qkv = trial.suggest_categorical("d_model", [20, 30, 40])
         return {
-            "context_length": trial.suggest_categorical("context_length", context_length_choices),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3]),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
             "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
             "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", [3, 5, 6]),

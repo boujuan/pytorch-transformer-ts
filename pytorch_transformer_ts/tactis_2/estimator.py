@@ -154,7 +154,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             self.time_features = time_features
         
     @staticmethod
-    def get_params(trial, context_length_choices):
+    def get_params(trial):
         """
         Get parameters for hyperparameter tuning.
         
@@ -171,7 +171,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         """
         # Example hyperparameters to tune
         params = {
-            "context_length": trial.suggest_categorical("context_length", context_length_choices),
+             "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3, 4]),
             "flow_series_embedding_dim": trial.suggest_int("flow_series_embedding_dim", 16, 64),
             "copula_series_embedding_dim": trial.suggest_int("copula_series_embedding_dim", 16, 64),
             "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 1, 3),

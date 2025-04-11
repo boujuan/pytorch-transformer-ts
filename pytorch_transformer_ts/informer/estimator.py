@@ -145,13 +145,13 @@ class InformerEstimator(PyTorchLightningEstimator):
         )
     
     @staticmethod
-    def get_params(trial, context_length_choices):
+    def get_params(trial):
         """ generate dictionary of tunable parameters compatible with optuna """
         # in paper: batch-size=32, num_decoder_layers=2, num_epochs=8, learning rate starts at 1e-4 and decays by 0.5 every epoch
         # encoder is a "3-layer stack and a 1-layer stack" e.g. num_encoder_layers=3
         # d_model=512, num_heads=8, dim_feedforward=2048, lr=0.0001
         return {
-            "context_length": trial.suggest_categorical("context_length", context_length_choices),
+             "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3]),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
             "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
             "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", [2, 3, 4]),
