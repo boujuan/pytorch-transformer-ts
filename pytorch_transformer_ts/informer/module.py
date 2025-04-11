@@ -767,8 +767,10 @@ class InformerModel(nn.Module):
             # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
             params = self.param_proj(output[:, -1:])
             # adds scaled mean, variance, stddev params
+            # TEST TODO remove scaling to see if that is cause of precision cholesky issues
             distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
-                params, scale=repeated_scale, loc=repeated_loc
+                params, scale=None, loc=None
+                # scale=repeated_scale, loc=repeated_loc
             )
             
             # attributes loc, cov_factor, cov_diag = params[0], params[1], params[2] before scaling
