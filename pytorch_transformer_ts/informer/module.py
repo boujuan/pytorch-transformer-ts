@@ -775,7 +775,11 @@ class InformerModel(nn.Module):
             
             # attributes loc, cov_factor, cov_diag = params[0], params[1], params[2] before scaling
             if output_distr_params:
-                distr_params = list(distr.base_dist.arg_constraints.keys())
+                if hasattr(distr, "base_dist"):
+                    distr_params = list(distr.base_dist.arg_constraints.keys())
+                    
+                else:
+                    distr_params = list(distr.arg_constraints.keys())
                 future_params.append(tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
                                            for tgt_key in distr_params))
             
