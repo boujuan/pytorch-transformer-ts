@@ -249,7 +249,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3]),
 
             # --- Dropout ---
-            "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.3),
+            "dropout_rate": trial.suggest_categorical("dropout_rate", [0.0, 0.05, 0.1, 0.2, 0.3]),            
             # Note: gradient_clip_val is taken from config, not tuned here
         }
         return params
