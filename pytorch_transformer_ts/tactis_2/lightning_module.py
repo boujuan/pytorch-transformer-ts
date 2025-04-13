@@ -7,6 +7,9 @@ from gluonts.dataset.field_names import FieldName
 
 from .module import TACTiS2Model
 
+# Set up logging
+logger = logging.getLogger(__name__)
+
 class TACTiS2LightningModule(pl.LightningModule):
     """
     PyTorch Lightning module for training the TACTiS2 model.
@@ -89,9 +92,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                      param_group['lr'] = self.lr_stage2
                      param_group['weight_decay'] = self.weight_decay_stage2
                  self.log_dict({"stage": 2, "learning_rate": self.lr_stage2, "weight_decay": self.weight_decay_stage2})
-                 self.logger.info(f"Epoch {current_epoch}: Switched to Stage 2. Updated optimizer lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}")
+                 logger.info(f"Epoch {current_epoch}: Switched to Stage 2. Updated optimizer lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}")
             else:
-                 self.logger.warning(f"Epoch {current_epoch}: Tried to switch to Stage 2, but optimizer not found.")
+                 logger.warning(f"Epoch {current_epoch}: Tried to switch to Stage 2, but optimizer not found.")
 
             if hasattr(self.model.tactis, "set_stage"):
                 self.model.tactis.set_stage(self.stage)
@@ -147,13 +150,15 @@ class TACTiS2LightningModule(pl.LightningModule):
         if isinstance(model_output, tuple):
             # The second element of the tuple is typically the loss
             predictions, loss = model_output
+            logger.debug(f"Training - Model returned tuple: predictions shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}, loss={loss}")
         else:
             # If it's not a tuple, assume it's just the loss
             loss = model_output
+            logger.debug(f"Training - Model returned scalar loss: {loss}")
         
         # Check for NaN in loss
         if torch.isnan(loss).any():
-            self.logger.warning("NaN detected in loss! Replacing with large value to continue training.")
+            logger.warning("NaN detected in loss! Replacing with large value to continue training.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
         # Manual backward pass
@@ -218,13 +223,15 @@ class TACTiS2LightningModule(pl.LightningModule):
         if isinstance(model_output, tuple):
             # The second element of the tuple is typically the loss
             predictions, loss = model_output
+            logger.debug(f"Validation - Model returned tuple: predictions shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}, loss={loss}")
         else:
             # If it's not a tuple, assume it's just the loss
             loss = model_output
+            logger.debug(f"Validation - Model returned scalar loss: {loss}")
         
         # Check for NaN in loss
         if torch.isnan(loss).any():
-            self.logger.warning("NaN detected in validation loss! Replacing with large value for logging.")
+            logger.warning("NaN detected in validation loss! Replacing with large value for logging.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
         # Log the validation loss
@@ -244,7 +251,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         current_lr = self.lr_stage1 if self.stage == 1 else self.lr_stage2
         current_weight_decay = self.weight_decay_stage1 if self.stage == 1 else self.weight_decay_stage2
 
-        self.logger.info(f"Configuring optimizer for Stage {self.stage} with lr={current_lr}, weight_decay={current_weight_decay}")
+        logger.info(f"Configuring optimizer for Stage {self.stage} with lr={current_lr}, weight_decay={current_weight_decay}")
 
         optimizer = torch.optim.Adam(
             self.parameters(),
@@ -305,7 +312,9 @@ class TACTiS2LightningModule(pl.LightningModule):
         if isinstance(model_output, tuple):
             # For inference, we want the predictions (first element of the tuple)
             predictions, _ = model_output
+            logger.debug(f"Inference - Model returned tuple, using predictions with shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}")
             return predictions
         else:
             # If it's not a tuple, return as is
+            logger.debug(f"Inference - Model returned single output")
             return model_output

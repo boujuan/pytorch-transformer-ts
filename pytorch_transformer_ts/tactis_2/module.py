@@ -1,8 +1,8 @@
 from typing import Dict, List, Optional, Tuple, Any, Union
+import logging
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import numpy as np
 
 from gluonts.core.component import validated
@@ -12,6 +12,9 @@ from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import Scaler, MeanScaler, StdScaler, NOPScaler
 
 from .tactis2 import TACTiS
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 class TACTiS2Model(nn.Module):
     """
@@ -59,6 +62,7 @@ class TACTiS2Model(nn.Module):
         num_feat_static_real: int = 0,
         num_feat_static_cat: int = 0,
         embedding_dimension: Optional[List[int]] = None,
+        scaling: Optional[str] = "std", # Note: TACTiS handles internal scaling/normalization
         lags_seq: Optional[List[int]] = None,
         num_parallel_samples: int = 100,
     ) -> None:
@@ -97,8 +101,6 @@ class TACTiS2Model(nn.Module):
             Number of static categorical features.
         embedding_dimension
             List of embedding dimensions for categorical features.
-        distr_output
-            Distribution to use for probabilistic forecasting.
         scaling
             Type of scaling to apply to the target. Options: "mean", "std", None.
         lags_seq
@@ -118,7 +120,6 @@ class TACTiS2Model(nn.Module):
         self.num_feat_static_cat = num_feat_static_cat
         self.embedding_dimension = embedding_dimension
         self.cardinality = cardinality
-        self.distr_output = distr_output
         self.num_parallel_samples = num_parallel_samples
         
         # Set up scaling
@@ -230,7 +231,6 @@ class TACTiS2Model(nn.Module):
             copula_input_encoder_layers=copula_input_encoder_layers, # Passed directly
             bagging_size=bagging_size,
             input_encoding_normalization=input_encoding_normalization,
-            # Removed data_normalization
             loss_normalization=loss_normalization,
             positional_encoding=positional_encoding_args,
             flow_encoder=flow_encoder_args,
@@ -442,25 +442,6 @@ class TACTiS2Model(nn.Module):
             # (samples, batch, variables, prediction_length)
             return samples.transpose(2, 3)
             
-    def output_distribution(self, params, loc=None, scale=None):
-        """
-        Create the output distribution from the parameters.
-        
-        Parameters
-        ----------
-        params
-            Parameters of the distribution or samples from the distribution.
-        loc
-            Location parameter for scaling.
-        scale
-            Scale parameter for scaling.
-            
-        Returns
-        -------
-        Distribution with the given parameters.
-        """
-        return self.distr_output.distribution(params, loc=loc, scale=scale)
-            
     def forward(
         self,
         feat_static_cat: torch.Tensor,
@@ -515,7 +496,7 @@ class TACTiS2Model(nn.Module):
             future_target=future_target,
         )
         
-        # Compute the distribution parameters
+        # Compute the output params (loss during training, samples during inference)
         params = self.output_params(network_input)
         
         if output_distr_params:

@@ -1,4 +1,5 @@
 from typing import Any, Dict, Iterable, List, Optional
+import logging
 
 import polars as pl
 import numpy as np
@@ -33,10 +34,13 @@ from gluonts.transform import (
 )
 from gluonts.transform.sampler import InstanceSampler
 from gluonts.transform.field import RenameFields
-from gluonts.model.forecast_generator import SampleForecastGenerator # Ensure this is used
+from gluonts.model.forecast_generator import SampleForecastGenerator
 
 from .module import TACTiS2Model
 from .lightning_module import TACTiS2LightningModule
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
@@ -85,10 +89,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         decoder_transformer_num_layers: int = 3,
         decoder_transformer_embedding_dim_per_head: int = 16,
         decoder_transformer_num_heads: int = 6,
-        decoder_num_bins: int = 50, # Corresponds to AttentionalCopula resolution?
+        decoder_num_bins: int = 50, # Corresponds to AttentionalCopula resolution
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        # Removed data_normalization - handled by GluonTS scaling
         loss_normalization: str = "series",
         encoder_type: str = "standard",
         # Passed to TACTiS2LightningModule
@@ -109,8 +112,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         num_feat_static_real: int = 0,
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
-        # Removed distr_output parameter
-        scaling: Optional[str] = "std", # Note: TACTiS handles internal scaling/normalization
+        scaling: Optional[str] = "std", # External scaling through GluonTS
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
@@ -157,7 +159,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.decoder_num_bins = decoder_num_bins
         self.bagging_size = bagging_size
         self.input_encoding_normalization = input_encoding_normalization
-        # Removed self.data_normalization
         self.loss_normalization = loss_normalization
         self.encoder_type = encoder_type
         # Training stage / optimizer params
@@ -178,7 +179,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.num_feat_static_real = num_feat_static_real
         self.cardinality = cardinality if cardinality and num_feat_static_cat > 0 else [1]
         self.embedding_dimension = embedding_dimension
-        # Removed self.distr_output assignment
         self.scaling = scaling
         self.num_parallel_samples = num_parallel_samples
         
@@ -218,7 +218,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         params = {
             # --- General ---
             "context_length": trial.suggest_categorical("context_length", context_length_choices),
-            # Removed data_normalization suggestion
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
 
             # --- Marginal CDF Encoder ---
@@ -243,7 +242,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
             "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", [8, 16, 32, 48, 64, 128, 256]),
             "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 7),
-            "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", [20, 50, 100, 200]), # Corresponds to AttentionalCopula resolution?
+            "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", [20, 50, 100, 200]), # Corresponds to AttentionalCopula resolution
 
             # --- Optimizer Params ---
             "lr_stage1": trial.suggest_float("lr_stage1", 1e-4, 5e-3, log=True),
@@ -474,7 +473,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
             input_transform=transformation + prediction_splitter,
-            forecast_generator=SampleForecastGenerator(), # Ensure SampleForecastGenerator is used
+            forecast_generator=SampleForecastGenerator(),
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         )
 
