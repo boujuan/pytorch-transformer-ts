@@ -704,8 +704,8 @@ class TACTiS(nn.Module):
         copula_encoder: Optional[Dict[str, Any]] = None,
         flow_temporal_encoder: Optional[Dict[str, Any]] = None,
         copula_temporal_encoder: Optional[Dict[str, Any]] = None,
-        copula_decoder: Optional[Dict[str, Any]] = None,
-        skip_copula: bool = True,
+        copula_decoder: Optional[Dict[str, Any]] = None, # Make optional with default None
+        skip_copula: bool = True, # Keep default, controlled by LightningModule
         experiment_mode: str = "forecasting",
     ):
         """
@@ -771,129 +771,173 @@ class TACTiS(nn.Module):
         # Create embeddings for series
         self.flow_series_encoder = nn.Embedding(num_series, flow_series_embedding_dim)
         
-        # Initialize model components
-        self._initialize_flow_components(flow_encoder, positional_encoding)
-        
-        # Marginals - REMOVED (moved to _initialize_flow_components)
-        
-        # Initialize copula components if not skipping
-        if not skip_copula:
-            self._initialize_copula_components(copula_encoder, positional_encoding, copula_decoder)
+        # Store config dictionaries
+        self.positional_encoding_args = positional_encoding
+        self.flow_encoder_args = flow_encoder
+        self.copula_encoder_args = copula_encoder
+        # self.flow_temporal_encoder_args = flow_temporal_encoder # Not used directly in init methods below
+        # self.copula_temporal_encoder_args = copula_temporal_encoder # Not used directly in init methods below
+        self.copula_decoder_args = copula_decoder
+
+        # Initialize model components using stored args
+        self._initialize_flow_components()
+
+        # Initialize copula components if not skipping initially and args are provided
+        if not skip_copula and self.copula_decoder_args is not None:
+             self._initialize_copula_components()
+        elif not skip_copula and self.copula_decoder_args is None:
+             print("Warning: skip_copula is False, but copula_decoder args were not provided. Copula components not initialized.")
     
-    def _initialize_flow_components(self, flow_encoder_args, pos_encoding_args):
-        """Initialize flow-related components"""
-        # Input encoder
-        encoder_dim = 256  # Default dimension
-        
-        # Print encoder dimensions for debugging
-        print(f"TACTiS initialization - flow_series_embedding_dim: {self.flow_series_embedding_dim}")
-        print(f"TACTiS initialization - encoder_dim: {encoder_dim}")
-        
-        self.flow_input_encoder = nn.Sequential(
-            nn.Linear(self.flow_series_embedding_dim + 2, 128),
-            nn.ReLU(),
-            nn.Linear(128, encoder_dim)
+    def _initialize_flow_components(self):
+        """Initialize flow-related components using stored args"""
+        # Input encoder - Use flow_input_encoder_layers (passed directly)
+        # The input dim is value (1) + mask (1) + series_embedding
+        # The output dim should match the flow_encoder's d_model
+        flow_d_model = self.flow_encoder_args["d_model"]
+        flow_input_dim = self.flow_series_embedding_dim + 2
+        flow_encoder_layers = [nn.Linear(flow_input_dim, flow_d_model), nn.ReLU()] # First layer
+        for _ in range(1, self.flow_input_encoder_layers):
+             # Intermediate layers could have different dims, but let's keep it simple
+             flow_encoder_layers += [nn.Linear(flow_d_model, flow_d_model), nn.ReLU()]
+        # Last layer ensures output matches d_model without ReLU
+        if self.flow_input_encoder_layers > 1:
+             flow_encoder_layers[-2] = nn.Linear(flow_d_model, flow_d_model) # Replace last Linear
+             flow_encoder_layers.pop() # Remove last ReLU
+
+        self.flow_input_encoder = nn.Sequential(*flow_encoder_layers)
+        print(f"Initialized flow_input_encoder with {self.flow_input_encoder_layers} layers, input_dim={flow_input_dim}, output_dim={flow_d_model}")
+
+        # Positional encoding - Use dimension from args
+        pos_encoding_dim = self.positional_encoding_args["embedding_dim"]
+        self.flow_time_encoding = PositionalEncoding(
+             embedding_dim=pos_encoding_dim,
+             dropout=self.positional_encoding_args.get("dropout", 0.1),
+             max_len=self.positional_encoding_args.get("max_len", 5000)
         )
-        
-        # Positional encoding - explicitly set to same dimension as encoder
-        self.flow_time_encoding = PositionalEncoding(embedding_dim=encoder_dim, dropout=0.1, max_len=5000)
+        print(f"Initialized flow_time_encoding with embedding_dim={pos_encoding_dim}")
+
+        # Dimension adjustment layer if positional encoding dim doesn't match flow d_model
+        if pos_encoding_dim != flow_d_model:
+             self.flow_pos_adjust = nn.Linear(pos_encoding_dim, flow_d_model)
+             print(f"Added flow_pos_adjust layer: {pos_encoding_dim} -> {flow_d_model}")
+        else:
+             self.flow_pos_adjust = nn.Identity()
         
         # Print positional encoding dimensions for debugging
         print(f"TACTiS initialization - positional_encoding dim: {self.flow_time_encoding.pos_encoding.size(1)}")
         
-        # Flow encoder is a transformer encoder
-        default_flow_args = {
-            "d_model": encoder_dim,  # Match with flow_input_encoder output
-            "nhead": 8,
-            "num_encoder_layers": 2,
-            "dim_feedforward": 512,
-            "dropout": 0.1
-        }
-        
-        if flow_encoder_args is not None:
-            default_flow_args.update(flow_encoder_args)
+        # Flow encoder (Transformer) - Use parameters from flow_encoder_args
+        # Ensure d_model matches the output of input_encoder + pos_encoding
+        if self.flow_encoder_args["d_model"] != flow_d_model:
+             print(f"Warning: flow_encoder_args d_model ({self.flow_encoder_args['d_model']}) differs from calculated flow_d_model ({flow_d_model}). Using calculated value.")
+             # Adjust d_model in args if necessary, though ideally they should match from module.py
+             # self.flow_encoder_args["d_model"] = flow_d_model
             
         self.flow_encoder = nn.TransformerEncoder(
             encoder_layer=nn.TransformerEncoderLayer(
-                d_model=default_flow_args["d_model"],
-                nhead=default_flow_args["nhead"],
-                dim_feedforward=default_flow_args["dim_feedforward"],
-                dropout=default_flow_args["dropout"],
+                d_model=flow_d_model, # Use consistent d_model
+                nhead=self.flow_encoder_args["nhead"],
+                dim_feedforward=self.flow_encoder_args.get("dim_feedforward", flow_d_model * 4), # Default if missing
+                dropout=self.flow_encoder_args.get("dropout", 0.1),
                 batch_first=True
             ),
-            num_layers=default_flow_args["num_encoder_layers"]
+            num_layers=self.flow_encoder_args["num_encoder_layers"]
         )
+        print(f"Initialized flow_encoder (Transformer) with {self.flow_encoder_args['num_encoder_layers']} layers, d_model={flow_d_model}, nhead={self.flow_encoder_args['nhead']}")
         
-        # Update the marginal flow context_dim to match the encoder output
-        # NOTE: In the __init__ method this was hardcoded to flow_series_embedding_dim*4
-        print(f"Setting up marginal flow with context_dim={encoder_dim} (previously was {self.flow_series_embedding_dim*4})")
-        
-        # Marginals
+        # Marginals (DSF) - Use parameters from copula_decoder_args['dsf_marginal']
+        dsf_args = self.copula_decoder_args["dsf_marginal"]
+        # Ensure context_dim matches the output of the flow_encoder
+        if dsf_args["context_dim"] != flow_d_model:
+             print(f"Warning: dsf_marginal context_dim ({dsf_args['context_dim']}) differs from flow_encoder output dim ({flow_d_model}). Using encoder output dim.")
+             dsf_args["context_dim"] = flow_d_model
+
         self.marginal = DSFMarginal(
-            context_dim=encoder_dim,  # Use encoder_dim instead of flow_series_embedding_dim*4
-            mlp_layers=2,
-            mlp_dim=128,
-            flow_layers=3,
-            flow_hid_dim=32
+            context_dim=dsf_args["context_dim"],
+            mlp_layers=dsf_args["mlp_layers"],
+            mlp_dim=dsf_args["mlp_dim"],
+            flow_layers=dsf_args["flow_layers"],
+            flow_hid_dim=dsf_args["flow_hid_dim"]
         )
+        print(f"Initialized marginal (DSF) with context_dim={dsf_args['context_dim']}")
     
-    def _initialize_copula_components(self, copula_encoder_args, pos_encoding_args, copula_decoder_args):
-        """Initialize copula-related components"""
+    def _initialize_copula_components(self):
+        """Initialize copula-related components using stored args"""
         # Series encoder
         self.copula_series_encoder = nn.Embedding(self.num_series, self.copula_series_embedding_dim)
         
-        # Input encoder
-        encoder_dim = 256  # Default dimension
+        # Input encoder - Use copula_input_encoder_layers (passed directly)
+        copula_d_model = self.copula_encoder_args["d_model"]
+        copula_input_dim = self.copula_series_embedding_dim + 2
+        copula_encoder_layers_list = [nn.Linear(copula_input_dim, copula_d_model), nn.ReLU()] # First layer
+        for _ in range(1, self.copula_input_encoder_layers):
+             copula_encoder_layers_list += [nn.Linear(copula_d_model, copula_d_model), nn.ReLU()]
+        # Last layer ensures output matches d_model without ReLU
+        if self.copula_input_encoder_layers > 1:
+             copula_encoder_layers_list[-2] = nn.Linear(copula_d_model, copula_d_model) # Replace last Linear
+             copula_encoder_layers_list.pop() # Remove last ReLU
+
+        self.copula_input_encoder = nn.Sequential(*copula_encoder_layers_list)
+        print(f"Initialized copula_input_encoder with {self.copula_input_encoder_layers} layers, input_dim={copula_input_dim}, output_dim={copula_d_model}")
         
-        # Print encoder dimensions for debugging
-        print(f"TACTiS initialization - copula_series_embedding_dim: {self.copula_series_embedding_dim}")
-        print(f"TACTiS initialization - copula encoder_dim: {encoder_dim}")
-        
-        self.copula_input_encoder = nn.Sequential(
-            nn.Linear(self.copula_series_embedding_dim + 2, 128),
-            nn.ReLU(),
-            nn.Linear(128, encoder_dim)
+        # Positional encoding - Use dimension from args
+        pos_encoding_dim = self.positional_encoding_args["embedding_dim"]
+        self.copula_time_encoding = PositionalEncoding(
+             embedding_dim=pos_encoding_dim,
+             dropout=self.positional_encoding_args.get("dropout", 0.1),
+             max_len=self.positional_encoding_args.get("max_len", 5000)
         )
-        
-        # Positional encoding - explicitly set to same dimension as encoder
-        self.copula_time_encoding = PositionalEncoding(embedding_dim=encoder_dim, dropout=0.1, max_len=5000)
+        print(f"Initialized copula_time_encoding with embedding_dim={pos_encoding_dim}")
+
+        # Dimension adjustment layer if positional encoding dim doesn't match copula d_model
+        if pos_encoding_dim != copula_d_model:
+             self.copula_pos_adjust = nn.Linear(pos_encoding_dim, copula_d_model)
+             print(f"Added copula_pos_adjust layer: {pos_encoding_dim} -> {copula_d_model}")
+        else:
+             self.copula_pos_adjust = nn.Identity()
         
         # Print positional encoding dimensions for debugging
         print(f"TACTiS initialization - copula positional_encoding dim: {self.copula_time_encoding.pos_encoding.size(1)}")
         
-        # Copula encoder is a transformer encoder
-        default_copula_args = {
-            "d_model": encoder_dim,  # Match with copula_input_encoder output
-            "nhead": 8,
-            "num_encoder_layers": 2,
-            "dim_feedforward": 512,
-            "dropout": 0.1
-        }
-        
-        if copula_encoder_args is not None:
-            default_copula_args.update(copula_encoder_args)
+        # Copula encoder (Transformer) - Use parameters from copula_encoder_args
+        if self.copula_encoder_args["d_model"] != copula_d_model:
+             print(f"Warning: copula_encoder_args d_model ({self.copula_encoder_args['d_model']}) differs from calculated copula_d_model ({copula_d_model}). Using calculated value.")
+             # Adjust d_model in args if necessary
+             # self.copula_encoder_args["d_model"] = copula_d_model
             
         self.copula_encoder = nn.TransformerEncoder(
             encoder_layer=nn.TransformerEncoderLayer(
-                d_model=default_copula_args["d_model"],
-                nhead=default_copula_args["nhead"],
-                dim_feedforward=default_copula_args["dim_feedforward"],
-                dropout=default_copula_args["dropout"],
+                d_model=copula_d_model, # Use consistent d_model
+                nhead=self.copula_encoder_args["nhead"],
+                dim_feedforward=self.copula_encoder_args.get("dim_feedforward", copula_d_model * 4),
+                dropout=self.copula_encoder_args.get("dropout", 0.1),
                 batch_first=True
             ),
-            num_layers=default_copula_args["num_encoder_layers"]
+            num_layers=self.copula_encoder_args["num_encoder_layers"]
         )
+        print(f"Initialized copula_encoder (Transformer) with {self.copula_encoder_args['num_encoder_layers']} layers, d_model={copula_d_model}, nhead={self.copula_encoder_args['nhead']}")
         
-        # Attentional copula for modeling dependencies
+        # Attentional copula - Use parameters from copula_decoder_args['attentional_copula']
+        if self.copula_decoder_args is None or "attentional_copula" not in self.copula_decoder_args:
+             raise ValueError("Attentional Copula arguments ('attentional_copula') missing in copula_decoder config.")
+        cop_args = self.copula_decoder_args["attentional_copula"]
+
+        # Ensure input_dim matches the output of the copula_encoder
+        if cop_args.get("input_dim", copula_d_model) != copula_d_model: # Use get with default
+             print(f"Warning: attentional_copula input_dim ({cop_args['input_dim']}) differs from copula_encoder output dim ({copula_d_model}). Using encoder output dim.")
+             cop_args["input_dim"] = copula_d_model
+
         self.copula = AttentionalCopula(
-            input_dim=encoder_dim,
-            attention_layers=2,
-            attention_heads=4,
-            attention_dim=64,
-            mlp_layers=2,
-            mlp_dim=128,
-            resolution=128
+            input_dim=cop_args["input_dim"],
+            attention_layers=cop_args["attention_layers"],
+            attention_heads=cop_args["attention_heads"],
+            attention_dim=cop_args["attention_dim"], # This is dim_per_head
+            mlp_layers=cop_args["mlp_layers"],
+            mlp_dim=cop_args["mlp_dim"],
+            resolution=cop_args["resolution"]
+            # Dropout etc. could be added here if needed
         )
+        print(f"Initialized AttentionalCopula with input_dim={cop_args['input_dim']}, resolution={cop_args['resolution']}")
     
     def forward(
         self, 
@@ -1068,8 +1112,9 @@ class TACTiS(nn.Module):
         # will handle this mismatch with our improved implementation
         print(f"time_tensor for positional encoding: {time_tensor.shape}")
         
-        # Apply positional encoding with the simplified time_tensor
-        encoded = self.flow_time_encoding(encoded, time_tensor)
+        # Apply positional encoding and adjust dimension if needed
+        pos_encoded = self.flow_time_encoding(encoded, time_tensor)
+        encoded = self.flow_pos_adjust(pos_encoded)
         print(f"encoded after positional encoding: {encoded.shape}")
         
         # Apply flow encoder
@@ -1127,8 +1172,9 @@ class TACTiS(nn.Module):
         time_tensor = time_steps.unsqueeze(-1)  # simplified time tensor
         print(f"copula time_tensor for positional encoding: {time_tensor.shape}")
         
-        # Apply positional encoding with the simplified time_tensor
-        encoded = self.copula_time_encoding(encoded, time_tensor)
+        # Apply positional encoding and adjust dimension if needed
+        pos_encoded = self.copula_time_encoding(encoded, time_tensor)
+        encoded = self.copula_pos_adjust(pos_encoded)
         print(f"encoded after positional encoding: {encoded.shape}")
         
         # Apply copula encoder
@@ -1152,9 +1198,17 @@ class TACTiS(nn.Module):
         assert stage in [1, 2], "Stage must be 1 or 2"
         self.stage = stage
         
+        # Re-initialize copula components if switching to stage 2 and they weren't initialized before
+        # Re-initialize copula components if switching to stage 2 and they weren't initialized before
         if stage == 2 and self.skip_copula:
-            self.skip_copula = False
-            self._initialize_copula_components(None, None, None)
+             # Check if args are available before initializing
+             if self.copula_decoder_args is not None and self.copula_encoder_args is not None:
+                 print("Initializing copula components for stage 2...")
+                 self.skip_copula = False
+                 # Pass the stored config dictionaries
+                 self._initialize_copula_components()
+             else:
+                 print("Warning: Cannot initialize copula components for stage 2 - config args missing.")
     
     def set_experiment_mode(self, experiment_mode: str):
         """Set the experiment mode (forecasting or interpolation)"""

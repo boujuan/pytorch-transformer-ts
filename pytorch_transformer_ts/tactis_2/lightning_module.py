@@ -15,9 +15,10 @@ class TACTiS2LightningModule(pl.LightningModule):
     def __init__(
         self,
         model: TACTiS2Model,
-        # loss: DistributionLoss = NegativeLogLikelihood(),
-        lr: float = 1e-3,
-        weight_decay: float = 1e-8,
+        lr_stage1: float = 1.8e-3,
+        lr_stage2: float = 7.0e-4,
+        weight_decay_stage1: float = 0.0,
+        weight_decay_stage2: float = 0.0,
         stage: int = 1,  # Start with stage 1 (flow-only)
         stage2_start_epoch: int = 10,  # When to start stage 2
     ) -> None:
@@ -28,10 +29,14 @@ class TACTiS2LightningModule(pl.LightningModule):
         ----------
         model
             The TACTiS2 model to train.
-        lr
-            Learning rate for the optimizer.
-        weight_decay
-            Weight decay for the optimizer.
+        lr_stage1
+            Learning rate for stage 1 optimizer.
+        lr_stage2
+            Learning rate for stage 2 optimizer.
+        weight_decay_stage1
+            Weight decay for stage 1 optimizer.
+        weight_decay_stage2
+            Weight decay for stage 2 optimizer.
         stage
             Initial training stage (1 for flow-only, 2 for flow+copula).
         stage2_start_epoch
@@ -44,9 +49,11 @@ class TACTiS2LightningModule(pl.LightningModule):
         else:
             self.model = model
             self.save_hyperparameters(ignore=["model"])
-        # self.loss = loss
-        self.lr = lr
-        self.weight_decay = weight_decay
+        # Store stage-specific optimizer parameters
+        self.lr_stage1 = lr_stage1
+        self.lr_stage2 = lr_stage2
+        self.weight_decay_stage1 = weight_decay_stage1
+        self.weight_decay_stage2 = weight_decay_stage2
         self.stage = stage
         self.stage2_start_epoch = stage2_start_epoch
         
@@ -63,9 +70,23 @@ class TACTiS2LightningModule(pl.LightningModule):
         current_epoch = self.current_epoch
         if self.stage == 1 and current_epoch >= self.stage2_start_epoch:
             self.stage = 2
+            # Update optimizer parameters for stage 2
+            optimizer = self.optimizers()
+            # Check if optimizer is a list (e.g., with scheduler) or single instance
+            if isinstance(optimizer, list):
+                 optimizer = optimizer[0] # Assume first element is the optimizer
+
+            if optimizer:
+                 for param_group in optimizer.param_groups:
+                     param_group['lr'] = self.lr_stage2
+                     param_group['weight_decay'] = self.weight_decay_stage2
+                 logging.info(f"Epoch {current_epoch}: Switched to Stage 2. Updated optimizer lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}")
+            else:
+                 logging.warning(f"Epoch {current_epoch}: Tried to switch to Stage 2, but optimizer not found.")
+
             if hasattr(self.model.tactis, "set_stage"):
                 self.model.tactis.set_stage(self.stage)
-                self.log("stage", self.stage)
+            self.log("stage", self.stage, on_step=False, on_epoch=True)
                 
     def training_step(self, batch, batch_idx: int):
         """
@@ -212,11 +233,16 @@ class TACTiS2LightningModule(pl.LightningModule):
         -------
         The optimizer to use.
         """
-        # Use different learning rates for different stages if needed
+        # Initialize optimizer with parameters for the current stage
+        current_lr = self.lr_stage1 if self.stage == 1 else self.lr_stage2
+        current_weight_decay = self.weight_decay_stage1 if self.stage == 1 else self.weight_decay_stage2
+
+        logging.info(f"Configuring optimizer for Stage {self.stage} with lr={current_lr}, weight_decay={current_weight_decay}")
+
         optimizer = torch.optim.Adam(
             self.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay,
+            lr=current_lr,
+            weight_decay=current_weight_decay,
         )
         
         # Configure gradient clipping directly in the lightning module

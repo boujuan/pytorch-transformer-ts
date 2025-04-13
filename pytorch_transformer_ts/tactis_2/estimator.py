@@ -68,19 +68,39 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self,
         freq: str,
         prediction_length: int,
-        # TACTiS2 specific arguments
-        flow_series_embedding_dim: int = 32,
-        copula_series_embedding_dim: int = 32,
-        flow_input_encoder_layers: int = 2,
-        copula_input_encoder_layers: int = 2,
+        # --- TACTiS2 specific arguments ---
+        # Passed directly to TACTiS2Model/TACTiS
+        flow_series_embedding_dim: int = 5,
+        copula_series_embedding_dim: int = 48,
+        flow_input_encoder_layers: int = 6, # Marginal CDF Encoder input layers
+        copula_input_encoder_layers: int = 1, # Attentional Copula Encoder input layers
+        marginal_embedding_dim_per_head: int = 8,
+        marginal_num_heads: int = 5,
+        marginal_num_layers: int = 4, # Marginal CDF Encoder transformer layers
+        copula_embedding_dim_per_head: int = 8,
+        copula_num_heads: int = 5,
+        copula_num_layers: int = 2, # Attentional Copula Encoder transformer layers
+        decoder_dsf_num_layers: int = 2,
+        decoder_dsf_hidden_dim: int = 256,
+        decoder_mlp_num_layers: int = 3,
+        decoder_mlp_hidden_dim: int = 16,
+        decoder_transformer_num_layers: int = 3,
+        decoder_transformer_embedding_dim_per_head: int = 16,
+        decoder_transformer_num_heads: int = 6,
+        decoder_num_bins: int = 50, # Corresponds to AttentionalCopula resolution?
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        data_normalization: str = "none",
+        data_normalization: str = "series",
         loss_normalization: str = "series",
+        # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
+        lr_stage1: float = 1.8e-3,
+        lr_stage2: float = 7.0e-4,
+        weight_decay_stage1: float = 0.0,
+        weight_decay_stage2: float = 0.0,
+        # General Estimator arguments
         use_lazyframe: bool = False,
-        # Common parameters
         context_length: Optional[int] = None,
         num_feat_dynamic_real: int = 0,
         num_feat_static_cat: int = 0,
@@ -88,7 +108,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
         distr_output: DistributionOutput = StudentTOutput(),
-        scaling: Optional[str] = "std",
+        scaling: Optional[str] = "std", # Note: TACTiS handles internal scaling/normalization
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
@@ -97,7 +117,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
-        input_size: int = 1,
+        input_size: int = 1, # Number of target series
     ) -> None:
         trainer_kwargs = {
             "max_epochs": 100,
@@ -113,17 +133,37 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         self.use_lazyframe = use_lazyframe
         
-        # TACTiS2 specific parameters
+        # --- Store TACTiS2 specific parameters ---
+        # Model architecture params
         self.flow_series_embedding_dim = flow_series_embedding_dim
         self.copula_series_embedding_dim = copula_series_embedding_dim
         self.flow_input_encoder_layers = flow_input_encoder_layers
         self.copula_input_encoder_layers = copula_input_encoder_layers
+        self.marginal_embedding_dim_per_head = marginal_embedding_dim_per_head
+        self.marginal_num_heads = marginal_num_heads
+        self.marginal_num_layers = marginal_num_layers
+        self.copula_embedding_dim_per_head = copula_embedding_dim_per_head
+        self.copula_num_heads = copula_num_heads
+        self.copula_num_layers = copula_num_layers
+        self.decoder_dsf_num_layers = decoder_dsf_num_layers
+        self.decoder_dsf_hidden_dim = decoder_dsf_hidden_dim
+        self.decoder_mlp_num_layers = decoder_mlp_num_layers
+        self.decoder_mlp_hidden_dim = decoder_mlp_hidden_dim
+        self.decoder_transformer_num_layers = decoder_transformer_num_layers
+        self.decoder_transformer_embedding_dim_per_head = decoder_transformer_embedding_dim_per_head
+        self.decoder_transformer_num_heads = decoder_transformer_num_heads
+        self.decoder_num_bins = decoder_num_bins
         self.bagging_size = bagging_size
         self.input_encoding_normalization = input_encoding_normalization
         self.data_normalization = data_normalization
         self.loss_normalization = loss_normalization
+        # Training stage / optimizer params
         self.initial_stage = initial_stage
         self.stage2_start_epoch = stage2_start_epoch
+        self.lr_stage1 = lr_stage1
+        self.lr_stage2 = lr_stage2
+        self.weight_decay_stage1 = weight_decay_stage1
+        self.weight_decay_stage2 = weight_decay_stage2
         
         # Common parameters
         self.input_size = input_size
@@ -169,14 +209,40 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         -------
         Dict of parameter values.
         """
-        # Example hyperparameters to tune
         params = {
+            # --- General ---
             "context_length": trial.suggest_categorical("context_length", context_length_choices),
-            "flow_series_embedding_dim": trial.suggest_int("flow_series_embedding_dim", 16, 64),
-            "copula_series_embedding_dim": trial.suggest_int("copula_series_embedding_dim", 16, 64),
-            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 1, 3),
-            "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 3),
-            "data_normalization": trial.suggest_categorical("data_normalization", ["none", "series"]),
+            "data_normalization": trial.suggest_categorical("data_normalization", ["none", "series"]), # Keep existing options
+
+            # --- Marginal CDF Encoder ---
+            "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
+            "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
+            "marginal_num_layers": trial.suggest_int("marginal_num_layers", 2, 5),
+            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 7), # Renamed from marginal_input_encoder_layers
+            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256]), # Renamed from marginal_ts_embedding_dim
+
+            # --- Attentional Copula Encoder ---
+            "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
+            "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
+            "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 4),
+            "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 4),
+            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256]), # Renamed from copula_ts_embedding_dim
+
+            # --- Decoder ---
+            "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
+            "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512]),
+            "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
+            "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256]),
+            "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
+            "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", [8, 16, 32, 48, 64, 128, 256]),
+            "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 7),
+            "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", [20, 50, 100, 200]), # Corresponds to AttentionalCopula resolution?
+
+            # --- Optimizer Params ---
+            "lr_stage1": trial.suggest_float("lr_stage1", 1e-4, 5e-3, log=True),
+            "lr_stage2": trial.suggest_float("lr_stage2", 1e-4, 5e-3, log=True),
+            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", [0.0, 1e-5, 1e-4, 1e-3]),
+            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3]),
         }
         return params
     
@@ -408,20 +474,36 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         -------
         A TACTiS2 lightning module.
         """
+        # Pass all configured parameters to the TACTiS2Model
         model = TACTiS2Model(
+            # Data dimensions
             num_series=self.input_size,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
-            # TACTiS2 specific parameters
+            # TACTiS specific parameters from __init__
             flow_series_embedding_dim=self.flow_series_embedding_dim,
             copula_series_embedding_dim=self.copula_series_embedding_dim,
             flow_input_encoder_layers=self.flow_input_encoder_layers,
             copula_input_encoder_layers=self.copula_input_encoder_layers,
+            marginal_embedding_dim_per_head=self.marginal_embedding_dim_per_head,
+            marginal_num_heads=self.marginal_num_heads,
+            marginal_num_layers=self.marginal_num_layers,
+            copula_embedding_dim_per_head=self.copula_embedding_dim_per_head,
+            copula_num_heads=self.copula_num_heads,
+            copula_num_layers=self.copula_num_layers,
+            decoder_dsf_num_layers=self.decoder_dsf_num_layers,
+            decoder_dsf_hidden_dim=self.decoder_dsf_hidden_dim,
+            decoder_mlp_num_layers=self.decoder_mlp_num_layers,
+            decoder_mlp_hidden_dim=self.decoder_mlp_hidden_dim,
+            decoder_transformer_num_layers=self.decoder_transformer_num_layers,
+            decoder_transformer_embedding_dim_per_head=self.decoder_transformer_embedding_dim_per_head,
+            decoder_transformer_num_heads=self.decoder_transformer_num_heads,
+            decoder_num_bins=self.decoder_num_bins,
             bagging_size=self.bagging_size,
             input_encoding_normalization=self.input_encoding_normalization,
             data_normalization=self.data_normalization,
             loss_normalization=self.loss_normalization,
-            # Common parameters
+            # GluonTS compatability parameters
             cardinality=self.cardinality,
             num_feat_dynamic_real=self.num_feat_dynamic_real,
             num_feat_static_real=self.num_feat_static_real,
@@ -435,8 +517,12 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         return TACTiS2LightningModule(
             model=model,
-            lr=1e-3,  # Learning rate can be made configurable
-            weight_decay=1e-8,  # Weight decay can be made configurable
+            # Pass stage-specific optimizer params
+            lr_stage1=self.lr_stage1,
+            lr_stage2=self.lr_stage2,
+            weight_decay_stage1=self.weight_decay_stage1,
+            weight_decay_stage2=self.weight_decay_stage2,
+            # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
         )
