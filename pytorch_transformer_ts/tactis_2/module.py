@@ -61,7 +61,6 @@ class TACTiS2Model(nn.Module):
         num_feat_static_real: int = 0,
         num_feat_static_cat: int = 0,
         embedding_dimension: Optional[List[int]] = None,
-        scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
         num_parallel_samples: int = 100,
     ) -> None:
