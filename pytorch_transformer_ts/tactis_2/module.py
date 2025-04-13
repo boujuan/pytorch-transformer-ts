@@ -8,7 +8,6 @@ import numpy as np
 from gluonts.core.component import validated
 from gluonts.dataset.field_names import FieldName
 from gluonts.time_feature import get_lags_for_frequency
-from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import Scaler, MeanScaler, StdScaler, NOPScaler
 
