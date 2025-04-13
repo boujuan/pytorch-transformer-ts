@@ -21,7 +21,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         weight_decay_stage2: float = 0.0,
         stage: int = 1,  # Start with stage 1 (flow-only)
         stage2_start_epoch: int = 10,  # When to start stage 2
-        gradient_clip_val: float = 1.0, # Gradient clipping value
+        gradient_clip_val_stage1: float = 1000.0, # Stage 1 clipping
+        gradient_clip_val_stage2: float = 1000.0, # Stage 2 clipping
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -42,8 +43,10 @@ class TACTiS2LightningModule(pl.LightningModule):
             Initial training stage (1 for flow-only, 2 for flow+copula).
         stage2_start_epoch
             Epoch at which to switch to stage 2 (flow+copula) if starting with stage 1.
-        gradient_clip_val
-            Value for gradient clipping. 0.0 means disabled.
+        gradient_clip_val_stage1
+            Value for gradient clipping in stage 1. 0.0 means disabled.
+        gradient_clip_val_stage2
+            Value for gradient clipping in stage 2. 0.0 means disabled.
         """
         super().__init__()
         if isinstance(model, dict):
@@ -59,8 +62,9 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.weight_decay_stage2 = weight_decay_stage2
         self.stage = stage
         self.stage2_start_epoch = stage2_start_epoch
-        self.gradient_clip_val = gradient_clip_val
-        
+        self.gradient_clip_val_stage1 = gradient_clip_val_stage1
+        self.gradient_clip_val_stage2 = gradient_clip_val_stage2
+
         # Set the stage in the model
         if hasattr(self.model.tactis, "set_stage"):
             self.model.tactis.set_stage(self.stage)
@@ -156,9 +160,10 @@ class TACTiS2LightningModule(pl.LightningModule):
         # Manual backward pass
         self.manual_backward(loss)
         
-        # Apply gradient clipping if enabled
-        if self.gradient_clip_val > 0:
-             torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=self.gradient_clip_val)
+        # Apply gradient clipping based on current stage
+        current_clip_val = self.gradient_clip_val_stage1 if self.stage == 1 else self.gradient_clip_val_stage2
+        if current_clip_val > 0:
+             torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=current_clip_val)
         
         # Step the optimizer
         opt.step()

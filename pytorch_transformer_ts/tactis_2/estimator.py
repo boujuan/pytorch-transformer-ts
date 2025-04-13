@@ -100,7 +100,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         weight_decay_stage1: float = 0.0,
         weight_decay_stage2: float = 0.0,
         dropout_rate: float = 0.1,
-        gradient_clip_val: float = 1.0, # Default from YAML, not tuned
+        gradient_clip_val_stage1: float = 1000.0,
+        gradient_clip_val_stage2: float = 1000.0,
         # General Estimator arguments
         use_lazyframe: bool = False,
         context_length: Optional[int] = None,
@@ -167,8 +168,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.weight_decay_stage1 = weight_decay_stage1
         self.weight_decay_stage2 = weight_decay_stage2
         self.dropout_rate = dropout_rate
-        self.gradient_clip_val = gradient_clip_val
-        
+        self.gradient_clip_val_stage1 = gradient_clip_val_stage1
+        self.gradient_clip_val_stage2 = gradient_clip_val_stage2
+
         # Common parameters
         self.input_size = input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -248,9 +250,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", [0.0, 1e-5, 1e-4, 1e-3]),
             "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3]),
 
-            # --- Dropout ---
-            "dropout_rate": trial.suggest_categorical("dropout_rate", [0.0, 0.05, 0.1, 0.2, 0.3]),            
-            # Note: gradient_clip_val is taken from config, not tuned here
+            # --- Dropout & Clipping ---
+            "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.3),
+            "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", [0.0, 1000.0, 10000.0]),
+            "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", [0.0, 1000.0, 10000.0]),
         }
         return params
     
@@ -534,5 +537,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
-            gradient_clip_val=self.gradient_clip_val, # Pass gradient clipping value
+            gradient_clip_val_stage1=self.gradient_clip_val_stage1, # Pass stage 1 clipping
+            gradient_clip_val_stage2=self.gradient_clip_val_stage2, # Pass stage 2 clipping
         )
