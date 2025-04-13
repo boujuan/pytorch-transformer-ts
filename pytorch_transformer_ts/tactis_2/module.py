@@ -53,6 +53,7 @@ class TACTiS2Model(nn.Module):
         input_encoding_normalization: bool = True,
         data_normalization: str = "none",
         loss_normalization: str = "series",
+        dropout_rate: float = 0.1,
         # GluonTS compatability parameters
         cardinality: List[int] = [1],
         num_feat_dynamic_real: int = 0,
@@ -170,7 +171,7 @@ class TACTiS2Model(nn.Module):
         pos_encoding_dim = max(marginal_d_model, copula_d_model)
         positional_encoding_args = {
             "embedding_dim": pos_encoding_dim,
-            "dropout": 0.1, # Keep default dropout for now, could be tuned
+            "dropout": dropout_rate,
             "max_len": 5000,
         }
 
@@ -179,7 +180,7 @@ class TACTiS2Model(nn.Module):
             "nhead": marginal_num_heads,
             "num_encoder_layers": marginal_num_layers,
             "dim_feedforward": marginal_d_model * 4, # Standard practice
-            "dropout": 0.1, # Keep default dropout for now
+            "dropout": dropout_rate,
         }
 
         copula_encoder_args = {
@@ -187,7 +188,7 @@ class TACTiS2Model(nn.Module):
             "nhead": copula_num_heads,
             "num_encoder_layers": copula_num_layers,
             "dim_feedforward": copula_d_model * 4, # Standard practice
-            "dropout": 0.1, # Keep default dropout for now
+            "dropout": dropout_rate,
         }
 
         # Note: flow_temporal_encoder and copula_temporal_encoder args are not directly in the table
@@ -211,7 +212,7 @@ class TACTiS2Model(nn.Module):
                 "mlp_layers": 2, # Keep default, could be tuned
                 "mlp_dim": decoder_transformer_d_model * 4, # Standard practice
                 "resolution": decoder_num_bins,
-                "dropout": 0.1, # Keep default
+                "dropout": dropout_rate, # Use configured dropout
                 "attention_mlp_class": "_easy_mlp", # Keep default
                 "activation_function": "relu", # Keep default
             },

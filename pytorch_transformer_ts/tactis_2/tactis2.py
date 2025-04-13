@@ -547,6 +547,7 @@ class AttentionalCopula(nn.Module):
         mlp_layers: int = 2,
         mlp_dim: int = 128,
         resolution: int = 128,
+        dropout: float = 0.1,
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -556,7 +557,7 @@ class AttentionalCopula(nn.Module):
         self.mlp_layers = mlp_layers
         self.mlp_dim = mlp_dim
         self.resolution = resolution
-        
+        self.dropout = dropout
         # Dimension adjustment
         self.dimension_shifting_layer = nn.Linear(input_dim, attention_heads * attention_dim)
         
@@ -568,7 +569,7 @@ class AttentionalCopula(nn.Module):
             nn.LayerNorm(attention_heads * attention_dim) for _ in range(attention_layers)
         ])
         self.attention_dropouts = nn.ModuleList([
-            nn.Dropout(0.1) for _ in range(attention_layers)
+            nn.Dropout(self.dropout) for _ in range(attention_layers)
         ])
         
         # Feed-forward layers
@@ -577,7 +578,7 @@ class AttentionalCopula(nn.Module):
             layers = [nn.Linear(attention_heads * attention_dim, mlp_dim), nn.ReLU()]
             for _ in range(1, mlp_layers):
                 layers += [nn.Linear(mlp_dim, mlp_dim), nn.ReLU()]
-            layers += [nn.Linear(mlp_dim, attention_heads * attention_dim)]
+            layers += [nn.Linear(mlp_dim, attention_heads * attention_dim), nn.Dropout(self.dropout)]
             feed_forwards.append(nn.Sequential(*layers))
         self.feed_forwards = nn.ModuleList(feed_forwards)
         
@@ -934,8 +935,8 @@ class TACTiS(nn.Module):
             attention_dim=cop_args["attention_dim"], # This is dim_per_head
             mlp_layers=cop_args["mlp_layers"],
             mlp_dim=cop_args["mlp_dim"],
-            resolution=cop_args["resolution"]
-            # Dropout etc. could be added here if needed
+            resolution=cop_args["resolution"],
+            dropout=cop_args.get("dropout", 0.1)
         )
         print(f"Initialized AttentionalCopula with input_dim={cop_args['input_dim']}, resolution={cop_args['resolution']}")
     
