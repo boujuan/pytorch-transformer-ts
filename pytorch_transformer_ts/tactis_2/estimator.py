@@ -12,7 +12,6 @@ from gluonts.itertools import Cyclic
 from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
-# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.transform import (
     AddAgeFeature,
     AddObservedValuesIndicator,
@@ -514,7 +513,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             decoder_num_bins=self.decoder_num_bins,
             bagging_size=self.bagging_size,
             input_encoding_normalization=self.input_encoding_normalization,
-            data_normalization="none", # Force internal TACTiS normalization off
             loss_normalization=self.loss_normalization,
             encoder_type=self.encoder_type, # Pass encoder type
             dropout_rate=self.dropout_rate, # Pass dropout rate

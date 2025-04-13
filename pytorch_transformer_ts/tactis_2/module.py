@@ -51,7 +51,6 @@ class TACTiS2Model(nn.Module):
         decoder_num_bins: int, # Corresponds to AttentionalCopula resolution
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        # Removed data_normalization
         loss_normalization: str = "series",
         encoder_type: str = "standard",
         dropout_rate: float = 0.1,
@@ -87,8 +86,6 @@ class TACTiS2Model(nn.Module):
             Size of the bagging ensemble. If None, no bagging is performed.
         input_encoding_normalization
             Whether to normalize the input encoding.
-        data_normalization
-            Type of data normalization to apply. Options: "none", "standard", "series".
         loss_normalization
             Type of loss normalization to apply. Options: "none", "series".
         cardinality
@@ -243,7 +240,6 @@ class TACTiS2Model(nn.Module):
             copula_temporal_encoder=copula_temporal_encoder_args, # Using copula_encoder args for now
             copula_decoder=copula_decoder_args,
             encoder_type=encoder_type,
-            experiment_mode="forecasting", # Assuming forecasting mode
         )
     
     @property
@@ -520,7 +516,7 @@ class TACTiS2Model(nn.Module):
             future_target=future_target,
         )
         
-        # Compute the distribution parameters # TODO JUAN HIGH will this scale distr parameters? What distr parameters does it return
+        # Compute the distribution parameters
         params = self.output_params(network_input)
         
         if output_distr_params:

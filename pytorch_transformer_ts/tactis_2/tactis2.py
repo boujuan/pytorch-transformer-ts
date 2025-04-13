@@ -4,12 +4,17 @@ Based on the original TACTiS implementation.
 """
 
 import math
+import logging
 from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 import torch
 from torch import nn
+
 # Constants
 EPSILON = 1e-6
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 class PositionalEncoding(nn.Module):
     """
@@ -33,35 +38,23 @@ class PositionalEncoding(nn.Module):
     
     def forward(self, x: torch.Tensor, timesteps: torch.Tensor) -> torch.Tensor:
         """Apply positional encoding based on timesteps"""
-        # Print full tensor dimensions for debugging
-        print(f"PositionalEncoding input shapes: x={x.shape}, timesteps={timesteps.shape}")
-        print(f"PositionalEncoding buffer shape: pos_encoding={self.pos_encoding.shape}")
-        
         min_t = timesteps.min(dim=1, keepdim=True)[0].min(dim=2, keepdim=True)[0]
         delta_t = timesteps - min_t
         delta_t = torch.clamp(delta_t, 0, self.pos_encoding.shape[0] - 1)
         
-        print(f"delta_t shape: {delta_t.shape}, min={delta_t.min().item()}, max={delta_t.max().item()}")
-        
         try:
             # Get the positional encodings
-            # This will have shape [batch, timesteps, 1, embedding_dim] for our data
             pos_enc = self.pos_encoding[delta_t.long()]
-            print(f"pos_enc shape after indexing: {pos_enc.shape}")
             
             # Special case for handling [batch, time, series, features] tensors
-            # This is the specific case we're seeing in TACTiS-2
             if len(x.shape) == 4 and len(pos_enc.shape) == 4:
                 # Check if the specific mismatch is in the series dimension (dim 2)
                 if pos_enc.shape[2] == 1 and x.shape[2] > 1:
                     # Explicitly expand the series dimension
                     pos_enc = pos_enc.expand(-1, -1, x.shape[2], -1)
-                    print(f"Expanded series dimension: {pos_enc.shape}")
                 
             # General handling for any remaining shape mismatches
             if pos_enc.shape != x.shape:
-                print(f"Shape mismatch remains! pos_enc: {pos_enc.shape}, x: {x.shape}")
-                
                 # Try to automatically adapt the shape
                 try:
                     # For tensors with same number of dimensions
@@ -81,18 +74,14 @@ class PositionalEncoding(nn.Module):
                         # Just force reshape to match x's shape
                         pos_enc = pos_enc.view(*x.shape)
                 except Exception as inner_e:
-                    print(f"Error during shape adjustment: {inner_e}")
-                    # As last resort, if all else fails
+                    logger.warning(f"Error during positional encoding shape adjustment: {inner_e}")
                     return self.dropout(x)  # Skip positional encoding rather than crash
-            
-            # Verify the shapes match now
-            print(f"Final shapes - pos_enc: {pos_enc.shape}, x: {x.shape}")
             
             # Add the position encoding to the input
             output = x + pos_enc
             
         except Exception as e:
-            print(f"Error in positional encoding: {e}")
+            logger.error(f"Error in positional encoding: {e}")
             # Fallback - just return the input unchanged
             output = x
             
@@ -109,9 +98,6 @@ class SigmoidFlow(nn.Module):
     
     def forward(self, params, x, logdet):
         """Transform with derivative computation"""
-        # Print shapes for debugging
-        print(f"SigmoidFlow input shapes - params: {params.shape}, x: {x.shape}, logdet: {logdet.shape}")
-        
         # Apply softplus with numerical stability
         a = torch.nn.functional.softplus(params[..., :self.hidden_dim]) + EPSILON
         b = params[..., self.hidden_dim:2*self.hidden_dim]
@@ -138,23 +124,18 @@ class SigmoidFlow(nn.Module):
         # Add epsilon to prevent log of zero
         logj = torch.clamp(logj, min=EPSILON)
         
-        print(f"SigmoidFlow - logj shape: {logj.shape}, logdet shape: {logdet.shape}")
-        print(f"SigmoidFlow - logj min: {logj.min().item()}, max: {logj.max().item()}")
-        
         # Fix for dimension mismatch: expand logdet to match logj's dimensions
         if logdet.shape != logj.shape:
-            print(f"Dimension mismatch between logdet {logdet.shape} and logj {logj.shape}")
             # Expand logdet to match logj's dimensions
             for _ in range(len(logj.shape) - len(logdet.shape)):
                 logdet = logdet.unsqueeze(-1)
             # Now broadcast to the full shape
             logdet = logdet.expand_as(logj)
-            print(f"Expanded logdet shape: {logdet.shape}")
             
         # Add log jacobian with checks for NaN
         log_logj = torch.log(logj)
         if torch.isnan(log_logj).any():
-            print(f"WARNING: NaN detected in log_logj! Min logj: {logj.min().item()}")
+            logger.warning("NaN detected in log_logj, replacing with log(EPSILON)")
             # Replace NaNs with a large negative number (log of EPSILON)
             log_logj = torch.nan_to_num(log_logj, nan=math.log(EPSILON))
         
@@ -162,7 +143,7 @@ class SigmoidFlow(nn.Module):
         
         # Check for NaNs in logdet
         if torch.isnan(logdet).any():
-            print(f"WARNING: NaN detected in logdet after addition!")
+            logger.warning("NaN detected in logdet after addition")
             # Replace NaNs with zeros to allow training to continue
             logdet = torch.nan_to_num(logdet, nan=0.0)
         
@@ -178,7 +159,7 @@ class SigmoidFlow(nn.Module):
         
         # Final NaN check
         if torch.isnan(xnew).any() or torch.isnan(logdet).any():
-            print(f"WARNING: NaNs in final output! xnew: {torch.isnan(xnew).sum().item()}, logdet: {torch.isnan(logdet).sum().item()}")
+            logger.warning(f"NaNs in final SigmoidFlow output, replacing with zeros")
             xnew = torch.nan_to_num(xnew)
             logdet = torch.nan_to_num(logdet)
         
@@ -220,8 +201,6 @@ class DeepSigmoidFlow(nn.Module):
     
     def forward(self, params, x):
         """Transform with derivative computation"""
-        # Print input shapes for debugging
-        print(f"DeepSigmoidFlow input shapes - params: {params.shape}, x: {x.shape}")
         
         # Initialize logdet with the correct dimensions
         # We need to match x's full shape for proper accumulation of log determinant
@@ -232,10 +211,7 @@ class DeepSigmoidFlow(nn.Module):
         else:
             # For simpler cases
             batch_shape = x.shape
-            
-        logdet = torch.zeros(batch_shape, device=x.device)
-        
-        print(f"DeepSigmoidFlow - initialized logdet shape: {logdet.shape}")
+            logdet = torch.zeros(batch_shape, device=x.device)
         
         # Track original x for debugging
         x_orig = x.clone()
@@ -243,16 +219,15 @@ class DeepSigmoidFlow(nn.Module):
         for i, layer in enumerate(self.layers):
             # Extract parameters for this layer
             layer_params = params[..., i * self.params_length : (i + 1) * self.params_length]
-            print(f"DeepSigmoidFlow - layer {i} params shape: {layer_params.shape}")
             
             # Check for NaNs in inputs
             if torch.isnan(x).any():
-                print(f"WARNING: NaN in x before layer {i}")
+                logger.warning(f"NaN in x before DeepSigmoidFlow layer {i}")
                 # Replace NaNs with zeros to allow continued processing
                 x = torch.nan_to_num(x)
                 
             if torch.isnan(logdet).any():
-                print(f"WARNING: NaN in logdet before layer {i}")
+                logger.warning(f"NaN in logdet before DeepSigmoidFlow layer {i}")
                 logdet = torch.nan_to_num(logdet)
                 
             # Process through the layer
@@ -262,15 +237,9 @@ class DeepSigmoidFlow(nn.Module):
                 logdet,
             )
             
-            # Check outputs of each layer
-            print(f"DeepSigmoidFlow - after layer {i}, x range: [{x.min().item()}, {x.max().item()}], logdet shape: {logdet.shape}")
-            
         # Final check for NaNs
         if torch.isnan(x).any() or torch.isnan(logdet).any():
-            print(f"WARNING: NaNs in final output of DeepSigmoidFlow!")
-            print(f"x_orig min: {x_orig.min().item()}, max: {x_orig.max().item()}")
-            print(f"x NaNs: {torch.isnan(x).sum().item()}, logdet NaNs: {torch.isnan(logdet).sum().item()}")
-            
+            logger.warning("NaNs in final output of DeepSigmoidFlow, replacing with zeros")
             # Replace NaNs as a last resort
             x = torch.nan_to_num(x)
             logdet = torch.nan_to_num(logdet)
@@ -321,7 +290,7 @@ class DSFMarginal(nn.Module):
         
         # If dimensions don't match and we haven't initialized a reducer yet
         if input_dim != self.expected_context_dim and self.dim_reducer is None:
-            print(f"Creating dimension reducer from {input_dim} to {self.expected_context_dim}")
+            logger.debug(f"Creating dimension reducer from {input_dim} to {self.expected_context_dim}")
             self.input_dim = input_dim
             self.dim_reducer = nn.Linear(input_dim, self.expected_context_dim)
             # Move to the same device as the input tensor
@@ -335,26 +304,20 @@ class DSFMarginal(nn.Module):
     
     def forward_logdet(self, context: torch.Tensor, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Transform with derivative computation"""
-        # Print shapes for debugging
-        print(f"DSFMarginal inputs - context: {context.shape}, x: {x.shape}")
-        
         # Check for NaNs in input
         if torch.isnan(x).any():
-            print(f"WARNING: NaN values detected in input x, replacing with zeros")
+            logger.warning("NaN values detected in input x, replacing with zeros")
             x = torch.nan_to_num(x, nan=0.0)
-            
-        if torch.isnan(context).any():
-            print(f"WARNING: NaN values detected in context tensor, replacing with zeros")
+            if torch.isnan(context).any():
+                logger.warning("NaN values detected in context tensor, replacing with zeros")
             context = torch.nan_to_num(context, nan=0.0)
-        
         # Clamp x to a valid range to prevent numerical issues
         # The flow expects values that can be reasonably transformed without producing extremes
         x_min, x_max = x.min().item(), x.max().item()
-        print(f"Input x range: min={x_min}, max={x_max}")
         
         # Only clamp if values are extreme
         if x_min < -100 or x_max > 100:
-            print(f"Clamping extreme values in x")
+            logger.info("Clamping extreme values in x")
             x = torch.clamp(x, min=-100.0, max=100.0)
         
         # Reshape context for linear layer
@@ -364,15 +327,13 @@ class DSFMarginal(nn.Module):
         
         # Reshape to [batch*series*time, feature_dim]
         reshaped_context = context.reshape(-1, feature_dim)
-        print(f"Reshaped context for conditioner: {reshaped_context.shape}")
         
         # Ensure dimensions match before applying conditioner
         reshaped_context = self._ensure_dimensions_match(reshaped_context)
-        print(f"Reshaped context after dimension matching: {reshaped_context.shape}")
         
         # Check for NaNs after reshaping
         if torch.isnan(reshaped_context).any():
-            print(f"WARNING: NaN values detected after reshaping context, replacing with zeros")
+            logger.warning("NaN values detected after reshaping context, replacing with zeros")
             reshaped_context = torch.nan_to_num(reshaped_context, nan=0.0)
         
         # Apply conditioner
@@ -381,20 +342,16 @@ class DSFMarginal(nn.Module):
             
             # Check for NaNs in parameters
             if torch.isnan(marginal_params).any():
-                print(f"WARNING: NaN values in marginal parameters, replacing with zeros")
+                logger.warning("NaN values in marginal parameters, replacing with zeros")
                 marginal_params = torch.nan_to_num(marginal_params, nan=0.0)
                 
-            print(f"Marginal params after conditioner: {marginal_params.shape}")
-            
             # Reshape back to match x
             marginal_params = marginal_params.reshape(batch_size, num_series, num_timesteps, -1)
-            print(f"Marginal params reshaped: {marginal_params.shape}, x shape: {x.shape}")
             
             # Make sure dimensions match
             if marginal_params.dim() == x.dim():
                 # Check if reshaping is needed
                 if marginal_params.shape != x.shape:
-                    print(f"Dimension match but shapes differ: params={marginal_params.shape}, x={x.shape}")
                     marginal_params = marginal_params[:, :, :, :x.size(-1)]
             
             # Forward through the flow
@@ -402,14 +359,14 @@ class DSFMarginal(nn.Module):
             
             # Check for NaNs in the output
             if torch.isnan(transformed_x).any() or torch.isnan(logdet).any():
-                print(f"WARNING: NaN values in DSFMarginal output! transformed_x NaNs: {torch.isnan(transformed_x).sum().item()}, logdet NaNs: {torch.isnan(logdet).sum().item()}")
+                logger.warning("NaN values in DSFMarginal output, replacing with zeros")
                 transformed_x = torch.nan_to_num(transformed_x, nan=0.0)
                 logdet = torch.nan_to_num(logdet, nan=0.0)
             
             return transformed_x, logdet
             
         except Exception as e:
-            print(f"ERROR in DSFMarginal forward_logdet: {e}")
+            logger.error(f"Error in DSFMarginal forward_logdet: {e}")
             # Return zeros as a fallback to avoid crashing
             zeros_x = torch.zeros_like(x)
             zeros_logdet = torch.zeros(batch_size, num_series, num_timesteps, device=x.device)
@@ -419,17 +376,17 @@ class DSFMarginal(nn.Module):
         """Transform without derivative computation"""
         # Check for NaNs in input
         if torch.isnan(x).any():
-            print(f"WARNING: NaN values detected in input x for forward_no_logdet, replacing with zeros")
+            logger.warning("NaN values detected in input x for forward_no_logdet, replacing with zeros")
             x = torch.nan_to_num(x, nan=0.0)
             
         if torch.isnan(context).any():
-            print(f"WARNING: NaN values detected in context tensor for forward_no_logdet, replacing with zeros")
+            logger.warning("NaN values detected in context tensor for forward_no_logdet, replacing with zeros")
             context = torch.nan_to_num(context, nan=0.0)
         
         # Clamp x to a valid range to prevent numerical issues
         x_min, x_max = x.min().item(), x.max().item()
         if x_min < -100 or x_max > 100:
-            print(f"Clamping extreme values in x for forward_no_logdet")
+            logger.info("Clamping extreme values in x for forward_no_logdet")
             x = torch.clamp(x, min=-100.0, max=100.0)
         
         # Reshape context for linear layer
@@ -443,7 +400,7 @@ class DSFMarginal(nn.Module):
         
         # Check for NaNs after reshaping
         if torch.isnan(reshaped_context).any():
-            print(f"WARNING: NaN values after reshaping context in forward_no_logdet, replacing with zeros")
+            logger.warning("NaN values after reshaping context in forward_no_logdet, replacing with zeros")
             reshaped_context = torch.nan_to_num(reshaped_context, nan=0.0)
         
         try:
@@ -452,7 +409,7 @@ class DSFMarginal(nn.Module):
             
             # Check for NaNs in parameters
             if torch.isnan(marginal_params).any():
-                print(f"WARNING: NaN values in marginal parameters for forward_no_logdet, replacing with zeros")
+                logger.warning("NaN values in marginal parameters for forward_no_logdet, replacing with zeros")
                 marginal_params = torch.nan_to_num(marginal_params, nan=0.0)
             
             # Reshape back to match x
@@ -469,13 +426,13 @@ class DSFMarginal(nn.Module):
             
             # Check for NaNs in the output
             if torch.isnan(transformed_x).any():
-                print(f"WARNING: NaN values in DSFMarginal forward_no_logdet output! Replacing with zeros")
+                logger.warning("NaN values in DSFMarginal forward_no_logdet output, replacing with zeros")
                 transformed_x = torch.nan_to_num(transformed_x, nan=0.0)
             
             return transformed_x
             
         except Exception as e:
-            print(f"ERROR in DSFMarginal forward_no_logdet: {e}")
+            logger.error(f"Error in DSFMarginal forward_no_logdet: {e}")
             # Return zeros as a fallback to avoid crashing
             return torch.zeros_like(x)
     
@@ -546,6 +503,8 @@ class AttentionalCopula(nn.Module):
         mlp_dim: int = 128,
         resolution: int = 128,
         dropout: float = 0.1,
+        attention_mlp_class: str = "_easy_mlp",
+        activation_function: str = "relu",
     ):
         super().__init__()
         self.input_dim = input_dim
@@ -840,16 +799,14 @@ class TACTiS(nn.Module):
         copula_input_encoder_layers: int,
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        # Removed data_normalization parameter
         loss_normalization: str = "series",
         positional_encoding: Optional[Dict[str, Any]] = None,
         flow_encoder: Optional[Dict[str, Any]] = None,
         copula_encoder: Optional[Dict[str, Any]] = None,
         flow_temporal_encoder: Optional[Dict[str, Any]] = None,
         copula_temporal_encoder: Optional[Dict[str, Any]] = None,
-        copula_decoder: Optional[Dict[str, Any]] = None, # Make optional with default None
-        skip_copula: bool = True, # Keep default, controlled by LightningModule
-        experiment_mode: str = "forecasting",
+        copula_decoder: Optional[Dict[str, Any]] = None,
+        skip_copula: bool = True,
     ):
         """
         Initialize TACTiS model components.
@@ -870,8 +827,6 @@ class TACTiS(nn.Module):
             Size of bagging ensemble (None for no bagging)
         input_encoding_normalization: bool
             Whether to normalize input encodings
-        data_normalization: str
-            Type of normalization to apply to data values
         loss_normalization: str
             Type of normalization to apply to loss
         positional_encoding: Optional[Dict]
@@ -888,8 +843,6 @@ class TACTiS(nn.Module):
             Arguments for copula decoder
         skip_copula: bool
             Whether to skip copula component (use only flow for first stage)
-        experiment_mode: str
-            Mode of operation: "forecasting" or "imputation"
         """
         super().__init__()
         
@@ -900,7 +853,6 @@ class TACTiS(nn.Module):
         self.flow_input_encoder_layers = flow_input_encoder_layers
         self.copula_input_encoder_layers = copula_input_encoder_layers
         self.input_encoding_normalization = input_encoding_normalization
-        # Removed self.data_normalization assignment
         self.loss_normalization = loss_normalization
         self.skip_copula = skip_copula
         self.bagging_size = bagging_size
@@ -917,8 +869,8 @@ class TACTiS(nn.Module):
         self.positional_encoding_args = positional_encoding
         self.flow_encoder_args = flow_encoder
         self.copula_encoder_args = copula_encoder
-        # self.flow_temporal_encoder_args = flow_temporal_encoder # Not used directly in init methods below
-        # self.copula_temporal_encoder_args = copula_temporal_encoder # Not used directly in init methods below
+        self.flow_temporal_encoder_args = flow_temporal_encoder
+        self.copula_temporal_encoder_args = copula_temporal_encoder
         self.copula_decoder_args = copula_decoder
 
         # Initialize model components using stored args
@@ -928,7 +880,7 @@ class TACTiS(nn.Module):
         if not skip_copula and self.copula_decoder_args is not None:
              self._initialize_copula_components()
         elif not skip_copula and self.copula_decoder_args is None:
-             print("Warning: skip_copula is False, but copula_decoder args were not provided. Copula components not initialized.")
+             logger.warning("skip_copula is False, but copula_decoder args were not provided. Copula components not initialized.")
     
     def _initialize_flow_components(self):
         """Initialize flow-related components using stored args"""
@@ -947,8 +899,8 @@ class TACTiS(nn.Module):
              flow_encoder_layers.pop() # Remove last ReLU
 
         self.flow_input_encoder = nn.Sequential(*flow_encoder_layers)
-        print(f"Initialized flow_input_encoder with {self.flow_input_encoder_layers} layers, input_dim={flow_input_dim}, output_dim={flow_d_model}")
-
+        logger.debug(f"Initialized flow_input_encoder with {self.flow_input_encoder_layers} layers, input_dim={flow_input_dim}, output_dim={flow_d_model}")
+        
         # Positional encoding - Use dimension from args
         pos_encoding_dim = self.positional_encoding_args["embedding_dim"]
         self.flow_time_encoding = PositionalEncoding(
@@ -956,25 +908,19 @@ class TACTiS(nn.Module):
              dropout=self.positional_encoding_args.get("dropout", 0.1),
              max_len=self.positional_encoding_args.get("max_len", 5000)
         )
-        print(f"Initialized flow_time_encoding with embedding_dim={pos_encoding_dim}")
-
+        logger.debug(f"Initialized flow_time_encoding with embedding_dim={pos_encoding_dim}")
+        
         # Dimension adjustment layer if positional encoding dim doesn't match flow d_model
         if pos_encoding_dim != flow_d_model:
              self.flow_pos_adjust = nn.Linear(pos_encoding_dim, flow_d_model)
-             print(f"Added flow_pos_adjust layer: {pos_encoding_dim} -> {flow_d_model}")
+             logger.debug(f"Added flow_pos_adjust layer: {pos_encoding_dim} -> {flow_d_model}")
         else:
              self.flow_pos_adjust = nn.Identity()
-        
-        # Print positional encoding dimensions for debugging
-        print(f"TACTiS initialization - positional_encoding dim: {self.flow_time_encoding.pos_encoding.size(1)}")
         
         # Flow encoder (Transformer) - Use parameters from flow_encoder_args
         # Ensure d_model matches the output of input_encoder + pos_encoding
         if self.flow_encoder_args["d_model"] != flow_d_model:
-             print(f"Warning: flow_encoder_args d_model ({self.flow_encoder_args['d_model']}) differs from calculated flow_d_model ({flow_d_model}). Using calculated value.")
-             # Adjust d_model in args if necessary, though ideally they should match from module.py
-             # self.flow_encoder_args["d_model"] = flow_d_model
-            
+              logger.warning(f"flow_encoder_args d_model ({self.flow_encoder_args['d_model']}) differs from calculated flow_d_model ({flow_d_model}). Using calculated value.")
         self.flow_encoder = nn.TransformerEncoder(
             encoder_layer=nn.TransformerEncoderLayer(
                 d_model=flow_d_model, # Use consistent d_model
@@ -985,14 +931,14 @@ class TACTiS(nn.Module):
             ),
             num_layers=self.flow_encoder_args["num_encoder_layers"]
         )
-        print(f"Initialized flow_encoder (Transformer) with {self.flow_encoder_args['num_encoder_layers']} layers, d_model={flow_d_model}, nhead={self.flow_encoder_args['nhead']}")
+        logger.debug(f"Initialized flow_encoder (Transformer) with {self.flow_encoder_args['num_encoder_layers']} layers, d_model={flow_d_model}, nhead={self.flow_encoder_args['nhead']}")
         
         # Marginals (DSF) - Use parameters from copula_decoder_args['dsf_marginal']
         dsf_args = self.copula_decoder_args["dsf_marginal"]
         # Ensure context_dim matches the output of the flow_encoder
         if dsf_args["context_dim"] != flow_d_model:
-             print(f"Warning: dsf_marginal context_dim ({dsf_args['context_dim']}) differs from flow_encoder output dim ({flow_d_model}). Using encoder output dim.")
-             dsf_args["context_dim"] = flow_d_model
+              logger.warning(f"dsf_marginal context_dim ({dsf_args['context_dim']}) differs from flow_encoder output dim ({flow_d_model}). Using encoder output dim.")
+              dsf_args["context_dim"] = flow_d_model
 
         self.marginal = DSFMarginal(
             context_dim=dsf_args["context_dim"],
@@ -1001,7 +947,7 @@ class TACTiS(nn.Module):
             flow_layers=dsf_args["flow_layers"],
             flow_hid_dim=dsf_args["flow_hid_dim"]
         )
-        print(f"Initialized marginal (DSF) with context_dim={dsf_args['context_dim']}")
+        logger.debug(f"Initialized marginal (DSF) with context_dim={dsf_args['context_dim']}")
     
     def _initialize_copula_components(self):
         """Initialize copula-related components using stored args"""
@@ -1020,7 +966,7 @@ class TACTiS(nn.Module):
              copula_encoder_layers_list.pop() # Remove last ReLU
 
         self.copula_input_encoder = nn.Sequential(*copula_encoder_layers_list)
-        print(f"Initialized copula_input_encoder with {self.copula_input_encoder_layers} layers, input_dim={copula_input_dim}, output_dim={copula_d_model}")
+        logger.debug(f"Initialized copula_input_encoder with {self.copula_input_encoder_layers} layers, input_dim={copula_input_dim}, output_dim={copula_d_model}")
         
         # Positional encoding - Use dimension from args
         pos_encoding_dim = self.positional_encoding_args["embedding_dim"]
@@ -1029,23 +975,18 @@ class TACTiS(nn.Module):
              dropout=self.positional_encoding_args.get("dropout", 0.1),
              max_len=self.positional_encoding_args.get("max_len", 5000)
         )
-        print(f"Initialized copula_time_encoding with embedding_dim={pos_encoding_dim}")
-
+        logger.debug(f"Initialized copula_time_encoding with embedding_dim={pos_encoding_dim}")
+        
         # Dimension adjustment layer if positional encoding dim doesn't match copula d_model
         if pos_encoding_dim != copula_d_model:
              self.copula_pos_adjust = nn.Linear(pos_encoding_dim, copula_d_model)
-             print(f"Added copula_pos_adjust layer: {pos_encoding_dim} -> {copula_d_model}")
+             logger.debug(f"Added copula_pos_adjust layer: {pos_encoding_dim} -> {copula_d_model}")
         else:
              self.copula_pos_adjust = nn.Identity()
         
-        # Print positional encoding dimensions for debugging
-        print(f"TACTiS initialization - copula positional_encoding dim: {self.copula_time_encoding.pos_encoding.size(1)}")
-        
         # Copula encoder (Transformer) - Use parameters from copula_encoder_args
         if self.copula_encoder_args["d_model"] != copula_d_model:
-             print(f"Warning: copula_encoder_args d_model ({self.copula_encoder_args['d_model']}) differs from calculated copula_d_model ({copula_d_model}). Using calculated value.")
-             # Adjust d_model in args if necessary
-             # self.copula_encoder_args["d_model"] = copula_d_model
+              logger.warning(f"copula_encoder_args d_model ({self.copula_encoder_args['d_model']}) differs from calculated copula_d_model ({copula_d_model}). Using calculated value.")
             
         self.copula_encoder = nn.TransformerEncoder(
             encoder_layer=nn.TransformerEncoderLayer(
@@ -1057,7 +998,7 @@ class TACTiS(nn.Module):
             ),
             num_layers=self.copula_encoder_args["num_encoder_layers"]
         )
-        print(f"Initialized copula_encoder (Transformer) with {self.copula_encoder_args['num_encoder_layers']} layers, d_model={copula_d_model}, nhead={self.copula_encoder_args['nhead']}")
+        logger.debug(f"Initialized copula_encoder (Transformer) with {self.copula_encoder_args['num_encoder_layers']} layers, d_model={copula_d_model}, nhead={self.copula_encoder_args['nhead']}")
         
         # Attentional copula - Use parameters from copula_decoder_args['attentional_copula']
         if self.copula_decoder_args is None or "attentional_copula" not in self.copula_decoder_args:
@@ -1066,8 +1007,8 @@ class TACTiS(nn.Module):
 
         # Ensure input_dim matches the output of the copula_encoder
         if cop_args.get("input_dim", copula_d_model) != copula_d_model: # Use get with default
-             print(f"Warning: attentional_copula input_dim ({cop_args['input_dim']}) differs from copula_encoder output dim ({copula_d_model}). Using encoder output dim.")
-             cop_args["input_dim"] = copula_d_model
+              logger.warning(f"attentional_copula input_dim ({cop_args['input_dim']}) differs from copula_encoder output dim ({copula_d_model}). Using encoder output dim.")
+              cop_args["input_dim"] = copula_d_model
 
         self.copula = AttentionalCopula(
             input_dim=cop_args["input_dim"],
@@ -1077,9 +1018,11 @@ class TACTiS(nn.Module):
             mlp_layers=cop_args["mlp_layers"],
             mlp_dim=cop_args["mlp_dim"],
             resolution=cop_args["resolution"],
-            dropout=cop_args.get("dropout", 0.1)
+            dropout=cop_args.get("dropout", 0.1),
+            attention_mlp_class=cop_args.get("attention_mlp_class", "_easy_mlp"),
+            activation_function=cop_args.get("activation_function", "relu")
         )
-        print(f"Initialized AttentionalCopula with input_dim={cop_args['input_dim']}, resolution={cop_args['resolution']}")
+        logger.debug(f"Initialized AttentionalCopula with input_dim={cop_args['input_dim']}, resolution={cop_args['resolution']}")
     
     def forward(
         self, 
@@ -1109,7 +1052,7 @@ class TACTiS(nn.Module):
              norm_samples = self.sample(1, hist_time, hist_value, pred_time)
              return norm_samples, None # Loss is None during inference
 
-        # --- Training forward pass (Forecasting Mode Only) ---
+        # --- Training forward pass ---
         batch_size, num_series, hist_len = hist_value.shape
         pred_len = pred_value.shape[2]
         device = hist_value.device
@@ -1160,7 +1103,7 @@ class TACTiS(nn.Module):
         pred_time: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Generate samples from the model (Forecasting Mode Only).
+        Generate samples from the model.
         """
         batch_size, num_series, hist_len = hist_value.shape
         pred_len = pred_time.shape[1]
@@ -1213,32 +1156,21 @@ class TACTiS(nn.Module):
         num_series = series_indices.size(0)
         device = time_steps.device
         
-        # Print input shapes for debugging
-        print(f"_encode_flow input shapes: time_steps={time_steps.shape}, value={value.shape}, mask={mask.shape}, series_indices={series_indices.shape}")
-        
         # Get series embeddings
         series_emb = self.flow_series_encoder(series_indices)  # [series, dim]
-        print(f"series_emb shape: {series_emb.shape}")
-        
         # Prepare input tensor with values, series embedding, and mask
         flow_input = torch.cat([
             value.permute(0, 2, 1).unsqueeze(-1),  # [batch, time, series, 1]
             series_emb.unsqueeze(0).unsqueeze(1).expand(batch_size, num_timesteps, -1, -1),  # [batch, time, series, dim]
             mask.permute(0, 2, 1).unsqueeze(-1).float(),  # [batch, time, series, 1]
         ], dim=-1)
-        print(f"flow_input shape: {flow_input.shape}")
-        
         # Reshape for input encoder
         flow_input = flow_input.reshape(batch_size * num_timesteps * num_series, -1)
-        print(f"flow_input reshaped: {flow_input.shape}")
         
         # Apply input encoder
         encoded = self.flow_input_encoder(flow_input)
-        print(f"encoded from flow_input_encoder: {encoded.shape}")
-        
         # Reshape back
         encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
-        print(f"encoded reshaped for time encoding: {encoded.shape}")
         
         # Apply positional encoding - Fix for time tensor
         # Create time tensor with the correct shape for positional encoding
@@ -1246,32 +1178,24 @@ class TACTiS(nn.Module):
         time_tensor = time_steps.unsqueeze(-1)
         # We don't need to expand to match series dimension, as the positional encoding
         # will handle this mismatch with our improved implementation
-        print(f"time_tensor for positional encoding: {time_tensor.shape}")
-        
         # Apply positional encoding and adjust dimension if needed
         pos_encoded = self.flow_time_encoding(encoded, time_tensor)
         encoded = self.flow_pos_adjust(pos_encoded)
-        print(f"encoded after positional encoding: {encoded.shape}")
         
         # Apply flow encoder
         if self.encoder_type == "standard":
              # Standard Transformer expects [batch, series * time, embed_dim] if batch_first=True
              encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, -1)
-             print(f"encoded reshaped for standard flow encoder: {encoded_reshaped.shape}")
              encoded_out = self.flow_encoder(encoded_reshaped)
              encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, -1) # Reshape back
         elif self.encoder_type == "temporal":
              # TemporalEncoder expects [batch, series, time, embed_dim]
-             print(f"encoded shape for temporal flow encoder: {encoded.shape}")
              encoded = self.flow_encoder(encoded) # TemporalEncoder handles internal reshaping
-        print(f"encoded after flow encoder: {encoded.shape}")
         
         encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
-        print(f"encoded final reshape: {encoded.shape}")
         
         # Arrange dimensions to [batch, series, time, dim]
         encoded = encoded.permute(0, 2, 1, 3)
-        print(f"encoded after permute: {encoded.shape}")
         
         return encoded
     
@@ -1281,12 +1205,8 @@ class TACTiS(nn.Module):
         num_series = series_indices.size(0)
         device = time_steps.device
         
-        # Print input shapes for debugging
-        print(f"_encode_copula input shapes: time_steps={time_steps.shape}, value={value.shape}, mask={mask.shape}, series_indices={series_indices.shape}")
-        
         # Get series embeddings
         series_emb = self.copula_series_encoder(series_indices)  # [series, dim]
-        print(f"copula series_emb shape: {series_emb.shape}")
         
         # Prepare input tensor with values, series embedding, and mask
         copula_input = torch.cat([
@@ -1294,49 +1214,35 @@ class TACTiS(nn.Module):
             series_emb.unsqueeze(0).unsqueeze(1).expand(batch_size, num_timesteps, -1, -1),  # [batch, time, series, dim]
             mask.permute(0, 2, 1).unsqueeze(-1).float(),  # [batch, time, series, 1]
         ], dim=-1)
-        print(f"copula_input shape: {copula_input.shape}")
-        
         # Reshape for input encoder
         copula_input = copula_input.reshape(batch_size * num_timesteps * num_series, -1)
-        print(f"copula_input reshaped: {copula_input.shape}")
-        
         # Apply input encoder
         encoded = self.copula_input_encoder(copula_input)
-        print(f"encoded from copula_input_encoder: {encoded.shape}")
         
         # Reshape back
         encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
-        print(f"encoded reshaped for time encoding: {encoded.shape}")
         
         # Apply positional encoding - Fix for time tensor
         # Create time tensor with the correct shape for positional encoding
         time_tensor = time_steps.unsqueeze(-1)  # simplified time tensor
-        print(f"copula time_tensor for positional encoding: {time_tensor.shape}")
-        
         # Apply positional encoding and adjust dimension if needed
         pos_encoded = self.copula_time_encoding(encoded, time_tensor)
         encoded = self.copula_pos_adjust(pos_encoded)
-        print(f"encoded after positional encoding: {encoded.shape}")
         
         # Apply copula encoder
         if self.encoder_type == "standard":
              # Standard Transformer expects [batch, series * time, embed_dim] if batch_first=True
              encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, -1)
-             print(f"encoded reshaped for standard copula encoder: {encoded_reshaped.shape}")
              encoded_out = self.copula_encoder(encoded_reshaped)
              encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, -1) # Reshape back
         elif self.encoder_type == "temporal":
              # TemporalEncoder expects [batch, series, time, embed_dim]
-             print(f"encoded shape for temporal copula encoder: {encoded.shape}")
              encoded = self.copula_encoder(encoded) # TemporalEncoder handles internal reshaping
-        print(f"encoded after copula encoder: {encoded.shape}")
         
         encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
-        print(f"encoded final reshape: {encoded.shape}")
         
         # Arrange dimensions to [batch, series, time, dim]
         encoded = encoded.permute(0, 2, 1, 3)
-        print(f"encoded after permute: {encoded.shape}")
         
         return encoded
     
@@ -1350,9 +1256,9 @@ class TACTiS(nn.Module):
         if stage == 2 and self.skip_copula:
              # Check if args are available before initializing
              if self.copula_decoder_args is not None and self.copula_encoder_args is not None:
-                 print("Initializing copula components for stage 2...")
+                 logger.info("Initializing copula components for stage 2...")
                  self.skip_copula = False
                  # Pass the stored config dictionaries
                  self._initialize_copula_components()
              else:
-                 print("Warning: Cannot initialize copula components for stage 2 - config args missing.")
+                 logger.warning("Cannot initialize copula components for stage 2 - config args missing.")
