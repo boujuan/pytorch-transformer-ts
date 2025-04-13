@@ -51,8 +51,9 @@ class TACTiS2Model(nn.Module):
         decoder_num_bins: int, # Corresponds to AttentionalCopula resolution
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        data_normalization: str = "none",
+        # Removed data_normalization
         loss_normalization: str = "series",
+        encoder_type: str = "standard",
         dropout_rate: float = 0.1,
         # GluonTS compatability parameters
         cardinality: List[int] = [1],
@@ -60,7 +61,6 @@ class TACTiS2Model(nn.Module):
         num_feat_static_real: int = 0,
         num_feat_static_cat: int = 0,
         embedding_dimension: Optional[List[int]] = None,
-        distr_output: DistributionOutput = StudentTOutput(),
         scaling: Optional[str] = "std",
         lags_seq: Optional[List[int]] = None,
         num_parallel_samples: int = 100,
@@ -235,7 +235,7 @@ class TACTiS2Model(nn.Module):
             copula_input_encoder_layers=copula_input_encoder_layers, # Passed directly
             bagging_size=bagging_size,
             input_encoding_normalization=input_encoding_normalization,
-            data_normalization=data_normalization,
+            # Removed data_normalization
             loss_normalization=loss_normalization,
             positional_encoding=positional_encoding_args,
             flow_encoder=flow_encoder_args,
@@ -243,6 +243,7 @@ class TACTiS2Model(nn.Module):
             flow_temporal_encoder=flow_temporal_encoder_args, # Using flow_encoder args for now
             copula_temporal_encoder=copula_temporal_encoder_args, # Using copula_encoder args for now
             copula_decoder=copula_decoder_args,
+            encoder_type=encoder_type,
             experiment_mode="forecasting", # Assuming forecasting mode
         )
     

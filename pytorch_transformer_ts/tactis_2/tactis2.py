@@ -8,8 +8,6 @@ from typing import Optional, Dict, Any, List, Tuple
 import numpy as np
 import torch
 from torch import nn
-import copy
-
 # Constants
 EPSILON = 1e-6
 
@@ -685,6 +683,150 @@ class AttentionalCopula(nn.Module):
         
         return samples
 
+
+class TemporalEncoder(nn.Module):
+    """
+    The encoder for TACTiS, based on the Temporal Transformer architecture.
+    This encoder alternate between doing self-attention between different series of the same time steps,
+    and doing self-attention between different time steps of the same series.
+    This greatly reduces the memory footprint compared to TACTiSEncoder.
+
+    The encoder receives an input which contains for each variable and time step:
+    * The series value at the time step, masked to zero if part of the values to be forecasted
+    * The mask
+    * The embedding for the series
+    * The embedding for the time step
+    And has already been through any input encoder.
+
+    The decoder returns an output containing an embedding for each series and time step.
+    """
+
+    def __init__(
+        self,
+        d_model: int, # Renamed from attention_dim * attention_heads
+        nhead: int, # Renamed from attention_heads
+        num_encoder_layers: int, # Renamed from attention_layers (represents pairs)
+        dim_feedforward: int, # Renamed from attention_feedforward_dim
+        dropout: float = 0.1,
+        # attention_dim: int, # Removed, use d_model / nhead if needed internally
+    ):
+        """
+        Parameters:
+        -----------
+        d_model: int
+            The total dimension of the model.
+        nhead: int
+            How many independant heads the attention layer will have.
+        num_encoder_layers: int
+            How many successive attention pairs of layers this will use.
+            Note that the total number of layers is going to be the double of this number.
+            Each pair will consist of a layer with attention done over time steps,
+            followed by a layer with attention done over series.
+        dim_feedforward: int
+            The dimension of the hidden layer in the feed forward step.
+        dropout: float, default to 0.1
+            Dropout parameter for the attention.
+        """
+        super().__init__()
+
+        self.d_model = d_model
+        self.nhead = nhead
+        self.num_encoder_layers = num_encoder_layers
+        self.dim_feedforward = dim_feedforward
+        self.dropout = dropout
+        self.total_attention_time = 0.0 # Keep for potential timing analysis
+
+        # Create pairs of layers: one for time attention, one for series attention
+        self.layer_timesteps = nn.ModuleList(
+            [
+                nn.TransformerEncoderLayer(
+                    d_model=self.d_model,
+                    nhead=self.nhead,
+                    dim_feedforward=self.dim_feedforward,
+                    dropout=self.dropout,
+                    batch_first=True # Important: Assume batch_first for easier handling
+                )
+                for _ in range(self.num_encoder_layers)
+            ]
+        )
+
+        self.layer_series = nn.ModuleList(
+            [
+                nn.TransformerEncoderLayer(
+                    d_model=self.d_model,
+                    nhead=self.nhead,
+                    dim_feedforward=self.dim_feedforward,
+                    dropout=self.dropout,
+                    batch_first=True # Important: Assume batch_first for easier handling
+                )
+                for _ in range(self.num_encoder_layers)
+            ]
+        )
+
+    @property
+    def embedding_dim(self) -> int:
+        """
+        Returns:
+        --------
+        dim: int
+            The expected dimensionality of the input embedding, and the dimensionality of the output embedding
+        """
+        return self.d_model
+
+    def forward(self, encoded: torch.Tensor) -> torch.Tensor:
+        """
+        Compute the embedding for each series and time step.
+
+        Parameters:
+        -----------
+        encoded: Tensor [batch, series, time steps, input embedding dimension]
+            A tensor containing an embedding for each series and time step.
+            This embedding is expected to only contain local information, with no interaction between series or time steps.
+
+        Returns:
+        --------
+        output: torch.Tensor [batch, series, time steps, output embedding dimension]
+            The transformed embedding for each series and time step.
+        """
+        num_batches = encoded.shape[0]
+        num_series = encoded.shape[1]
+        num_timesteps = encoded.shape[2]
+
+        data = encoded
+
+        # attention_start_time = time.time() # Removed timing for clarity
+        for i in range(self.num_encoder_layers):
+            # --- Time Attention ---
+            # Treat the various series as a batch dimension
+            mod_timesteps = self.layer_timesteps[i]
+            # [batch * series, time steps, embedding]
+            data_time = data.reshape(num_batches * num_series, num_timesteps, self.embedding_dim)
+            # Perform attention (batch_first=True)
+            data_time = mod_timesteps(data_time)
+            # [batch, series, time steps, embedding]
+            data = data_time.reshape(num_batches, num_series, num_timesteps, self.embedding_dim)
+
+            # --- Series Attention ---
+            # Treat the various time steps as a batch dimension
+            mod_series = self.layer_series[i]
+            # Transpose to [batch, timesteps, series, embedding]
+            data_series = data.transpose(1, 2)
+            # [batch * time steps, series, embedding]
+            data_series = data_series.reshape(num_batches * num_timesteps, num_series, self.embedding_dim)
+            # Perform attention (batch_first=True)
+            data_series = mod_series(data_series)
+            # [batch, time steps, series, embedding]
+            data_series = data_series.reshape(num_batches, num_timesteps, num_series, self.embedding_dim)
+            # Transpose back to [batch, series, time steps, embedding]
+            data = data_series.transpose(1, 2)
+
+        # attention_end_time = time.time()
+        # self.total_attention_time = attention_end_time - attention_start_time
+        # The resulting tensor may not be contiguous, which can cause problems further down the line.
+        output = data.contiguous()
+
+        return output
+
 class TACTiS(nn.Module):
     """
     The top-level module for TACTiS-2.
@@ -698,7 +840,7 @@ class TACTiS(nn.Module):
         copula_input_encoder_layers: int,
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        data_normalization: str = "none",
+        # Removed data_normalization parameter
         loss_normalization: str = "series",
         positional_encoding: Optional[Dict[str, Any]] = None,
         flow_encoder: Optional[Dict[str, Any]] = None,
@@ -758,10 +900,9 @@ class TACTiS(nn.Module):
         self.flow_input_encoder_layers = flow_input_encoder_layers
         self.copula_input_encoder_layers = copula_input_encoder_layers
         self.input_encoding_normalization = input_encoding_normalization
-        self.data_normalization = data_normalization
+        # Removed self.data_normalization assignment
         self.loss_normalization = loss_normalization
         self.skip_copula = skip_copula
-        self.experiment_mode = experiment_mode
         self.bagging_size = bagging_size
         
         # Stage tracks whether to use flow only (1) or flow+copula (2)
@@ -962,16 +1103,25 @@ class TACTiS(nn.Module):
         Tuple of output values and loss
         """
         if pred_value is None:
-            return self.sample(1, hist_time, hist_value, pred_time), None
-        
-        # Training forward pass
+             # Inference mode: call sample method
+             # Assumes hist_value is already normalized externally
+             # Denormalization is handled by TACTiS2Model wrapper
+             norm_samples = self.sample(1, hist_time, hist_value, pred_time)
+             return norm_samples, None # Loss is None during inference
+
+        # --- Training forward pass (Forecasting Mode Only) ---
         batch_size, num_series, hist_len = hist_value.shape
+        pred_len = pred_value.shape[2]
         device = hist_value.device
-        
-        # Prepare inputs
+
+        # Prepare inputs (assuming external normalization)
         time_steps = torch.cat([hist_time, pred_time], dim=1)
-        value = torch.cat([hist_value, pred_value], dim=2)
-        mask = torch.ones_like(value, dtype=torch.bool)
+        value = torch.cat([hist_value, pred_value], dim=2) # Combined history + target
+        mask = torch.cat([ # Mask True = observed, False = predicted
+            torch.ones(batch_size, num_series, hist_len, dtype=torch.bool, device=device),
+            torch.zeros(batch_size, num_series, pred_len, dtype=torch.bool, device=device)
+        ], dim=2)
+        true_value = value # Use combined value for encoding & loss calculation
         
         # Create embeddings for series
         series_indices = torch.arange(num_series, device=device)
@@ -1001,75 +1151,60 @@ class TACTiS(nn.Module):
         
         return output, loss
     
+    # Sample method simplified assuming forecasting mode and external normalization
     def sample(
         self,
         num_samples: int,
         hist_time: torch.Tensor,
-        hist_value: torch.Tensor,
+        hist_value: torch.Tensor, # Expected to be normalized externally
         pred_time: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Generate samples from the model
-        
-        Parameters:
-        -----------
-        num_samples: Number of samples to generate
-        hist_time: Time values for historical data
-        hist_value: Values for historical data
-        pred_time: Time values for prediction period
-        
-        Returns:
-        --------
-        Samples of shape [num_samples, batch, series, pred_len]
+        Generate samples from the model (Forecasting Mode Only).
         """
         batch_size, num_series, hist_len = hist_value.shape
         pred_len = pred_time.shape[1]
         device = hist_value.device
-        
-        # Prepare inputs
+
+        # Prepare inputs for encoding (history + zeros for prediction period)
         time_steps = torch.cat([hist_time, pred_time], dim=1)
         series_indices = torch.arange(num_series, device=device)
-        
-        # Create placeholder for full data (with zeros for pred)
-        value = torch.cat([
-            hist_value, 
+        value_placeholder = torch.cat([
+            hist_value,
             torch.zeros(batch_size, num_series, pred_len, device=device)
         ], dim=2)
         mask = torch.cat([
             torch.ones(batch_size, num_series, hist_len, dtype=torch.bool, device=device),
             torch.zeros(batch_size, num_series, pred_len, dtype=torch.bool, device=device)
         ], dim=2)
-        
-        # Encode inputs for flow
-        flow_encoded = self._encode_flow(time_steps, value, mask, series_indices)
-        
-        # Generate samples using the copula (or uniform if skipping)
+
+        # Encode inputs
+        flow_encoded = self._encode_flow(time_steps, value_placeholder, mask, series_indices)
+        copula_encoded = None
         if not self.skip_copula and self.stage >= 2:
-            # Encode inputs for copula
-            copula_encoded = self._encode_copula(time_steps, value, mask, series_indices)
-            
-            # Sample from copula
-            u_samples = self.copula.sample(
-                num_samples, 
-                flow_encoded[:, :, hist_len:],
-                flow_encoded.shape[-1]
-            )
+            copula_encoded = self._encode_copula(time_steps, value_placeholder, mask, series_indices)
+
+        # Generate uniform samples or copula samples
+        if copula_encoded is None: # Stage 1 or copula skipped
+            u_samples = torch.rand(num_samples, batch_size, num_series, pred_len, device=device)
         else:
-            # Use uniform samples
-            u_samples = torch.rand(
-                num_samples, batch_size, num_series, pred_len,
-                device=device
-            )
-        
+            # Sample from copula using encoded representation of prediction steps
+            u_samples_flat = self.copula.sample(
+                num_samples,
+                copula_encoded[:, :, hist_len:], # Pass copula encoding for prediction steps
+                copula_encoded.shape[-1] # Pass embedding dim
+            ) # Shape: [batch, series*pred_len, num_samples]
+            u_samples = u_samples_flat.reshape(batch_size, num_series, pred_len, num_samples).permute(3, 0, 1, 2)
+
         # Transform samples using marginal inverse CDF
-        samples = torch.zeros_like(u_samples)
-        for i in range(batch_size):
-            for j in range(num_series):
-                samples[:, i, j] = self.marginal.inverse(
-                    flow_encoded[i, j, hist_len:].unsqueeze(0).expand(num_samples, -1, -1),
-                    u_samples[:, i, j]
-                )
-        
+        # Reshape inputs for marginal.inverse
+        u_samples_reshaped = u_samples.permute(1, 2, 3, 0).reshape(batch_size, num_series * pred_len, num_samples)
+        flow_encoded_pred = flow_encoded[:, :, hist_len:].reshape(batch_size, num_series * pred_len, -1)
+
+        samples_normalized = self.marginal.inverse(flow_encoded_pred, u_samples_reshaped)
+        samples = samples_normalized.reshape(batch_size, num_series, pred_len, num_samples).permute(3, 0, 1, 2)
+
+        # Return normalized samples; denormalization is external
         return samples
     
     def _encode_flow(self, time_steps, value, mask, series_indices):
@@ -1119,11 +1254,16 @@ class TACTiS(nn.Module):
         print(f"encoded after positional encoding: {encoded.shape}")
         
         # Apply flow encoder
-        encoded = encoded.reshape(batch_size, num_timesteps * num_series, -1)
-        print(f"encoded reshaped for flow encoder: {encoded.shape}")
-        
-        
-        encoded = self.flow_encoder(encoded)
+        if self.encoder_type == "standard":
+             # Standard Transformer expects [batch, series * time, embed_dim] if batch_first=True
+             encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, -1)
+             print(f"encoded reshaped for standard flow encoder: {encoded_reshaped.shape}")
+             encoded_out = self.flow_encoder(encoded_reshaped)
+             encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, -1) # Reshape back
+        elif self.encoder_type == "temporal":
+             # TemporalEncoder expects [batch, series, time, embed_dim]
+             print(f"encoded shape for temporal flow encoder: {encoded.shape}")
+             encoded = self.flow_encoder(encoded) # TemporalEncoder handles internal reshaping
         print(f"encoded after flow encoder: {encoded.shape}")
         
         encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
@@ -1179,10 +1319,16 @@ class TACTiS(nn.Module):
         print(f"encoded after positional encoding: {encoded.shape}")
         
         # Apply copula encoder
-        encoded = encoded.reshape(batch_size, num_timesteps * num_series, -1)
-        print(f"encoded reshaped for copula encoder: {encoded.shape}")
-        
-        encoded = self.copula_encoder(encoded)
+        if self.encoder_type == "standard":
+             # Standard Transformer expects [batch, series * time, embed_dim] if batch_first=True
+             encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, -1)
+             print(f"encoded reshaped for standard copula encoder: {encoded_reshaped.shape}")
+             encoded_out = self.copula_encoder(encoded_reshaped)
+             encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, -1) # Reshape back
+        elif self.encoder_type == "temporal":
+             # TemporalEncoder expects [batch, series, time, embed_dim]
+             print(f"encoded shape for temporal copula encoder: {encoded.shape}")
+             encoded = self.copula_encoder(encoded) # TemporalEncoder handles internal reshaping
         print(f"encoded after copula encoder: {encoded.shape}")
         
         encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
@@ -1210,8 +1356,3 @@ class TACTiS(nn.Module):
                  self._initialize_copula_components()
              else:
                  print("Warning: Cannot initialize copula components for stage 2 - config args missing.")
-    
-    def set_experiment_mode(self, experiment_mode: str):
-        """Set the experiment mode (forecasting or interpolation)"""
-        assert experiment_mode in ["forecasting", "interpolation"]
-        self.experiment_mode = experiment_mode

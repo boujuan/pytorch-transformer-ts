@@ -10,7 +10,6 @@ from gluonts.dataset.field_names import FieldName
 from gluonts.dataset.loader import as_stacked_batches
 from gluonts.itertools import Cyclic
 from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
-from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
 # from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
@@ -35,7 +34,7 @@ from gluonts.transform import (
 )
 from gluonts.transform.sampler import InstanceSampler
 from gluonts.transform.field import RenameFields
-from gluonts.model.forecast_generator import DistributionForecastGenerator
+from gluonts.model.forecast_generator import SampleForecastGenerator # Ensure this is used
 
 from .module import TACTiS2Model
 from .lightning_module import TACTiS2LightningModule
@@ -90,8 +89,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         decoder_num_bins: int = 50, # Corresponds to AttentionalCopula resolution?
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        data_normalization: str = "series",
+        # Removed data_normalization - handled by GluonTS scaling
         loss_normalization: str = "series",
+        encoder_type: str = "standard",
         # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
@@ -110,7 +110,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         num_feat_static_real: int = 0,
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
-        distr_output: DistributionOutput = StudentTOutput(),
+        # Removed distr_output parameter
         scaling: Optional[str] = "std", # Note: TACTiS handles internal scaling/normalization
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
@@ -158,8 +158,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.decoder_num_bins = decoder_num_bins
         self.bagging_size = bagging_size
         self.input_encoding_normalization = input_encoding_normalization
-        self.data_normalization = data_normalization
+        # Removed self.data_normalization
         self.loss_normalization = loss_normalization
+        self.encoder_type = encoder_type
         # Training stage / optimizer params
         self.initial_stage = initial_stage
         self.stage2_start_epoch = stage2_start_epoch
@@ -178,7 +179,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.num_feat_static_real = num_feat_static_real
         self.cardinality = cardinality if cardinality and num_feat_static_cat > 0 else [1]
         self.embedding_dimension = embedding_dimension
-        self.distr_output = distr_output
+        # Removed self.distr_output assignment
         self.scaling = scaling
         self.num_parallel_samples = num_parallel_samples
         
@@ -218,7 +219,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         params = {
             # --- General ---
             "context_length": trial.suggest_categorical("context_length", context_length_choices),
-            "data_normalization": trial.suggest_categorical("data_normalization", ["none", "series"]), # Keep existing options
+            # Removed data_normalization suggestion
+            "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
 
             # --- Marginal CDF Encoder ---
             "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
@@ -304,13 +306,13 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                     field=FieldName.FEAT_STATIC_REAL,
                     expected_ndim=1,
                 ),
+                # Target field transformation - Ensure it's treated as 2D (time, num_series)
                 AsLazyFrame(
                     field=FieldName.TARGET,
-                    expected_ndim=1 + len(self.distr_output.event_shape)
+                    expected_ndim=2
                 ) if use_lazyframe else AsNumpyArray(
                     field=FieldName.TARGET,
-                    # in the following line, we add 1 for the time dimension 
-                    expected_ndim=1 + len(self.distr_output.event_shape),
+                    expected_ndim=2,
                 ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
@@ -473,7 +475,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
             input_transform=transformation + prediction_splitter,
-            forecast_generator=DistributionForecastGenerator(self.distr_output),
+            forecast_generator=SampleForecastGenerator(), # Ensure SampleForecastGenerator is used
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         )
 
@@ -512,8 +514,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             decoder_num_bins=self.decoder_num_bins,
             bagging_size=self.bagging_size,
             input_encoding_normalization=self.input_encoding_normalization,
-            data_normalization=self.data_normalization,
+            data_normalization="none", # Force internal TACTiS normalization off
             loss_normalization=self.loss_normalization,
+            encoder_type=self.encoder_type, # Pass encoder type
             dropout_rate=self.dropout_rate, # Pass dropout rate
             # GluonTS compatability parameters
             cardinality=self.cardinality,
@@ -521,7 +524,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             num_feat_static_real=self.num_feat_static_real,
             num_feat_static_cat=self.num_feat_static_cat,
             embedding_dimension=self.embedding_dimension,
-            distr_output=self.distr_output,
             scaling=self.scaling,
             lags_seq=self.lags_seq,
             num_parallel_samples=self.num_parallel_samples,
