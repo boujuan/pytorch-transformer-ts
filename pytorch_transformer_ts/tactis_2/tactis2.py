@@ -6,7 +6,6 @@ Based on the original TACTiS implementation.
 import math
 import logging
 from typing import Optional, Dict, Any, List, Tuple
-import numpy as np
 import torch
 from torch import nn
 
@@ -1023,9 +1022,69 @@ class TACTiS(nn.Module):
             activation_function=cop_args.get("activation_function", "relu")
         )
         logger.debug(f"Initialized AttentionalCopula with input_dim={cop_args['input_dim']}, resolution={cop_args['resolution']}")
-    
+
+    @staticmethod
+    def _apply_bagging(
+        bagging_size,
+        time_steps: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor,
+        true_value: torch.Tensor,
+        flow_series_emb=None,
+        copula_series_emb=None,
+    ):
+        """
+        Only keep a small number of series for each of the input tensors.
+        Which series will be kept is randomly selected for each batch. The order is not preserved.
+
+        Parameters:
+        -----------
+        bagging_size: int
+            How many series to keep
+        time_steps: Tensor [batch, time steps]
+            Combined historical and prediction time steps.
+        value: Tensor [batch, series, time steps]
+            Combined historical and prediction values (normalized).
+        mask: Tensor [batch, series, time steps]
+            Boolean mask indicating observed (True) vs predicted (False).
+        true_value: Tensor [batch, series, time steps]
+            Same as value, used for loss calculation.
+        flow_series_emb: Tensor [batch, series, flow embedding size]
+            An embedding for each series for the marginals, expanded over the batches.
+        copula_series_emb: Tensor [batch, series, copula embedding size]
+            An embedding for each series for the copula, expanded over the batches.
+
+        Returns:
+        --------
+        Tuple containing bagged versions of:
+        time_steps, value, mask, true_value, flow_series_emb, copula_series_emb
+        """
+        num_batches = value.shape[0]
+        num_series = value.shape[1]
+
+        # Make sure to have the exact same bag for all series within a batch
+        bags = [torch.randperm(num_series, device=value.device)[0:bagging_size] for _ in range(num_batches)]
+
+        # Bag the tensors that have a series dimension
+        value = torch.stack([value[i, bags[i], :] for i in range(num_batches)], dim=0)
+        mask = torch.stack([mask[i, bags[i], :] for i in range(num_batches)], dim=0)
+        true_value = torch.stack([true_value[i, bags[i], :] for i in range(num_batches)], dim=0)
+        flow_series_emb = torch.stack([flow_series_emb[i, bags[i], :] for i in range(num_batches)], dim=0)
+        if copula_series_emb is not None:
+            copula_series_emb = torch.stack([copula_series_emb[i, bags[i], :] for i in range(num_batches)], dim=0)
+
+        # time_steps usually doesn't have a series dimension, so it's returned as is
+        return (
+            time_steps,
+            value,
+            mask,
+            true_value,
+            flow_series_emb,
+            copula_series_emb,
+        )
+
     def forward(
-        self, 
+        self,
         hist_time: torch.Tensor,
         hist_value: torch.Tensor,
         pred_time: torch.Tensor,
@@ -1068,10 +1127,46 @@ class TACTiS(nn.Module):
         
         # Create embeddings for series
         series_indices = torch.arange(num_series, device=device)
-        flow_series_emb = self.flow_series_encoder(series_indices)
-        
-        # Encode inputs for flow
-        flow_encoded = self._encode_flow(time_steps, value, mask, series_indices)
+        # Expand over batches for potential bagging
+        flow_series_emb = self.flow_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1)
+        copula_series_emb = None
+        if not self.skip_copula and self.stage >= 2:
+             # Ensure copula encoder exists before creating embedding
+             if hasattr(self, 'copula_series_encoder'):
+                 copula_series_emb = self.copula_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1)
+             else:
+                 logger.warning("Attempted to use copula embedding in forward pass, but copula_series_encoder not initialized.")
+
+        # Apply bagging if configured and in training mode
+        if self.bagging_size is not None and pred_value is not None:
+             logger.debug(f"Applying bagging with size {self.bagging_size}")
+             (
+                 time_steps, # time_steps is not bagged as it has no series dim
+                 value,
+                 mask,
+                 true_value,
+                 flow_series_emb,
+                 copula_series_emb, # Will be None if not initialized
+             ) = self._apply_bagging(
+                 self.bagging_size,
+                 time_steps,
+                 value,
+                 mask,
+                 true_value,
+                 flow_series_emb=flow_series_emb,
+                 copula_series_emb=copula_series_emb,
+             )
+             # Update num_series after bagging
+             num_series = self.bagging_size
+             # Update series_indices for encoding after bagging
+             # Note: The actual series identity is lost after bagging,
+             # but we need indices matching the new bagged dimension for encoding.
+             series_indices = torch.arange(num_series, device=device)
+
+
+        # Encode inputs for flow using potentially bagged tensors
+        # Pass the potentially bagged flow_series_emb directly to _encode_flow
+        flow_encoded = self._encode_flow(time_steps, value, mask, series_indices, flow_series_emb)
         
         # Process with marginal model
         normalized_data = value
@@ -1080,14 +1175,321 @@ class TACTiS(nn.Module):
         
         # Process with copula if needed
         if not self.skip_copula and self.stage >= 2:
-            # Encode inputs for copula
-            copula_encoded = self._encode_copula(time_steps, value, mask, series_indices)
-            
-            # Process with copula
-            self.copula_loss = -self.copula.log_prob(u_vals, copula_encoded)
-        else:
+            # Encode inputs for copula using potentially bagged tensors
+            # Pass the potentially bagged copula_series_emb directly
+            if copula_series_emb is not None: # Check if copula embeddings exist (i.e., stage 2 and initialized)
+                 copula_encoded = self._encode_copula(time_steps, value, mask, series_indices, copula_series_emb)
+            else:
+                 copula_encoded = None # Ensure copula_encoded is None if embeddings weren't created
+
+            # Process with copula if encoded representation exists
+            if copula_encoded is not None:
+                self.copula_loss = -self.copula.log_prob(u_vals, copula_encoded)
+            else:
+                # If copula_encoded is None (e.g., stage 1 or bagging happened before init), set loss to zero
+                self.copula_loss = torch.zeros(1, device=device).mean()
+        else: # Corresponds to 'if not self.skip_copula and self.stage >= 2:'
             self.copula_loss = torch.zeros(1, device=device).mean()
-        
+
+        # Loss normalization based on potentially bagged num_series
+        if self.loss_normalization in {"series", "both"}:
+             # Use the potentially updated num_series after bagging
+             self.copula_loss = self.copula_loss / num_series
+             self.marginal_logdet = self.marginal_logdet / num_series
+        if self.loss_normalization in {"timesteps", "both"}:
+             self.copula_loss = self.copula_loss / pred_len # Use original pred_len
+             self.marginal_logdet = self.marginal_logdet / pred_len # Use original pred_len
+
+        # Return output
+        output = pred_value # For training, return target as "output"
+        loss = self.copula_loss - self.marginal_logdet # Negative log-likelihood
+
+        return output, loss
+
+    @staticmethod
+    def _apply_bagging(
+        bagging_size,
+        time_steps: torch.Tensor,
+        value: torch.Tensor,
+        mask: torch.Tensor,
+        true_value: torch.Tensor,
+        flow_series_emb=None,
+        copula_series_emb=None,
+    ):
+        """
+        Only keep a small number of series for each of the input tensors.
+        Which series will be kept is randomly selected for each batch. The order is not preserved.
+
+        Parameters:
+        -----------
+        bagging_size: int
+            How many series to keep
+        time_steps: Tensor [batch, time steps]
+            Combined historical and prediction time steps.
+        value: Tensor [batch, series, time steps]
+            Combined historical and prediction values (normalized).
+        mask: Tensor [batch, series, time steps]
+            Boolean mask indicating observed (True) vs predicted (False).
+        true_value: Tensor [batch, series, time steps]
+            Same as value, used for loss calculation.
+        flow_series_emb: Tensor [batch, series, flow embedding size]
+            An embedding for each series for the marginals, expanded over the batches.
+        copula_series_emb: Tensor [batch, series, copula embedding size]
+            An embedding for each series for the copula, expanded over the batches.
+
+        Returns:
+        --------
+        Tuple containing bagged versions of:
+        time_steps, value, mask, true_value, flow_series_emb, copula_series_emb
+        """
+        num_batches = value.shape[0]
+        num_series = value.shape[1]
+
+        # Make sure to have the exact same bag for all series within a batch
+        bags = [torch.randperm(num_series, device=value.device)[0:bagging_size] for _ in range(num_batches)]
+
+        # Bag the tensors that have a series dimension
+        value = torch.stack([value[i, bags[i], :] for i in range(num_batches)], dim=0)
+        mask = torch.stack([mask[i, bags[i], :] for i in range(num_batches)], dim=0)
+        true_value = torch.stack([true_value[i, bags[i], :] for i in range(num_batches)], dim=0)
+        flow_series_emb = torch.stack([flow_series_emb[i, bags[i], :] for i in range(num_batches)], dim=0)
+        if copula_series_emb is not None:
+            copula_series_emb = torch.stack([copula_series_emb[i, bags[i], :] for i in range(num_batches)], dim=0)
+
+        # time_steps usually doesn't have a series dimension, so it's returned as is
+        return (
+            time_steps,
+            value,
+            mask,
+            true_value,
+            flow_series_emb,
+            copula_series_emb,
+        )
+
+    # Sample method simplified assuming forecasting mode and external normalization
+    def sample(
+        self,
+        num_samples: int,
+        hist_time: torch.Tensor,
+        hist_value: torch.Tensor, # Expected to be normalized externally
+        pred_time: torch.Tensor,
+    ) -> torch.Tensor:
+        """
+        Generate samples from the model.
+        """
+        batch_size, num_series, hist_len = hist_value.shape
+        pred_len = pred_time.shape[1]
+        device = hist_value.device
+
+        # Prepare inputs for encoding (history + zeros for prediction period)
+        time_steps = torch.cat([hist_time, pred_time], dim=1)
+        series_indices = torch.arange(num_series, device=device)
+        value_placeholder = torch.cat([
+            hist_value,
+            torch.zeros(batch_size, num_series, pred_len, device=device)
+        ], dim=2)
+        mask = torch.cat([
+            torch.ones(batch_size, num_series, hist_len, dtype=torch.bool, device=device),
+            torch.zeros(batch_size, num_series, pred_len, dtype=torch.bool, device=device)
+        ], dim=2)
+
+        # Create series embeddings (needed for encoding)
+        # Expand over batches as encoding expects batch dimension
+        flow_series_emb = self.flow_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1)
+        copula_series_emb = None
+        if not self.skip_copula and self.stage >= 2 and hasattr(self, 'copula_series_encoder'):
+             copula_series_emb = self.copula_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1)
+
+        # Encode inputs
+        # Pass the created series embeddings directly
+        flow_encoded = self._encode_flow(time_steps, value_placeholder, mask, series_indices, flow_series_emb)
+        copula_encoded = None
+        if copula_series_emb is not None: # Check if copula embeddings exist
+             copula_encoded = self._encode_copula(time_steps, value_placeholder, mask, series_indices, copula_series_emb)
+
+        # Generate uniform samples or copula samples
+        if copula_encoded is None: # Stage 1 or copula skipped
+            u_samples = torch.rand(num_samples, batch_size, num_series, pred_len, device=device)
+        else:
+            # Sample from copula using encoded representation of prediction steps
+            # Ensure copula exists before sampling
+            if not hasattr(self, 'copula'):
+                 logger.error("Attempting to sample from copula, but it's not initialized.")
+                 # Fallback: generate uniform samples
+                 u_samples = torch.rand(num_samples, batch_size, num_series, pred_len, device=device)
+            else:
+                 # Select the copula encoding corresponding to prediction steps
+                 copula_encoded_pred = copula_encoded[:, :, hist_len:] # Shape [batch, series, pred_len, dim]
+                 # Reshape for copula sample method if needed by its implementation
+                 # Assuming copula.sample expects [batch, series * pred_len, dim]
+                 copula_encoded_pred_flat = copula_encoded_pred.reshape(batch_size, num_series * pred_len, -1)
+
+                 u_samples_flat = self.copula.sample(
+                     num_samples,
+                     copula_encoded_pred_flat, # Pass flattened copula encoding for prediction steps
+                     copula_encoded_pred_flat.shape[-1] # Pass embedding dim
+                 ) # Expected Shape: [batch, series*pred_len, num_samples] ? Check AttentionalCopula.sample output shape
+                 # Reshape back to [num_samples, batch, series, pred_len]
+                 try:
+                      u_samples = u_samples_flat.reshape(batch_size, num_series, pred_len, num_samples).permute(3, 0, 1, 2)
+                 except RuntimeError as e:
+                      logger.error(f"Error reshaping copula samples: {e}. Input shape: {u_samples_flat.shape}")
+                      # Fallback: generate uniform samples
+                      u_samples = torch.rand(num_samples, batch_size, num_series, pred_len, device=device)
+
+
+        # Transform samples using marginal inverse CDF
+        # Reshape inputs for marginal.inverse
+        # Select flow encoding for prediction steps
+        flow_encoded_pred = flow_encoded[:, :, hist_len:] # Shape [batch, series, pred_len, dim]
+        # Reshape u_samples and flow_encoded_pred for marginal.inverse
+        # u_samples: [num_samples, batch, series, pred_len] -> [batch, series, pred_len, num_samples]
+        u_samples_permuted = u_samples.permute(1, 2, 3, 0)
+
+        # marginal.inverse expects context [batch*N, dim] and u [batch*N, num_samples]
+        # Reshape context: [batch, series, pred_len, dim] -> [batch * series * pred_len, dim]
+        flow_encoded_pred_flat = flow_encoded_pred.reshape(-1, flow_encoded_pred.shape[-1])
+        # Reshape u: [batch, series, pred_len, num_samples] -> [batch * series * pred_len, num_samples]
+        u_samples_flat = u_samples_permuted.reshape(-1, num_samples)
+
+        samples_normalized_flat = self.marginal.inverse(flow_encoded_pred_flat, u_samples_flat)
+        # Reshape back: [batch * series * pred_len, num_samples] -> [batch, series, pred_len, num_samples]
+        samples_normalized = samples_normalized_flat.reshape(batch_size, num_series, pred_len, num_samples)
+
+        # Permute to final shape: [num_samples, batch, series, pred_len]
+        samples = samples_normalized.permute(3, 0, 1, 2)
+
+
+        # Return normalized samples; denormalization is external
+        return samples
+
+    def _encode_flow(self, time_steps, value, mask, series_indices, flow_series_emb):
+        """Encode data for flow component, accepting pre-computed embeddings"""
+        batch_size, num_series, num_timesteps = value.shape # Get dimensions from value tensor
+        device = time_steps.device
+
+        # flow_series_emb is now passed in, shape [batch, series, dim]
+        # Expand series embedding to match time dimension
+        series_emb_expanded = flow_series_emb.unsqueeze(2).expand(-1, -1, num_timesteps, -1) # [batch, series, time, dim]
+
+        # Prepare input tensor - permute value and mask to [batch, time, series, 1] first
+        flow_input = torch.cat([
+            value.permute(0, 2, 1).unsqueeze(-1),  # [batch, time, series, 1]
+            series_emb_expanded.permute(0, 2, 1, 3), # [batch, time, series, dim]
+            mask.permute(0, 2, 1).unsqueeze(-1).float(),  # [batch, time, series, 1]
+        ], dim=-1)
+
+        # Reshape for input encoder [batch * time * series, features]
+        flow_input = flow_input.reshape(-1, flow_input.shape[-1])
+
+        # Apply input encoder
+        encoded = self.flow_input_encoder(flow_input)
+        # Reshape back [batch, time, series, embed_dim]
+        encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
+
+        # Apply positional encoding
+        # time_steps shape [batch, time] -> unsqueeze for pos encoding [batch, time, 1]
+        time_tensor = time_steps.unsqueeze(-1)
+        # encoded shape [batch, time, series, embed_dim]
+        # PositionalEncoding handles broadcasting/expanding time encoding to match series dim
+        pos_encoded = self.flow_time_encoding(encoded, time_tensor)
+        encoded = self.flow_pos_adjust(pos_encoded) # Apply adjustment if needed
+
+        # Apply flow encoder (handles standard vs temporal internally now)
+        encoded = self.flow_encoder(encoded) # Assumes encoder handles input shape correctly
+
+        # Final reshape and permute to [batch, series, time, dim]
+        encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
+        encoded = encoded.permute(0, 2, 1, 3)
+
+        return encoded
+
+    def _encode_copula(self, time_steps, value, mask, series_indices, copula_series_emb):
+        """Encode data for copula component, accepting pre-computed embeddings"""
+        batch_size, num_series, num_timesteps = value.shape
+        device = time_steps.device
+
+        # copula_series_emb is passed in, shape [batch, series, dim]
+        # Expand series embedding to match time dimension
+        series_emb_expanded = copula_series_emb.unsqueeze(2).expand(-1, -1, num_timesteps, -1) # [batch, series, time, dim]
+
+        # Prepare input tensor - permute value and mask to [batch, time, series, 1] first
+        copula_input = torch.cat([
+            value.permute(0, 2, 1).unsqueeze(-1),  # [batch, time, series, 1]
+            series_emb_expanded.permute(0, 2, 1, 3), # [batch, time, series, dim]
+            mask.permute(0, 2, 1).unsqueeze(-1).float(),  # [batch, time, series, 1]
+        ], dim=-1)
+
+        # Reshape for input encoder [batch * time * series, features]
+        copula_input = copula_input.reshape(-1, copula_input.shape[-1])
+        # Apply input encoder
+        encoded = self.copula_input_encoder(copula_input)
+
+        # Reshape back [batch, time, series, embed_dim]
+        encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
+
+        # Apply positional encoding
+        time_tensor = time_steps.unsqueeze(-1)
+        pos_encoded = self.copula_time_encoding(encoded, time_tensor)
+        encoded = self.copula_pos_adjust(pos_encoded)
+
+        # Apply copula encoder
+        encoded = self.copula_encoder(encoded) # Assumes encoder handles input shape correctly
+
+        # Final reshape and permute to [batch, series, time, dim]
+        encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
+        encoded = encoded.permute(0, 2, 1, 3)
+
+        return encoded
+
+    def set_stage(self, stage: int):
+        """Set the training stage"""
+        assert stage in [1, 2], "Stage must be 1 or 2"
+        self.stage = stage
+
+        # Re-initialize copula components if switching to stage 2 and they weren't initialized before
+        if stage == 2 and self.skip_copula:
+             # Check if args are available before initializing
+             # Check specifically for copula_encoder_args as it's needed for d_model
+             if self.copula_decoder_args is not None and self.copula_encoder_args is not None:
+                 logger.info("Initializing copula components for stage 2...")
+                 self.skip_copula = False
+                 # Pass the stored config dictionaries
+                 self._initialize_copula_components()
+                 # Ensure the initialized components are moved to the correct device
+                 # This assumes the TACTiS module itself is already on the correct device
+                 device = next(self.parameters()).device
+                 if hasattr(self, 'copula_series_encoder'):
+                      self.copula_series_encoder.to(device)
+                 if hasattr(self, 'copula_input_encoder'):
+                      self.copula_input_encoder.to(device)
+                 if hasattr(self, 'copula_time_encoding'):
+                      self.copula_time_encoding.to(device)
+                 if hasattr(self, 'copula_pos_adjust'):
+                      self.copula_pos_adjust.to(device)
+                 if hasattr(self, 'copula_encoder'):
+                      self.copula_encoder.to(device)
+                 if hasattr(self, 'copula'):
+                      self.copula.to(device)
+
+                 else:
+                    logger.warning("Cannot initialize copula components for stage 2 - config args missing.")
+                    self.copula_loss = -self.copula.log_prob(u_vals, copula_encoded)
+             else:
+                 # If copula_encoded is None (e.g., stage 1 or bagging happened before init), set loss to zero
+                 self.copula_loss = torch.zeros(1, device=device).mean()
+        else: # Corresponds to 'if not self.skip_copula and self.stage >= 2:'
+            self.copula_loss = torch.zeros(1, device=device).mean()
+
+        # Loss normalization based on potentially bagged num_series
+        if self.loss_normalization in {"series", "both"}:
+             # Use the potentially updated num_series after bagging
+             self.copula_loss = self.copula_loss / num_series
+             self.marginal_logdet = self.marginal_logdet / num_series
+        if self.loss_normalization in {"timesteps", "both"}:
+             self.copula_loss = self.copula_loss / pred_len # Use original pred_len
+             self.marginal_logdet = self.marginal_logdet / pred_len # Use original pred_len
+
         # Return output
         output = pred_value  # For training, return target as "output"
         loss = self.copula_loss - self.marginal_logdet  # Negative log-likelihood
