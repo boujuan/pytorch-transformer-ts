@@ -1192,7 +1192,6 @@ class TACTiS(nn.Module):
              # but we need indices matching the new bagged dimension for encoding.
              series_indices = torch.arange(num_series, device=device)
 
-
         # Encode inputs for flow using potentially bagged tensors
         # Pass the potentially bagged flow_series_emb directly to _encode_flow
         flow_encoded = self._encode_flow(time_steps, value, mask, series_indices, flow_series_emb)
