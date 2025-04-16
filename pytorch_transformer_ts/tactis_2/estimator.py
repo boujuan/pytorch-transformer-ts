@@ -27,13 +27,10 @@ from gluonts.transform import (
     TestSplitSampler,
     Transformation,
     ValidationSplitSampler,
-    VstackFeatures,
-    ExpandDimArray,
-    SetFieldIfNotPresent,
-    SelectFields
+    VstackFeatures
 )
 from gluonts.transform.sampler import InstanceSampler
-from gluonts.transform.field import RenameFields
+# from gluonts.transform.field import RenameFields
 from gluonts.model.forecast_generator import SampleForecastGenerator
 
 from .module import TACTiS2Model

@@ -8,7 +8,7 @@ This is an implementation of the TACTiS model integrated with the pytorch-transf
 framework, compatible with GluonTS.
 """
 
-from .tactis2 import TACTiS
+from .tactis import TACTiS
 from .module import TACTiS2Model
 from .lightning_module import TACTiS2LightningModule
 from .estimator import TACTiS2Estimator

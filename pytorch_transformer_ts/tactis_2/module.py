@@ -1,17 +1,17 @@
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import List, Optional
 import logging
 
 import torch
 import torch.nn as nn
-import numpy as np
+# import numpy as np
 
 from gluonts.core.component import validated
-from gluonts.dataset.field_names import FieldName
+# from gluonts.dataset.field_names import FieldName
 from gluonts.time_feature import get_lags_for_frequency
-from gluonts.torch.modules.feature import FeatureEmbedder
-from gluonts.torch.scaler import Scaler, MeanScaler, StdScaler, NOPScaler
+# from gluonts.torch.modules.feature import FeatureEmbedder
+from gluonts.torch.scaler import MeanScaler, StdScaler, NOPScaler
 
-from .tactis2 import TACTiS
+from .tactis import TACTiS
 
 # Set up logging
 logger = logging.getLogger(__name__)

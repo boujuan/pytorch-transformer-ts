@@ -3,7 +3,7 @@ import logging
 import lightning.pytorch as pl
 import torch
 from gluonts.torch.util import weighted_average
-from gluonts.dataset.field_names import FieldName
+# from gluonts.dataset.field_names import FieldName
 
 from .module import TACTiS2Model
 
