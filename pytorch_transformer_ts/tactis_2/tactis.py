@@ -132,21 +132,17 @@ class TACTiS(nn.Module):
         self.flow_input_encoder = nn.Sequential(*flow_encoder_layers)
         logger.debug(f"Initialized flow_input_encoder with {self.flow_input_encoder_layers} layers, input_dim={flow_input_dim}, output_dim={flow_d_model}")
 
-        # Positional encoding - Use dimension from args
-        pos_encoding_dim = self.positional_encoding_args["embedding_dim"]
+        # Positional encoding - Use flow_d_model
         self.flow_time_encoding = PositionalEncoding(
-             embedding_dim=pos_encoding_dim,
+             embedding_dim=flow_d_model, # Use flow_d_model directly
              dropout=self.positional_encoding_args.get("dropout", 0.1),
              max_len=self.positional_encoding_args.get("max_len", 5000)
         )
-        logger.debug(f"Initialized flow_time_encoding with embedding_dim={pos_encoding_dim}")
+        logger.debug(f"Initialized flow_time_encoding with embedding_dim={flow_d_model}")
+        logger.info(f"TACTiS Init: flow_d_model={flow_d_model}") # DEBUG LOG
 
-        # Dimension adjustment layer if positional encoding dim doesn't match flow d_model
-        if pos_encoding_dim != flow_d_model:
-             self.flow_pos_adjust = nn.Linear(pos_encoding_dim, flow_d_model)
-             logger.debug(f"Added flow_pos_adjust layer: {pos_encoding_dim} -> {flow_d_model}")
-        else:
-             self.flow_pos_adjust = nn.Identity()
+        # Remove flow_pos_adjust as dimensions should now match
+        self.flow_pos_adjust = nn.Identity()
 
         # Flow encoder (Transformer or TemporalEncoder) - Use parameters from flow_encoder_args
         # Ensure d_model matches the output of input_encoder + pos_encoding
@@ -215,21 +211,16 @@ class TACTiS(nn.Module):
         self.copula_input_encoder = nn.Sequential(*copula_encoder_layers_list)
         logger.debug(f"Initialized copula_input_encoder with {self.copula_input_encoder_layers} layers, input_dim={copula_input_dim}, output_dim={copula_d_model}")
 
-        # Positional encoding - Use dimension from args
-        pos_encoding_dim = self.positional_encoding_args["embedding_dim"]
+        # Positional encoding - Use copula_d_model
         self.copula_time_encoding = PositionalEncoding(
-             embedding_dim=pos_encoding_dim,
+             embedding_dim=copula_d_model, # Use copula_d_model directly
              dropout=self.positional_encoding_args.get("dropout", 0.1),
              max_len=self.positional_encoding_args.get("max_len", 5000)
         )
-        logger.debug(f"Initialized copula_time_encoding with embedding_dim={pos_encoding_dim}")
+        logger.debug(f"Initialized copula_time_encoding with embedding_dim={copula_d_model}")
 
-        # Dimension adjustment layer if positional encoding dim doesn't match copula d_model
-        if pos_encoding_dim != copula_d_model:
-             self.copula_pos_adjust = nn.Linear(pos_encoding_dim, copula_d_model)
-             logger.debug(f"Added copula_pos_adjust layer: {pos_encoding_dim} -> {copula_d_model}")
-        else:
-             self.copula_pos_adjust = nn.Identity()
+        # Remove copula_pos_adjust as dimensions should now match
+        self.copula_pos_adjust = nn.Identity()
 
         # Copula encoder (Transformer or TemporalEncoder) - Use parameters from copula_encoder_args
         if self.copula_encoder_args["d_model"] != copula_d_model:
@@ -649,8 +640,10 @@ class TACTiS(nn.Module):
         time_tensor = time_steps.unsqueeze(-1)
         # encoded shape [batch, time, series, embed_dim]
         # PositionalEncoding handles broadcasting/expanding time encoding to match series dim
+        logger.info(f"TACTiS Encode Flow: encoded shape before pos encoding={encoded.shape}, flow_time_encoding expected dim={self.flow_time_encoding.embedding_dim}") # DEBUG LOG
         pos_encoded = self.flow_time_encoding(encoded, time_tensor) # Shape: [batch, time, series, embed_dim]
-        encoded = self.flow_pos_adjust(pos_encoded) # Apply adjustment if needed
+        # encoded = self.flow_pos_adjust(pos_encoded) # Adjustment layer removed
+        encoded = pos_encoded # Use pos_encoded directly
 
         # Apply flow encoder (handles standard vs temporal internally now)
         # Standard Transformer expects [batch, seq_len, embed_dim] where seq_len = time * series
@@ -714,7 +707,8 @@ class TACTiS(nn.Module):
         # Apply positional encoding
         time_tensor = time_steps.unsqueeze(-1) # [batch, time, 1]
         pos_encoded = self.copula_time_encoding(encoded, time_tensor) # Shape: [batch, time, series, embed_dim]
-        encoded = self.copula_pos_adjust(pos_encoded) # Apply adjustment if needed
+        # encoded = self.copula_pos_adjust(pos_encoded) # Adjustment layer removed
+        encoded = pos_encoded # Use pos_encoded directly
 
         # Apply copula encoder (handles standard vs temporal internally now)
         if isinstance(self.copula_encoder, nn.TransformerEncoder):
