@@ -26,16 +26,8 @@ class DeepSigmoidFlow(nn.Module):
     def forward(self, params, x):
         """Transform with derivative computation"""
 
-        # Initialize logdet with the correct dimensions
-        # We need to match x's full shape for proper accumulation of log determinant
-        # This would be [batch_size, num_series, time_steps] for our model
-        if x.dim() > 2:
-            # For multi-dimensional tensors like [batch, series, timesteps]
-            batch_shape = x.shape[:-1]  # All but the last dimension
-        else:
-            # For simpler cases
-            batch_shape = x.shape
-        logdet = torch.zeros(batch_shape, device=x.device) # Initialize logdet here
+        # Initialize logdet with only the batch dimension, like the original TACTiS
+        logdet = torch.zeros(x.shape[0], device=x.device)
 
         # Track original x for debugging
         x_orig = x.clone()

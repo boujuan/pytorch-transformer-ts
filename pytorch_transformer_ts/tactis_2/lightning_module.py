@@ -17,7 +17,7 @@ class TACTiS2LightningModule(pl.LightningModule):
     
     def __init__(
         self,
-        model: TACTiS2Model,
+        model_config: dict, # Accept model configuration dictionary
         lr_stage1: float = 1.8e-3,
         lr_stage2: float = 7.0e-4,
         weight_decay_stage1: float = 0.0,
@@ -32,8 +32,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         Parameters
         ----------
-        model
-            The TACTiS2 model to train.
+        model_config
+            Dictionary containing the configuration for the TACTiS2Model.
         lr_stage1
             Learning rate for stage 1 optimizer.
         lr_stage2
@@ -52,21 +52,23 @@ class TACTiS2LightningModule(pl.LightningModule):
             Value for gradient clipping in stage 2. 0.0 means disabled.
         """
         super().__init__()
-        if isinstance(model, dict):
-            self.model = TACTiS2Model(**model)
-            self.save_hyperparameters()
-        else:
-            self.model = model
-            self.save_hyperparameters(ignore=["model"])
+        # Instantiate the model internally using the provided config
+        self.model = TACTiS2Model(**model_config)
+        # Save hyperparameters, including the model_config
+        self.save_hyperparameters()
         # Store stage-specific optimizer parameters
-        self.lr_stage1 = lr_stage1
-        self.lr_stage2 = lr_stage2
-        self.weight_decay_stage1 = weight_decay_stage1
-        self.weight_decay_stage2 = weight_decay_stage2
-        self.stage = stage
-        self.stage2_start_epoch = stage2_start_epoch
-        self.gradient_clip_val_stage1 = gradient_clip_val_stage1
-        self.gradient_clip_val_stage2 = gradient_clip_val_stage2
+        # Note: These are already saved by save_hyperparameters() if passed to __init__
+        # self.lr_stage1 = lr_stage1
+        # self.lr_stage2 = lr_stage2
+        # Access hyperparameters via self.hparams
+        self.lr_stage1 = self.hparams.lr_stage1
+        self.lr_stage2 = self.hparams.lr_stage2
+        self.weight_decay_stage1 = self.hparams.weight_decay_stage1
+        self.weight_decay_stage2 = self.hparams.weight_decay_stage2
+        self.stage = self.hparams.stage
+        self.stage2_start_epoch = self.hparams.stage2_start_epoch
+        self.gradient_clip_val_stage1 = self.hparams.gradient_clip_val_stage1
+        self.gradient_clip_val_stage2 = self.hparams.gradient_clip_val_stage2
 
         # Set the stage in the model
         if hasattr(self.model.tactis, "set_stage"):
@@ -277,28 +279,46 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         return optimizer
     
-    def forward(self, batch):
+    def forward(
+        self,
+        feat_static_cat: torch.Tensor,
+        feat_static_real: torch.Tensor,
+        past_time_feat: torch.Tensor,
+        past_target: torch.Tensor,
+        past_observed_values: torch.Tensor,
+        future_time_feat: torch.Tensor,
+        **kwargs, # Allow for extra arguments if any
+    ):
         """
-        Forward pass through the model for inference.
+        Forward pass through the model for inference (prediction).
+        Accepts keyword arguments directly as passed by the GluonTS predictor.
         
         Parameters
         ----------
-        batch
-            The input batch.
+        feat_static_cat
+            Static categorical features.
+        feat_static_real
+            Static real features.
+        past_time_feat
+            Past time features.
+        past_target
+            Past target values.
+        past_observed_values
+            Indicator for observed values in the past.
+        future_time_feat
+            Future time features.
             
         Returns
         -------
         The output of the model (predictions).
         """
-        # Fields for prediction are different from training
-        feat_static_cat = batch.get("feat_static_cat", torch.zeros((batch["past_target"].shape[0], 1), device=self.device, dtype=torch.long))
-        feat_static_real = batch.get("feat_static_real", torch.zeros((batch["past_target"].shape[0], 1), device=self.device, dtype=torch.float32))
-        past_target = batch["past_target"]
-        past_observed_values = batch["past_observed_values"]
-        past_time_feat = batch["past_time_feat"]
-        future_time_feat = batch["future_time_feat"]
-        
-        # Call model's forward
+        if feat_static_cat is None:
+             feat_static_cat = torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.long)
+        if feat_static_real is None:
+             feat_static_real = torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.float32)
+
+        # Call model's forward method, which expects these arguments
+        # Pass future_target=None explicitly for inference mode
         model_output = self.model(
             feat_static_cat=feat_static_cat,
             feat_static_real=feat_static_real,
@@ -306,15 +326,18 @@ class TACTiS2LightningModule(pl.LightningModule):
             past_target=past_target,
             past_observed_values=past_observed_values,
             future_time_feat=future_time_feat,
+            future_target=None, # Ensure future_target is None for inference
         )
         
         # Handle tuple return value from the model during inference
+        # TACTiS2Model forward should return samples directly in inference mode
         if isinstance(model_output, tuple):
-            # For inference, we want the predictions (first element of the tuple)
-            predictions, _ = model_output
-            logger.debug(f"Inference - Model returned tuple, using predictions with shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}")
-            return predictions
+             # This case might indicate an issue if it happens during inference,
+             # as the model should ideally return only samples. Log a warning.
+             logger.warning(f"Inference - Model returned a tuple unexpectedly. Using the first element as predictions.")
+             predictions = model_output[0]
+             return predictions
         else:
-            # If it's not a tuple, return as is
-            logger.debug(f"Inference - Model returned single output")
-            return model_output
+             # Assume the direct output is the predictions/samples
+             logger.debug(f"Inference - Model returned single output (predictions/samples)")
+             return model_output

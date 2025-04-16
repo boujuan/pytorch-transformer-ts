@@ -28,7 +28,7 @@ class SigmoidFlow(nn.Module):
         # Compute pre-sigmoid with better numerical stability
         # Clamp x to avoid extreme values that could cause instability
         x_clamped = torch.clamp(x, min=-100.0, max=100.0)
-        pre_sigm = a * x_clamped[..., None] + b
+        pre_sigm = a * x_clamped[..., None] + b # Revert: Broadcasting works directly here during training
 
         # Apply sigmoid with numerical stability
         # Use torch.sigmoid which is more numerically stable than manual computation
@@ -46,22 +46,17 @@ class SigmoidFlow(nn.Module):
         # Add epsilon to prevent log of zero
         logj = torch.clamp(logj, min=EPSILON)
 
-        # Fix for dimension mismatch: expand logdet to match logj's dimensions
-        if logdet.shape != logj.shape:
-            # Expand logdet to match logj's dimensions
-            for _ in range(len(logj.shape) - len(logdet.shape)):
-                logdet = logdet.unsqueeze(-1)
-            # Now broadcast to the full shape
-            logdet = logdet.expand_as(logj)
+        # Remove the dimension mismatch fix section (lines 50-55)
 
         # Add log jacobian with checks for NaN
-        log_logj = torch.log(logj)
+        log_logj = torch.log(logj) # logj shape is likely [batch, series, time] or similar
         if torch.isnan(log_logj).any():
             logger.warning("NaN detected in log_logj, replacing with log(EPSILON)")
             # Replace NaNs with a large negative number (log of EPSILON)
             log_logj = torch.nan_to_num(log_logj, nan=math.log(EPSILON))
 
-        logdet = logdet + log_logj
+        # Sum log_logj over all non-batch dimensions before adding to logdet (which has shape [batch])
+        logdet = logdet + log_logj.sum(dim=tuple(range(1, log_logj.dim())))
 
         # Check for NaNs in logdet
         if torch.isnan(logdet).any():
@@ -77,7 +72,8 @@ class SigmoidFlow(nn.Module):
         xnew = torch.log(x_pre_clipped) - torch.log(1 - x_pre_clipped)
 
         # Update logdet to account for logit transform
-        logdet = logdet - torch.log(x_pre_clipped) - torch.log(1 - x_pre_clipped)
+        logdet_logit = torch.log(x_pre_clipped) + torch.log(1 - x_pre_clipped)
+        logdet = logdet - logdet_logit.sum(dim=tuple(range(1, logdet_logit.dim())))
 
         # Final NaN check
         if torch.isnan(xnew).any() or torch.isnan(logdet).any():
@@ -93,7 +89,7 @@ class SigmoidFlow(nn.Module):
         b = params[..., self.hidden_dim:2*self.hidden_dim]
         w = torch.nn.functional.softmax(params[..., 2*self.hidden_dim:], dim=-1)
 
-        pre_sigm = a * x[..., None] + b
+        pre_sigm = a.unsqueeze(1) * x[..., None] + b.unsqueeze(1) # Unsqueeze a and b for broadcasting
         sigm = torch.sigmoid(pre_sigm)
         x_pre = (w * sigm).sum(dim=-1)
 

@@ -482,49 +482,50 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         -------
         A TACTiS2 lightning module.
         """
-        # Pass all configured parameters to the TACTiS2Model
-        model = TACTiS2Model(
+        # Gather all configured parameters for the TACTiS2Model into a dictionary
+        model_config = {
             # Data dimensions
-            num_series=self.input_size,
-            context_length=self.context_length,
-            prediction_length=self.prediction_length,
+            "num_series": self.input_size,
+            "context_length": self.context_length,
+            "prediction_length": self.prediction_length,
             # TACTiS specific parameters from __init__
-            flow_series_embedding_dim=self.flow_series_embedding_dim,
-            copula_series_embedding_dim=self.copula_series_embedding_dim,
-            flow_input_encoder_layers=self.flow_input_encoder_layers,
-            copula_input_encoder_layers=self.copula_input_encoder_layers,
-            marginal_embedding_dim_per_head=self.marginal_embedding_dim_per_head,
-            marginal_num_heads=self.marginal_num_heads,
-            marginal_num_layers=self.marginal_num_layers,
-            copula_embedding_dim_per_head=self.copula_embedding_dim_per_head,
-            copula_num_heads=self.copula_num_heads,
-            copula_num_layers=self.copula_num_layers,
-            decoder_dsf_num_layers=self.decoder_dsf_num_layers,
-            decoder_dsf_hidden_dim=self.decoder_dsf_hidden_dim,
-            decoder_mlp_num_layers=self.decoder_mlp_num_layers,
-            decoder_mlp_hidden_dim=self.decoder_mlp_hidden_dim,
-            decoder_transformer_num_layers=self.decoder_transformer_num_layers,
-            decoder_transformer_embedding_dim_per_head=self.decoder_transformer_embedding_dim_per_head,
-            decoder_transformer_num_heads=self.decoder_transformer_num_heads,
-            decoder_num_bins=self.decoder_num_bins,
-            bagging_size=self.bagging_size,
-            input_encoding_normalization=self.input_encoding_normalization,
-            loss_normalization=self.loss_normalization,
-            encoder_type=self.encoder_type, # Pass encoder type
-            dropout_rate=self.dropout_rate, # Pass dropout rate
+            "flow_series_embedding_dim": self.flow_series_embedding_dim,
+            "copula_series_embedding_dim": self.copula_series_embedding_dim,
+            "flow_input_encoder_layers": self.flow_input_encoder_layers,
+            "copula_input_encoder_layers": self.copula_input_encoder_layers,
+            "marginal_embedding_dim_per_head": self.marginal_embedding_dim_per_head,
+            "marginal_num_heads": self.marginal_num_heads,
+            "marginal_num_layers": self.marginal_num_layers,
+            "copula_embedding_dim_per_head": self.copula_embedding_dim_per_head,
+            "copula_num_heads": self.copula_num_heads,
+            "copula_num_layers": self.copula_num_layers,
+            "decoder_dsf_num_layers": self.decoder_dsf_num_layers,
+            "decoder_dsf_hidden_dim": self.decoder_dsf_hidden_dim,
+            "decoder_mlp_num_layers": self.decoder_mlp_num_layers,
+            "decoder_mlp_hidden_dim": self.decoder_mlp_hidden_dim,
+            "decoder_transformer_num_layers": self.decoder_transformer_num_layers,
+            "decoder_transformer_embedding_dim_per_head": self.decoder_transformer_embedding_dim_per_head,
+            "decoder_transformer_num_heads": self.decoder_transformer_num_heads,
+            "decoder_num_bins": self.decoder_num_bins,
+            "bagging_size": self.bagging_size,
+            "input_encoding_normalization": self.input_encoding_normalization,
+            "loss_normalization": self.loss_normalization,
+            "encoder_type": self.encoder_type, # Pass encoder type
+            "dropout_rate": self.dropout_rate, # Pass dropout rate
             # GluonTS compatability parameters
-            cardinality=self.cardinality,
-            num_feat_dynamic_real=self.num_feat_dynamic_real,
-            num_feat_static_real=self.num_feat_static_real,
-            num_feat_static_cat=self.num_feat_static_cat,
-            embedding_dimension=self.embedding_dimension,
-            scaling=self.scaling,
-            lags_seq=self.lags_seq,
-            num_parallel_samples=self.num_parallel_samples,
-        )
+            "cardinality": self.cardinality,
+            "num_feat_dynamic_real": self.num_feat_dynamic_real,
+            "num_feat_static_real": self.num_feat_static_real,
+            "num_feat_static_cat": self.num_feat_static_cat,
+            "embedding_dimension": self.embedding_dimension,
+            "scaling": self.scaling,
+            "lags_seq": self.lags_seq,
+            "num_parallel_samples": self.num_parallel_samples,
+        }
         
+        # Pass the model configuration dictionary instead of the model instance
         return TACTiS2LightningModule(
-            model=model,
+            model_config=model_config, # Pass config dict
             # Pass stage-specific optimizer params
             lr_stage1=self.lr_stage1,
             lr_stage2=self.lr_stage2,
