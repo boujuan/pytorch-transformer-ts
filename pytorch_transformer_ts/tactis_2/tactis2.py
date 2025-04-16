@@ -806,6 +806,7 @@ class TACTiS(nn.Module):
         copula_temporal_encoder: Optional[Dict[str, Any]] = None,
         copula_decoder: Optional[Dict[str, Any]] = None,
         skip_copula: bool = True,
+        encoder_type: str = "standard",
     ):
         """
         Initialize TACTiS model components.
@@ -842,6 +843,8 @@ class TACTiS(nn.Module):
             Arguments for copula decoder
         skip_copula: bool
             Whether to skip copula component (use only flow for first stage)
+        encoder_type: str
+            Type of encoder to use ("standard" or "temporal").
         """
         super().__init__()
         
@@ -855,6 +858,7 @@ class TACTiS(nn.Module):
         self.loss_normalization = loss_normalization
         self.skip_copula = skip_copula
         self.bagging_size = bagging_size
+        self.encoder_type = encoder_type
         
         # Stage tracks whether to use flow only (1) or flow+copula (2)
         self.stage = 1
@@ -920,17 +924,30 @@ class TACTiS(nn.Module):
         # Ensure d_model matches the output of input_encoder + pos_encoding
         if self.flow_encoder_args["d_model"] != flow_d_model:
               logger.warning(f"flow_encoder_args d_model ({self.flow_encoder_args['d_model']}) differs from calculated flow_d_model ({flow_d_model}). Using calculated value.")
-        self.flow_encoder = nn.TransformerEncoder(
-            encoder_layer=nn.TransformerEncoderLayer(
-                d_model=flow_d_model, # Use consistent d_model
+        
+        if self.encoder_type == "standard":
+            logger.debug(f"Initializing standard flow_encoder (Transformer) with {self.flow_encoder_args['num_encoder_layers']} layers, d_model={flow_d_model}, nhead={self.flow_encoder_args['nhead']}")
+            self.flow_encoder = nn.TransformerEncoder(
+                encoder_layer=nn.TransformerEncoderLayer(
+                    d_model=flow_d_model, # Use consistent d_model
                 nhead=self.flow_encoder_args["nhead"],
                 dim_feedforward=self.flow_encoder_args.get("dim_feedforward", flow_d_model * 4), # Default if missing
                 dropout=self.flow_encoder_args.get("dropout", 0.1),
                 batch_first=True
             ),
-            num_layers=self.flow_encoder_args["num_encoder_layers"]
-        )
-        logger.debug(f"Initialized flow_encoder (Transformer) with {self.flow_encoder_args['num_encoder_layers']} layers, d_model={flow_d_model}, nhead={self.flow_encoder_args['nhead']}")
+                num_layers=self.flow_encoder_args["num_encoder_layers"]
+            )
+        elif self.encoder_type == "temporal":
+            logger.debug(f"Initializing temporal flow_encoder with {self.flow_encoder_args['num_encoder_layers']} layers, d_model={flow_d_model}, nhead={self.flow_encoder_args['nhead']}")
+            self.flow_encoder = TemporalEncoder(
+                d_model=flow_d_model,
+                nhead=self.flow_encoder_args["nhead"],
+                num_encoder_layers=self.flow_encoder_args["num_encoder_layers"],
+                dim_feedforward=self.flow_encoder_args.get("dim_feedforward", flow_d_model * 4),
+                dropout=self.flow_encoder_args.get("dropout", 0.1),
+            )
+        else:
+            raise ValueError(f"Unknown encoder_type for flow: {self.encoder_type}")
         
         # Marginals (DSF) - Use parameters from copula_decoder_args['dsf_marginal']
         dsf_args = self.copula_decoder_args["dsf_marginal"]
@@ -986,19 +1003,31 @@ class TACTiS(nn.Module):
         # Copula encoder (Transformer) - Use parameters from copula_encoder_args
         if self.copula_encoder_args["d_model"] != copula_d_model:
               logger.warning(f"copula_encoder_args d_model ({self.copula_encoder_args['d_model']}) differs from calculated copula_d_model ({copula_d_model}). Using calculated value.")
-            
-        self.copula_encoder = nn.TransformerEncoder(
-            encoder_layer=nn.TransformerEncoderLayer(
-                d_model=copula_d_model, # Use consistent d_model
+        
+        if self.encoder_type == "standard":
+            logger.debug(f"Initializing standard copula_encoder (Transformer) with {self.copula_encoder_args['num_encoder_layers']} layers, d_model={copula_d_model}, nhead={self.copula_encoder_args['nhead']}")
+            self.copula_encoder = nn.TransformerEncoder(
+                encoder_layer=nn.TransformerEncoderLayer(
+                    d_model=copula_d_model, # Use consistent d_model
                 nhead=self.copula_encoder_args["nhead"],
                 dim_feedforward=self.copula_encoder_args.get("dim_feedforward", copula_d_model * 4),
                 dropout=self.copula_encoder_args.get("dropout", 0.1),
                 batch_first=True
             ),
-            num_layers=self.copula_encoder_args["num_encoder_layers"]
-        )
-        logger.debug(f"Initialized copula_encoder (Transformer) with {self.copula_encoder_args['num_encoder_layers']} layers, d_model={copula_d_model}, nhead={self.copula_encoder_args['nhead']}")
-        
+                num_layers=self.copula_encoder_args["num_encoder_layers"]
+            )
+        elif self.encoder_type == "temporal":
+            logger.debug(f"Initializing temporal copula_encoder with {self.copula_encoder_args['num_encoder_layers']} layers, d_model={copula_d_model}, nhead={self.copula_encoder_args['nhead']}")
+            self.copula_encoder = TemporalEncoder(
+                d_model=copula_d_model,
+                nhead=self.copula_encoder_args["nhead"],
+                num_encoder_layers=self.copula_encoder_args["num_encoder_layers"],
+                dim_feedforward=self.copula_encoder_args.get("dim_feedforward", copula_d_model * 4),
+                dropout=self.copula_encoder_args.get("dropout", 0.1),
+            )
+        else:
+            raise ValueError(f"Unknown encoder_type for copula: {self.encoder_type}")
+            
         # Attentional copula - Use parameters from copula_decoder_args['attentional_copula']
         if self.copula_decoder_args is None or "attentional_copula" not in self.copula_decoder_args:
              raise ValueError("Attentional Copula arguments ('attentional_copula') missing in copula_decoder config.")
@@ -1584,18 +1613,20 @@ class TACTiS(nn.Module):
         pos_encoded = self.flow_time_encoding(encoded, time_tensor)
         encoded = self.flow_pos_adjust(pos_encoded)
         
-        # Apply flow encoder
-        if self.encoder_type == "standard":
-             # Standard Transformer expects [batch, series * time, embed_dim] if batch_first=True
-             encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, -1)
-             encoded_out = self.flow_encoder(encoded_reshaped)
-             encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, -1) # Reshape back
-        elif self.encoder_type == "temporal":
-             # TemporalEncoder expects [batch, series, time, embed_dim]
-             encoded = self.flow_encoder(encoded) # TemporalEncoder handles internal reshaping
-        
-        encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
-        
+        # Apply flow encoder (already initialized correctly based on self.encoder_type)
+        # Standard Transformer expects [batch, time * series, embed_dim] if batch_first=True
+        # TemporalEncoder expects [batch, time, series, embed_dim] and handles internal reshaping
+        if isinstance(self.flow_encoder, nn.TransformerEncoder):
+            encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, -1)
+            encoded_out = self.flow_encoder(encoded_reshaped)
+            encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, -1) # Reshape back
+        elif isinstance(self.flow_encoder, TemporalEncoder):
+            # TemporalEncoder expects [batch, time, series, embed_dim]
+            encoded = self.flow_encoder(encoded) # Pass directly
+        else:
+            # Should not happen if initialization is correct
+            raise TypeError(f"Unexpected flow_encoder type: {type(self.flow_encoder)}")
+            
         # Arrange dimensions to [batch, series, time, dim]
         encoded = encoded.permute(0, 2, 1, 3)
         
@@ -1631,18 +1662,18 @@ class TACTiS(nn.Module):
         pos_encoded = self.copula_time_encoding(encoded, time_tensor)
         encoded = self.copula_pos_adjust(pos_encoded)
         
-        # Apply copula encoder
-        if self.encoder_type == "standard":
-             # Standard Transformer expects [batch, series * time, embed_dim] if batch_first=True
-             encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, -1)
-             encoded_out = self.copula_encoder(encoded_reshaped)
-             encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, -1) # Reshape back
-        elif self.encoder_type == "temporal":
-             # TemporalEncoder expects [batch, series, time, embed_dim]
-             encoded = self.copula_encoder(encoded) # TemporalEncoder handles internal reshaping
-        
-        encoded = encoded.reshape(batch_size, num_timesteps, num_series, -1)
-        
+        # Apply copula encoder (already initialized correctly based on self.encoder_type)
+        if isinstance(self.copula_encoder, nn.TransformerEncoder):
+            encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, -1)
+            encoded_out = self.copula_encoder(encoded_reshaped)
+            encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, -1) # Reshape back
+        elif isinstance(self.copula_encoder, TemporalEncoder):
+            # TemporalEncoder expects [batch, time, series, embed_dim]
+            encoded = self.copula_encoder(encoded) # Pass directly
+        else:
+            # Should not happen if initialization is correct
+            raise TypeError(f"Unexpected copula_encoder type: {type(self.copula_encoder)}")
+            
         # Arrange dimensions to [batch, series, time, dim]
         encoded = encoded.permute(0, 2, 1, 3)
         
