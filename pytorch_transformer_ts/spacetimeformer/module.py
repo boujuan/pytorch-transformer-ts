@@ -74,7 +74,7 @@ class DecoderLayer(nn.Module):
             # self attention on each variable in target sequence ind.
             assert self_mask_seq is None
             x1 = self.norm1(x)
-            x1 = Localize(x1, self.d_y) # TODO how is this doing local attention with d_y?
+            x1 = Localize(x1, self.d_y)
             x1, _ = self.local_self_attention(x1, x1, x1, attn_mask=self_mask_seq)
             x1 = ReverseLocalize(x1, self.d_y)
             x = x + self.dropout_attn_out(x1)
