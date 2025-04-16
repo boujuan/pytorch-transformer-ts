@@ -26,6 +26,10 @@ share/python-wheels/
 .installed.cfg
 *.egg
 MANIFEST
+*_deprecated
+pytorch_transformer_ts/tactis_2/deprecated/*
+# New entry for temporary files
+*.tmp
 
 # PyInstaller
 #  Usually these files are written by a python script from a template
