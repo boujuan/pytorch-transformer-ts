@@ -436,11 +436,17 @@ class TACTiS2Model(nn.Module):
             
             # Rescale the samples if needed
             if self.scaling != "none":
-                samples = samples * network_input["scale"].unsqueeze(0).unsqueeze(-1) + network_input["loc"].unsqueeze(0).unsqueeze(-1)
-                
-            # Return samples in the format expected by GluonTS
-            # (samples, batch, variables, prediction_length)
-            return samples.transpose(2, 3)
+                # Reshape scale and loc to [1, batch, series, 1] for broadcasting with samples [num_samples, batch, series, pred_len]
+                scale_reshaped = network_input["scale"].squeeze(1).unsqueeze(0).unsqueeze(-1)
+                loc_reshaped = network_input["loc"].squeeze(1).unsqueeze(0).unsqueeze(-1)
+                # Perform rescaling
+                samples = samples * scale_reshaped + loc_reshaped
+
+            # Return samples in the format expected by SampleForecastGenerator: [batch, num_samples, pred_len, series]
+            # Current shape: [num_samples, batch, series, pred_len]
+            # Target shape:  [batch, num_samples, pred_len, series]
+            # Permutation:   (1, 0, 3, 2)
+            return samples.permute(1, 0, 3, 2)
             
     def forward(
         self,
@@ -495,7 +501,11 @@ class TACTiS2Model(nn.Module):
             future_time_feat=future_time_feat,
             future_target=future_target,
         )
-        
+
+        # --- BEGIN ADDED LOGGING ---
+        logger.debug(f"TACTiS2Model.forward: network_input['future_target'] is {'NOT None' if network_input.get('future_target') is not None else 'None'}")
+        # --- END ADDED LOGGING ---
+
         # Compute the output params (loss during training, samples during inference)
         params = self.output_params(network_input)
         

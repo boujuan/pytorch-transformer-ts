@@ -144,8 +144,9 @@ class DSFMarginal(nn.Module):
                 logger.warning("NaN values in marginal parameters for forward_no_logdet, replacing with zeros")
                 marginal_params = torch.nan_to_num(marginal_params, nan=0.0)
 
-            # No reshaping needed for marginal_params, should be [batch, N, param_len]
-            # No dimension matching needed, flow expects params [batch, N, ...] and x [batch, N]
+            # Match original TACTiS: unsqueeze marginal_params if x has a sample dimension
+            if marginal_params.dim() == x.dim():
+                marginal_params = marginal_params[:, :, None, :]
 
             # Forward through the flow
             transformed_x = self.marginal_flow.forward_no_logdet(marginal_params, x) # Pass [batch, N, param_len] and [batch, N]
@@ -176,9 +177,15 @@ class DSFMarginal(nn.Module):
         # Apply conditioner directly to context
         marginal_params = self.marginal_conditioner(context) # Output [batch, N, param_len]
 
-        # Handle potential sample dimension in u for inverse call
-        # The inverse method in DeepSigmoidFlow (copied from original) handles this
-        # by unsqueezing params if needed. No need for explicit handling here.
+        # Debug: Print shapes before unsqueeze
+        logger.error(f"[DEBUG] marginal_params: {marginal_params.shape}, u: {u.shape}")
+
+        # unsqueeze marginal_params if u has a sample dimension
+        if marginal_params.dim() == u.dim():
+            marginal_params = marginal_params[:, :, None, :]
+
+        # Debug: Print shapes after unsqueeze
+        logger.error(f"[DEBUG] marginal_params (after unsqueeze): {marginal_params.shape}, u: {u.shape}")
 
         left = -1000.0 * torch.ones_like(u)
         right = 1000.0 * torch.ones_like(u)

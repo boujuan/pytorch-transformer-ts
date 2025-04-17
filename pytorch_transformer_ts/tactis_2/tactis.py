@@ -575,6 +575,11 @@ class TACTiS(nn.Module):
                  # Fallback: generate uniform samples
                  u_samples = torch.rand(num_samples, batch_size, num_series, pred_len, device=device)
 
+        # --- DEBUG LOGGING ---
+        logger.debug(f"TACTiS.sample: u_samples shape after generation/fallback: {u_samples.shape}")
+        if torch.isnan(u_samples).any():
+            logger.warning("TACTiS.sample: NaN detected in u_samples before marginal inverse!")
+        # --- END DEBUG LOGGING ---
 
         # Transform samples using marginal inverse CDF
         # Select flow encoding for prediction steps
@@ -592,9 +597,27 @@ class TACTiS(nn.Module):
         # Reshape u: [batch, series, pred_len, num_samples] -> [batch, N_pred, num_samples]
         u_samples_merged = u_samples_permuted.reshape(batch_size, N_pred, num_samples)
 
+        # Debug: Print shapes before marginal.inverse
+        logger.error(f"[DEBUG] flow_encoded_pred_merged: {flow_encoded_pred_merged.shape}, u_samples_merged: {u_samples_merged.shape}")
+
+        # --- BEGIN ADDED LOGGING ---
+        logger.debug(f"TACTiS.sample: Shapes before marginal.inverse: context={flow_encoded_pred_merged.shape}, u={u_samples_merged.shape}")
+        if torch.isnan(flow_encoded_pred_merged).any():
+             logger.warning("TACTiS.sample: NaN detected in flow_encoded_pred_merged before marginal.inverse!")
+        if torch.isnan(u_samples_merged).any():
+             logger.warning("TACTiS.sample: NaN detected in u_samples_merged before marginal.inverse!")
+        # --- END ADDED LOGGING ---
+
         # Apply inverse transform (inverse CDF)
         # Output shape: [batch, N_pred, num_samples]
         samples_normalized_merged = self.marginal.inverse(flow_encoded_pred_merged, u_samples_merged)
+
+        # Debug: Print shape after marginal.inverse
+        logger.error(f"[DEBUG] samples_normalized_merged: {samples_normalized_merged.shape}") # Keep existing debug log
+        # --- BEGIN ADDED LOGGING ---
+        if torch.isnan(samples_normalized_merged).any():
+             logger.warning("TACTiS.sample: NaN detected in samples_normalized_merged after marginal.inverse!")
+        # --- END ADDED LOGGING ---
 
         # Reshape flat output for consistency before final reshape
         # [batch, N_pred, num_samples] -> [batch * N_pred, num_samples]
@@ -605,6 +628,12 @@ class TACTiS(nn.Module):
 
         # Permute to final shape: [num_samples, batch, series, pred_len]
         samples = samples_normalized.permute(3, 0, 1, 2)
+
+        # --- BEGIN ADDED LOGGING ---
+        logger.debug(f"TACTiS.sample: Final samples shape before return: {samples.shape}")
+        if torch.isnan(samples).any():
+             logger.warning("TACTiS.sample: NaN detected in final samples before return!")
+        # --- END ADDED LOGGING ---
 
         # Return normalized samples; denormalization is external
         return samples
