@@ -502,10 +502,6 @@ class TACTiS2Model(nn.Module):
             future_target=future_target,
         )
 
-        # --- BEGIN ADDED LOGGING ---
-        logger.debug(f"TACTiS2Model.forward: network_input['future_target'] is {'NOT None' if network_input.get('future_target') is not None else 'None'}")
-        # --- END ADDED LOGGING ---
-
         # Compute the output params (loss during training, samples during inference)
         params = self.output_params(network_input)
         

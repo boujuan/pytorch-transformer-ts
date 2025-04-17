@@ -139,7 +139,6 @@ class TACTiS(nn.Module):
              max_len=self.positional_encoding_args.get("max_len", 5000)
         )
         logger.debug(f"Initialized flow_time_encoding with embedding_dim={flow_d_model}")
-        logger.info(f"TACTiS Init: flow_d_model={flow_d_model}") # DEBUG LOG
 
         # Remove flow_pos_adjust as dimensions should now match
         self.flow_pos_adjust = nn.Identity()
@@ -575,12 +574,6 @@ class TACTiS(nn.Module):
                  # Fallback: generate uniform samples
                  u_samples = torch.rand(num_samples, batch_size, num_series, pred_len, device=device)
 
-        # --- DEBUG LOGGING ---
-        logger.debug(f"TACTiS.sample: u_samples shape after generation/fallback: {u_samples.shape}")
-        if torch.isnan(u_samples).any():
-            logger.warning("TACTiS.sample: NaN detected in u_samples before marginal inverse!")
-        # --- END DEBUG LOGGING ---
-
         # Transform samples using marginal inverse CDF
         # Select flow encoding for prediction steps
         flow_encoded_pred = flow_encoded[:, :, hist_len:] # Shape [batch, series, pred_len, dim]
@@ -597,27 +590,9 @@ class TACTiS(nn.Module):
         # Reshape u: [batch, series, pred_len, num_samples] -> [batch, N_pred, num_samples]
         u_samples_merged = u_samples_permuted.reshape(batch_size, N_pred, num_samples)
 
-        # Debug: Print shapes before marginal.inverse
-        logger.error(f"[DEBUG] flow_encoded_pred_merged: {flow_encoded_pred_merged.shape}, u_samples_merged: {u_samples_merged.shape}")
-
-        # --- BEGIN ADDED LOGGING ---
-        logger.debug(f"TACTiS.sample: Shapes before marginal.inverse: context={flow_encoded_pred_merged.shape}, u={u_samples_merged.shape}")
-        if torch.isnan(flow_encoded_pred_merged).any():
-             logger.warning("TACTiS.sample: NaN detected in flow_encoded_pred_merged before marginal.inverse!")
-        if torch.isnan(u_samples_merged).any():
-             logger.warning("TACTiS.sample: NaN detected in u_samples_merged before marginal.inverse!")
-        # --- END ADDED LOGGING ---
-
         # Apply inverse transform (inverse CDF)
         # Output shape: [batch, N_pred, num_samples]
         samples_normalized_merged = self.marginal.inverse(flow_encoded_pred_merged, u_samples_merged)
-
-        # Debug: Print shape after marginal.inverse
-        logger.error(f"[DEBUG] samples_normalized_merged: {samples_normalized_merged.shape}") # Keep existing debug log
-        # --- BEGIN ADDED LOGGING ---
-        if torch.isnan(samples_normalized_merged).any():
-             logger.warning("TACTiS.sample: NaN detected in samples_normalized_merged after marginal.inverse!")
-        # --- END ADDED LOGGING ---
 
         # Reshape flat output for consistency before final reshape
         # [batch, N_pred, num_samples] -> [batch * N_pred, num_samples]
@@ -628,12 +603,6 @@ class TACTiS(nn.Module):
 
         # Permute to final shape: [num_samples, batch, series, pred_len]
         samples = samples_normalized.permute(3, 0, 1, 2)
-
-        # --- BEGIN ADDED LOGGING ---
-        logger.debug(f"TACTiS.sample: Final samples shape before return: {samples.shape}")
-        if torch.isnan(samples).any():
-             logger.warning("TACTiS.sample: NaN detected in final samples before return!")
-        # --- END ADDED LOGGING ---
 
         # Return normalized samples; denormalization is external
         return samples
@@ -679,7 +648,6 @@ class TACTiS(nn.Module):
         time_tensor = time_steps.unsqueeze(-1)
         # encoded shape [batch, time, series, embed_dim]
         # PositionalEncoding handles broadcasting/expanding time encoding to match series dim
-        logger.info(f"TACTiS Encode Flow: encoded shape before pos encoding={encoded.shape}, flow_time_encoding expected dim={self.flow_time_encoding.embedding_dim}") # DEBUG LOG
         pos_encoded = self.flow_time_encoding(encoded, time_tensor) # Shape: [batch, time, series, embed_dim]
         # encoded = self.flow_pos_adjust(pos_encoded) # Adjustment layer removed
         encoded = pos_encoded # Use pos_encoded directly

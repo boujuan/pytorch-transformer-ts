@@ -89,9 +89,6 @@ class SigmoidFlow(nn.Module):
         b = params[..., self.hidden_dim:2*self.hidden_dim]
         w = torch.nn.functional.softmax(params[..., 2*self.hidden_dim:], dim=-1)
 
-        # Log shapes for debugging
-        logger.error(f"[DEBUG] sigmoid_flow.forward_no_logdet shapes: a={a.shape}, b={b.shape}, x={x.shape}, params={params.shape}")
-
         pre_sigm = a * x[..., None] + b # Unsqueeze a and b for broadcasting
         sigm = torch.sigmoid(pre_sigm)
         x_pre = (w * sigm).sum(dim=-1)

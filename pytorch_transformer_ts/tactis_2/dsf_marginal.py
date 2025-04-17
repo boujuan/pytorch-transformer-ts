@@ -177,15 +177,9 @@ class DSFMarginal(nn.Module):
         # Apply conditioner directly to context
         marginal_params = self.marginal_conditioner(context) # Output [batch, N, param_len]
 
-        # Debug: Print shapes before unsqueeze
-        logger.error(f"[DEBUG] marginal_params: {marginal_params.shape}, u: {u.shape}")
-
         # unsqueeze marginal_params if u has a sample dimension
         if marginal_params.dim() == u.dim():
             marginal_params = marginal_params[:, :, None, :]
-
-        # Debug: Print shapes after unsqueeze
-        logger.error(f"[DEBUG] marginal_params (after unsqueeze): {marginal_params.shape}, u: {u.shape}")
 
         left = -1000.0 * torch.ones_like(u)
         right = 1000.0 * torch.ones_like(u)

@@ -29,9 +29,6 @@ class DeepSigmoidFlow(nn.Module):
         # Initialize logdet with only the batch dimension, like the original TACTiS
         logdet = torch.zeros(x.shape[0], device=x.device)
 
-        # Track original x for debugging
-        x_orig = x.clone()
-
         for i, layer in enumerate(self.layers):
             # Extract parameters for this layer
             layer_params = params[..., i * self.params_length : (i + 1) * self.params_length]
