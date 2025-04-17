@@ -221,15 +221,15 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
             "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
             "marginal_num_layers": trial.suggest_int("marginal_num_layers", 2, 5),
-            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 7), # Renamed from marginal_input_encoder_layers
-            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256]), # Renamed from marginal_ts_embedding_dim
+            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 7),
+            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256]),
 
             # --- Attentional Copula Encoder ---
             "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
             "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
             "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 4),
             "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 4),
-            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256]), # Renamed from copula_ts_embedding_dim
+            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256]),
 
             # --- Decoder ---
             "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
