@@ -1,18 +1,20 @@
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import List, Optional
+import logging
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import numpy as np
+# import numpy as np
 
 from gluonts.core.component import validated
-from gluonts.dataset.field_names import FieldName
+# from gluonts.dataset.field_names import FieldName
 from gluonts.time_feature import get_lags_for_frequency
-from gluonts.torch.distributions import DistributionOutput, StudentTOutput
-from gluonts.torch.modules.feature import FeatureEmbedder
-from gluonts.torch.scaler import Scaler, MeanScaler, StdScaler, NOPScaler
+# from gluonts.torch.modules.feature import FeatureEmbedder
+from gluonts.torch.scaler import MeanScaler, StdScaler, NOPScaler
 
-from .tactis2 import TACTiS
+from .tactis import TACTiS
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 class TACTiS2Model(nn.Module):
     """
@@ -29,23 +31,38 @@ class TACTiS2Model(nn.Module):
         num_series: int,
         context_length: int,
         prediction_length: int,
-        # TACTiS specific parameters
+        # --- TACTiS specific parameters ---
+        # Passed directly from Estimator
         flow_series_embedding_dim: int,
         copula_series_embedding_dim: int,
-        flow_input_encoder_layers: int,
-        copula_input_encoder_layers: int,
+        flow_input_encoder_layers: int, # Marginal CDF Encoder input layers
+        copula_input_encoder_layers: int, # Attentional Copula Encoder input layers
+        marginal_embedding_dim_per_head: int,
+        marginal_num_heads: int,
+        marginal_num_layers: int, # Marginal CDF Encoder transformer layers
+        copula_embedding_dim_per_head: int,
+        copula_num_heads: int,
+        copula_num_layers: int, # Attentional Copula Encoder transformer layers
+        decoder_dsf_num_layers: int,
+        decoder_dsf_hidden_dim: int,
+        decoder_mlp_num_layers: int,
+        decoder_mlp_hidden_dim: int,
+        decoder_transformer_num_layers: int,
+        decoder_transformer_embedding_dim_per_head: int,
+        decoder_transformer_num_heads: int,
+        decoder_num_bins: int, # Corresponds to AttentionalCopula resolution
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        data_normalization: str = "none",
         loss_normalization: str = "series",
+        encoder_type: str = "standard",
+        dropout_rate: float = 0.1,
         # GluonTS compatability parameters
         cardinality: List[int] = [1],
         num_feat_dynamic_real: int = 0,
         num_feat_static_real: int = 0,
         num_feat_static_cat: int = 0,
         embedding_dimension: Optional[List[int]] = None,
-        distr_output: DistributionOutput = StudentTOutput(),
-        scaling: Optional[str] = "std",
+        scaling: Optional[str] = "std", # Note: TACTiS handles internal scaling/normalization
         lags_seq: Optional[List[int]] = None,
         num_parallel_samples: int = 100,
     ) -> None:
@@ -72,8 +89,6 @@ class TACTiS2Model(nn.Module):
             Size of the bagging ensemble. If None, no bagging is performed.
         input_encoding_normalization
             Whether to normalize the input encoding.
-        data_normalization
-            Type of data normalization to apply. Options: "none", "standard", "series".
         loss_normalization
             Type of loss normalization to apply. Options: "none", "series".
         cardinality
@@ -86,8 +101,6 @@ class TACTiS2Model(nn.Module):
             Number of static categorical features.
         embedding_dimension
             List of embedding dimensions for categorical features.
-        distr_output
-            Distribution to use for probabilistic forecasting.
         scaling
             Type of scaling to apply to the target. Options: "mean", "std", None.
         lags_seq
@@ -107,7 +120,6 @@ class TACTiS2Model(nn.Module):
         self.num_feat_static_cat = num_feat_static_cat
         self.embedding_dimension = embedding_dimension
         self.cardinality = cardinality
-        self.distr_output = distr_output
         self.num_parallel_samples = num_parallel_samples
         
         # Set up scaling
@@ -143,94 +155,90 @@ class TACTiS2Model(nn.Module):
         # Set up lags_seq
         self.lags_seq = lags_seq or [0]
         
-        # Create the core TACTiS model
-        # Create dictionaries for TACTiS component configurations - can extend as needed
-        
-        # Define default configurations for each component
+        # --- Create the core TACTiS model ---
+        # Construct configuration dictionaries based on passed parameters
+
+        # Calculate d_model for transformers
+        marginal_d_model = marginal_num_heads * marginal_embedding_dim_per_head
+        copula_d_model = copula_num_heads * copula_embedding_dim_per_head
+        decoder_transformer_d_model = decoder_transformer_num_heads * decoder_transformer_embedding_dim_per_head
+
+        # Assume positional encoding uses the larger of the two main embedding dims
+        pos_encoding_dim = max(marginal_d_model, copula_d_model)
         positional_encoding_args = {
-            "embedding_dim": max(flow_series_embedding_dim, copula_series_embedding_dim),
-            "dropout": 0.1,
+            "embedding_dim": pos_encoding_dim,
+            "dropout": dropout_rate,
             "max_len": 5000,
         }
-        
+
         flow_encoder_args = {
-            "attention_layers": flow_input_encoder_layers,
-            "attention_heads": 4,
-            "attention_dim": flow_series_embedding_dim,
-            "attention_feedforward_dim": flow_series_embedding_dim * 4,
-            "dropout": 0.1,
+            "d_model": marginal_d_model,
+            "nhead": marginal_num_heads,
+            "num_encoder_layers": marginal_num_layers,
+            "dim_feedforward": marginal_d_model * 4, # Standard practice
+            "dropout": dropout_rate,
         }
-        
+
         copula_encoder_args = {
-            "attention_layers": copula_input_encoder_layers,
-            "attention_heads": 4,
-            "attention_dim": copula_series_embedding_dim,
-            "attention_feedforward_dim": copula_series_embedding_dim * 4,
-            "dropout": 0.1,
+            "d_model": copula_d_model,
+            "nhead": copula_num_heads,
+            "num_encoder_layers": copula_num_layers,
+            "dim_feedforward": copula_d_model * 4, # Standard practice
+            "dropout": dropout_rate,
         }
-        
-        flow_temporal_encoder_args = {
-            "attention_layers": 2,
-            "attention_heads": 4,
-            "attention_dim": flow_series_embedding_dim,
-            "attention_feedforward_dim": flow_series_embedding_dim * 4,
-            "dropout": 0.1,
-        }
-        
-        copula_temporal_encoder_args = {
-            "attention_layers": 2,
-            "attention_heads": 4,
-            "attention_dim": copula_series_embedding_dim,
-            "attention_feedforward_dim": copula_series_embedding_dim * 4,
-            "dropout": 0.1,
-        }
-        
+
+        # Note: flow_temporal_encoder and copula_temporal_encoder args are not directly in the table
+        # We'll keep their structure but use the main encoder params for now.
+        # Ideally, these would also be tunable parameters.
+        flow_temporal_encoder_args = flow_encoder_args.copy()
+        copula_temporal_encoder_args = copula_encoder_args.copy()
+
         copula_decoder_args = {
-            "flow_input_dim": flow_series_embedding_dim,
-            "copula_input_dim": copula_series_embedding_dim,
+            # Dimensions might need adjustment based on actual encoder outputs
+            "flow_input_dim": marginal_d_model,
+            "copula_input_dim": copula_d_model,
             "min_u": 0.0,
             "max_u": 1.0,
             "skip_sampling_marginal": False,
             "attentional_copula": {
-                "input_dim": copula_series_embedding_dim,
-                "attention_heads": 4,
-                "attention_layers": 2,
-                "attention_dim": copula_series_embedding_dim,
-                "mlp_layers": 2,
-                "mlp_dim": copula_series_embedding_dim * 4,
-                "resolution": 128,
-                "dropout": 0.1,
-                "attention_mlp_class": "_easy_mlp",
-                "activation_function": "relu",
+                "input_dim": copula_d_model, # Use copula encoder output dim
+                "attention_heads": decoder_transformer_num_heads,
+                "attention_layers": decoder_transformer_num_layers,
+                "attention_dim": decoder_transformer_embedding_dim_per_head, # Dim per head
+                "mlp_layers": 2, # Keep default, could be tuned
+                "mlp_dim": decoder_transformer_d_model * 4, # Standard practice
+                "resolution": decoder_num_bins,
+                "dropout": dropout_rate, # Use configured dropout
+                "attention_mlp_class": "_easy_mlp", # Keep default
+                "activation_function": "relu", # Keep default
             },
             "dsf_marginal": {
-                "context_dim": flow_series_embedding_dim,
-                "mlp_layers": 2,
-                "mlp_dim": flow_series_embedding_dim * 4,
-                "flow_layers": 2,
-                "flow_hid_dim": flow_series_embedding_dim,
+                "context_dim": marginal_d_model, # Use flow encoder output dim
+                "mlp_layers": decoder_mlp_num_layers,
+                "mlp_dim": decoder_mlp_hidden_dim,
+                "flow_layers": decoder_dsf_num_layers,
+                "flow_hid_dim": decoder_dsf_hidden_dim,
             },
-            "skip_copula": False,
+            "skip_copula": False, # Will be controlled by LightningModule stage
         }
-        
-        # Initialize the TACTiS model
+
+        # Initialize the TACTiS model with constructed args
         self.tactis = TACTiS(
             num_series=num_series,
-            flow_series_embedding_dim=flow_series_embedding_dim,
-            copula_series_embedding_dim=copula_series_embedding_dim,
-            flow_input_encoder_layers=flow_input_encoder_layers,
-            copula_input_encoder_layers=copula_input_encoder_layers,
+            flow_series_embedding_dim=flow_series_embedding_dim, # Base embedding before input encoder
+            copula_series_embedding_dim=copula_series_embedding_dim, # Base embedding before input encoder
+            flow_input_encoder_layers=flow_input_encoder_layers, # Passed directly
+            copula_input_encoder_layers=copula_input_encoder_layers, # Passed directly
             bagging_size=bagging_size,
             input_encoding_normalization=input_encoding_normalization,
-            data_normalization=data_normalization,
             loss_normalization=loss_normalization,
             positional_encoding=positional_encoding_args,
             flow_encoder=flow_encoder_args,
             copula_encoder=copula_encoder_args,
-            flow_temporal_encoder=flow_temporal_encoder_args,
-            copula_temporal_encoder=copula_temporal_encoder_args,
+            flow_temporal_encoder=flow_temporal_encoder_args, # Using flow_encoder args for now
+            copula_temporal_encoder=copula_temporal_encoder_args, # Using copula_encoder args for now
             copula_decoder=copula_decoder_args,
-            experiment_mode="forecasting",
+            encoder_type=encoder_type,
         )
     
     @property
@@ -428,30 +436,17 @@ class TACTiS2Model(nn.Module):
             
             # Rescale the samples if needed
             if self.scaling != "none":
-                samples = samples * network_input["scale"].unsqueeze(0).unsqueeze(-1) + network_input["loc"].unsqueeze(0).unsqueeze(-1)
-                
-            # Return samples in the format expected by GluonTS
-            # (samples, batch, variables, prediction_length)
-            return samples.transpose(2, 3)
-            
-    def output_distribution(self, params, loc=None, scale=None):
-        """
-        Create the output distribution from the parameters.
-        
-        Parameters
-        ----------
-        params
-            Parameters of the distribution or samples from the distribution.
-        loc
-            Location parameter for scaling.
-        scale
-            Scale parameter for scaling.
-            
-        Returns
-        -------
-        Distribution with the given parameters.
-        """
-        return self.distr_output.distribution(params, loc=loc, scale=scale)
+                # Reshape scale and loc to [1, batch, series, 1] for broadcasting with samples [num_samples, batch, series, pred_len]
+                scale_reshaped = network_input["scale"].squeeze(1).unsqueeze(0).unsqueeze(-1)
+                loc_reshaped = network_input["loc"].squeeze(1).unsqueeze(0).unsqueeze(-1)
+                # Perform rescaling
+                samples = samples * scale_reshaped + loc_reshaped
+
+            # Return samples in the format expected by SampleForecastGenerator: [batch, num_samples, pred_len, series]
+            # Current shape: [num_samples, batch, series, pred_len]
+            # Target shape:  [batch, num_samples, pred_len, series]
+            # Permutation:   (1, 0, 3, 2)
+            return samples.permute(1, 0, 3, 2)
             
     def forward(
         self,
@@ -506,8 +501,8 @@ class TACTiS2Model(nn.Module):
             future_time_feat=future_time_feat,
             future_target=future_target,
         )
-        
-        # Compute the distribution parameters # TODO JUAN HIGH will this scale distr parameters? What distr parameters does it return
+
+        # Compute the output params (loss during training, samples during inference)
         params = self.output_params(network_input)
         
         if output_distr_params:

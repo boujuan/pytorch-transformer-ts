@@ -1,11 +1,14 @@
 # Use the newer namespace consistent with Lightning > v2.0
+import logging
 import lightning.pytorch as pl
 import torch
-# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
-from gluonts.dataset.field_names import FieldName
+# from gluonts.dataset.field_names import FieldName
 
 from .module import TACTiS2Model
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 class TACTiS2LightningModule(pl.LightningModule):
     """
@@ -14,42 +17,59 @@ class TACTiS2LightningModule(pl.LightningModule):
     
     def __init__(
         self,
-        model: TACTiS2Model,
-        # loss: DistributionLoss = NegativeLogLikelihood(),
-        lr: float = 1e-3,
-        weight_decay: float = 1e-8,
+        model_config: dict, # Accept model configuration dictionary
+        lr_stage1: float = 1.8e-3,
+        lr_stage2: float = 7.0e-4,
+        weight_decay_stage1: float = 0.0,
+        weight_decay_stage2: float = 0.0,
         stage: int = 1,  # Start with stage 1 (flow-only)
         stage2_start_epoch: int = 10,  # When to start stage 2
+        gradient_clip_val_stage1: float = 1000.0, # Stage 1 clipping
+        gradient_clip_val_stage2: float = 1000.0, # Stage 2 clipping
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
         
         Parameters
         ----------
-        model
-            The TACTiS2 model to train.
-        lr
-            Learning rate for the optimizer.
-        weight_decay
-            Weight decay for the optimizer.
+        model_config
+            Dictionary containing the configuration for the TACTiS2Model.
+        lr_stage1
+            Learning rate for stage 1 optimizer.
+        lr_stage2
+            Learning rate for stage 2 optimizer.
+        weight_decay_stage1
+            Weight decay for stage 1 optimizer.
+        weight_decay_stage2
+            Weight decay for stage 2 optimizer.
         stage
             Initial training stage (1 for flow-only, 2 for flow+copula).
         stage2_start_epoch
             Epoch at which to switch to stage 2 (flow+copula) if starting with stage 1.
+        gradient_clip_val_stage1
+            Value for gradient clipping in stage 1. 0.0 means disabled.
+        gradient_clip_val_stage2
+            Value for gradient clipping in stage 2. 0.0 means disabled.
         """
         super().__init__()
-        if isinstance(model, dict):
-            self.model = TACTiS2Model(**model)
-            self.save_hyperparameters()
-        else:
-            self.model = model
-            self.save_hyperparameters(ignore=["model"])
-        # self.loss = loss
-        self.lr = lr
-        self.weight_decay = weight_decay
-        self.stage = stage
-        self.stage2_start_epoch = stage2_start_epoch
-        
+        # Instantiate the model internally using the provided config
+        self.model = TACTiS2Model(**model_config)
+        # Save hyperparameters, including the model_config
+        self.save_hyperparameters()
+        # Store stage-specific optimizer parameters
+        # Note: These are already saved by save_hyperparameters() if passed to __init__
+        # self.lr_stage1 = lr_stage1
+        # self.lr_stage2 = lr_stage2
+        # Access hyperparameters via self.hparams
+        self.lr_stage1 = self.hparams.lr_stage1
+        self.lr_stage2 = self.hparams.lr_stage2
+        self.weight_decay_stage1 = self.hparams.weight_decay_stage1
+        self.weight_decay_stage2 = self.hparams.weight_decay_stage2
+        self.stage = self.hparams.stage
+        self.stage2_start_epoch = self.hparams.stage2_start_epoch
+        self.gradient_clip_val_stage1 = self.hparams.gradient_clip_val_stage1
+        self.gradient_clip_val_stage2 = self.hparams.gradient_clip_val_stage2
+
         # Set the stage in the model
         if hasattr(self.model.tactis, "set_stage"):
             self.model.tactis.set_stage(self.stage)
@@ -63,9 +83,24 @@ class TACTiS2LightningModule(pl.LightningModule):
         current_epoch = self.current_epoch
         if self.stage == 1 and current_epoch >= self.stage2_start_epoch:
             self.stage = 2
+            # Update optimizer parameters for stage 2
+            optimizer = self.optimizers()
+            # Check if optimizer is a list (e.g., with scheduler) or single instance
+            if isinstance(optimizer, list):
+                 optimizer = optimizer[0] # Assume first element is the optimizer
+
+            if optimizer:
+                 for param_group in optimizer.param_groups:
+                     param_group['lr'] = self.lr_stage2
+                     param_group['weight_decay'] = self.weight_decay_stage2
+                 self.log_dict({"stage": 2, "learning_rate": self.lr_stage2, "weight_decay": self.weight_decay_stage2})
+                 logger.info(f"Epoch {current_epoch}: Switched to Stage 2. Updated optimizer lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}")
+            else:
+                 logger.warning(f"Epoch {current_epoch}: Tried to switch to Stage 2, but optimizer not found.")
+
             if hasattr(self.model.tactis, "set_stage"):
                 self.model.tactis.set_stage(self.stage)
-                self.log("stage", self.stage)
+            self.log("stage", self.stage, on_step=False, on_epoch=True)
                 
     def training_step(self, batch, batch_idx: int):
         """
@@ -117,22 +152,24 @@ class TACTiS2LightningModule(pl.LightningModule):
         if isinstance(model_output, tuple):
             # The second element of the tuple is typically the loss
             predictions, loss = model_output
-            print(f"Training - Model returned tuple: predictions shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}, loss={loss}")
+            logger.debug(f"Training - Model returned tuple: predictions shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}, loss={loss}")
         else:
             # If it's not a tuple, assume it's just the loss
             loss = model_output
-            print(f"Training - Model returned scalar loss: {loss}")
+            logger.debug(f"Training - Model returned scalar loss: {loss}")
         
         # Check for NaN in loss
         if torch.isnan(loss).any():
-            print("WARNING: NaN detected in loss! Replacing with large value to continue training.")
+            logger.warning("NaN detected in loss! Replacing with large value to continue training.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
         # Manual backward pass
         self.manual_backward(loss)
         
-        # Apply gradient clipping
-        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1.0)
+        # Apply gradient clipping based on current stage
+        current_clip_val = self.gradient_clip_val_stage1 if self.stage == 1 else self.gradient_clip_val_stage2
+        if current_clip_val > 0:
+             torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=current_clip_val)
         
         # Step the optimizer
         opt.step()
@@ -188,15 +225,15 @@ class TACTiS2LightningModule(pl.LightningModule):
         if isinstance(model_output, tuple):
             # The second element of the tuple is typically the loss
             predictions, loss = model_output
-            print(f"Validation - Model returned tuple: predictions shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}, loss={loss}")
+            logger.debug(f"Validation - Model returned tuple: predictions shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}, loss={loss}")
         else:
             # If it's not a tuple, assume it's just the loss
             loss = model_output
-            print(f"Validation - Model returned scalar loss: {loss}")
+            logger.debug(f"Validation - Model returned scalar loss: {loss}")
         
         # Check for NaN in loss
         if torch.isnan(loss).any():
-            print("WARNING: NaN detected in validation loss! Replacing with large value for logging.")
+            logger.warning("NaN detected in validation loss! Replacing with large value for logging.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
         # Log the validation loss
@@ -212,11 +249,16 @@ class TACTiS2LightningModule(pl.LightningModule):
         -------
         The optimizer to use.
         """
-        # Use different learning rates for different stages if needed
+        # Initialize optimizer with parameters for the current stage
+        current_lr = self.lr_stage1 if self.stage == 1 else self.lr_stage2
+        current_weight_decay = self.weight_decay_stage1 if self.stage == 1 else self.weight_decay_stage2
+
+        logger.info(f"Configuring optimizer for Stage {self.stage} with lr={current_lr}, weight_decay={current_weight_decay}")
+
         optimizer = torch.optim.Adam(
             self.parameters(),
-            lr=self.lr,
-            weight_decay=self.weight_decay,
+            lr=current_lr,
+            weight_decay=current_weight_decay,
         )
         
         # Configure gradient clipping directly in the lightning module
@@ -237,28 +279,46 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         return optimizer
     
-    def forward(self, batch):
+    def forward(
+        self,
+        feat_static_cat: torch.Tensor,
+        feat_static_real: torch.Tensor,
+        past_time_feat: torch.Tensor,
+        past_target: torch.Tensor,
+        past_observed_values: torch.Tensor,
+        future_time_feat: torch.Tensor,
+        **kwargs, # Allow for extra arguments if any
+    ):
         """
-        Forward pass through the model for inference.
+        Forward pass through the model for inference (prediction).
+        Accepts keyword arguments directly as passed by the GluonTS predictor.
         
         Parameters
         ----------
-        batch
-            The input batch.
+        feat_static_cat
+            Static categorical features.
+        feat_static_real
+            Static real features.
+        past_time_feat
+            Past time features.
+        past_target
+            Past target values.
+        past_observed_values
+            Indicator for observed values in the past.
+        future_time_feat
+            Future time features.
             
         Returns
         -------
         The output of the model (predictions).
         """
-        # Fields for prediction are different from training
-        feat_static_cat = batch.get("feat_static_cat", torch.zeros((batch["past_target"].shape[0], 1), device=self.device, dtype=torch.long))
-        feat_static_real = batch.get("feat_static_real", torch.zeros((batch["past_target"].shape[0], 1), device=self.device, dtype=torch.float32))
-        past_target = batch["past_target"]
-        past_observed_values = batch["past_observed_values"]
-        past_time_feat = batch["past_time_feat"]
-        future_time_feat = batch["future_time_feat"]
-        
-        # Call model's forward
+        if feat_static_cat is None:
+             feat_static_cat = torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.long)
+        if feat_static_real is None:
+             feat_static_real = torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.float32)
+
+        # Call model's forward method, which expects these arguments
+        # Pass future_target=None explicitly for inference mode
         model_output = self.model(
             feat_static_cat=feat_static_cat,
             feat_static_real=feat_static_real,
@@ -266,15 +326,18 @@ class TACTiS2LightningModule(pl.LightningModule):
             past_target=past_target,
             past_observed_values=past_observed_values,
             future_time_feat=future_time_feat,
+            future_target=None, # Ensure future_target is None for inference
         )
         
         # Handle tuple return value from the model during inference
+        # TACTiS2Model forward should return samples directly in inference mode
         if isinstance(model_output, tuple):
-            # For inference, we want the predictions (first element of the tuple)
-            predictions, _ = model_output
-            print(f"Inference - Model returned tuple, using predictions with shape={predictions.shape if hasattr(predictions, 'shape') else 'N/A'}")
-            return predictions
+             # This case might indicate an issue if it happens during inference,
+             # as the model should ideally return only samples. Log a warning.
+             logger.warning(f"Inference - Model returned a tuple unexpectedly. Using the first element as predictions.")
+             predictions = model_output[0]
+             return predictions
         else:
-            # If it's not a tuple, return as is
-            print(f"Inference - Model returned single output")
-            return model_output
+             # Assume the direct output is the predictions/samples
+             logger.debug(f"Inference - Model returned single output (predictions/samples)")
+             return model_output

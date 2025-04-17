@@ -1,4 +1,5 @@
 from typing import Any, Dict, Iterable, List, Optional
+import logging
 
 import polars as pl
 import numpy as np
@@ -10,10 +11,8 @@ from gluonts.dataset.field_names import FieldName
 from gluonts.dataset.loader import as_stacked_batches
 from gluonts.itertools import Cyclic
 from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
-from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
-# from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.transform import (
     AddAgeFeature,
     AddObservedValuesIndicator,
@@ -28,17 +27,17 @@ from gluonts.transform import (
     TestSplitSampler,
     Transformation,
     ValidationSplitSampler,
-    VstackFeatures,
-    ExpandDimArray,
-    SetFieldIfNotPresent,
-    SelectFields
+    VstackFeatures
 )
 from gluonts.transform.sampler import InstanceSampler
-from gluonts.transform.field import RenameFields
-from gluonts.model.forecast_generator import DistributionForecastGenerator
+# from gluonts.transform.field import RenameFields
+from gluonts.model.forecast_generator import SampleForecastGenerator
 
 from .module import TACTiS2Model
 from .lightning_module import TACTiS2LightningModule
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
@@ -68,27 +67,49 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self,
         freq: str,
         prediction_length: int,
-        # TACTiS2 specific arguments
-        flow_series_embedding_dim: int = 32,
-        copula_series_embedding_dim: int = 32,
-        flow_input_encoder_layers: int = 2,
-        copula_input_encoder_layers: int = 2,
+        # --- TACTiS2 specific arguments ---
+        # Passed directly to TACTiS2Model/TACTiS
+        flow_series_embedding_dim: int = 5,
+        copula_series_embedding_dim: int = 48,
+        flow_input_encoder_layers: int = 6, # Marginal CDF Encoder input layers
+        copula_input_encoder_layers: int = 1, # Attentional Copula Encoder input layers
+        marginal_embedding_dim_per_head: int = 8,
+        marginal_num_heads: int = 5,
+        marginal_num_layers: int = 4, # Marginal CDF Encoder transformer layers
+        copula_embedding_dim_per_head: int = 8,
+        copula_num_heads: int = 5,
+        copula_num_layers: int = 2, # Attentional Copula Encoder transformer layers
+        decoder_dsf_num_layers: int = 2,
+        decoder_dsf_hidden_dim: int = 256,
+        decoder_mlp_num_layers: int = 3,
+        decoder_mlp_hidden_dim: int = 16,
+        decoder_transformer_num_layers: int = 3,
+        decoder_transformer_embedding_dim_per_head: int = 16,
+        decoder_transformer_num_heads: int = 6,
+        decoder_num_bins: int = 50, # Corresponds to AttentionalCopula resolution
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
-        data_normalization: str = "none",
         loss_normalization: str = "series",
+        encoder_type: str = "standard",
+        # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
+        lr_stage1: float = 1.8e-3,
+        lr_stage2: float = 7.0e-4,
+        weight_decay_stage1: float = 0.0,
+        weight_decay_stage2: float = 0.0,
+        dropout_rate: float = 0.1,
+        gradient_clip_val_stage1: float = 1000.0,
+        gradient_clip_val_stage2: float = 1000.0,
+        # General Estimator arguments
         use_lazyframe: bool = False,
-        # Common parameters
         context_length: Optional[int] = None,
         num_feat_dynamic_real: int = 0,
         num_feat_static_cat: int = 0,
         num_feat_static_real: int = 0,
         cardinality: Optional[List[int]] = None,
         embedding_dimension: Optional[List[int]] = None,
-        distr_output: DistributionOutput = StudentTOutput(),
-        scaling: Optional[str] = "std",
+        scaling: Optional[str] = "std", # External scaling through GluonTS
         lags_seq: Optional[List[int]] = None,
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
@@ -97,7 +118,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
-        input_size: int = 1,
+        input_size: int = 1, # Number of target series
     ) -> None:
         trainer_kwargs = {
             "max_epochs": 100,
@@ -113,18 +134,41 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         self.use_lazyframe = use_lazyframe
         
-        # TACTiS2 specific parameters
+        # --- Store TACTiS2 specific parameters ---
+        # Model architecture params
         self.flow_series_embedding_dim = flow_series_embedding_dim
         self.copula_series_embedding_dim = copula_series_embedding_dim
         self.flow_input_encoder_layers = flow_input_encoder_layers
         self.copula_input_encoder_layers = copula_input_encoder_layers
+        self.marginal_embedding_dim_per_head = marginal_embedding_dim_per_head
+        self.marginal_num_heads = marginal_num_heads
+        self.marginal_num_layers = marginal_num_layers
+        self.copula_embedding_dim_per_head = copula_embedding_dim_per_head
+        self.copula_num_heads = copula_num_heads
+        self.copula_num_layers = copula_num_layers
+        self.decoder_dsf_num_layers = decoder_dsf_num_layers
+        self.decoder_dsf_hidden_dim = decoder_dsf_hidden_dim
+        self.decoder_mlp_num_layers = decoder_mlp_num_layers
+        self.decoder_mlp_hidden_dim = decoder_mlp_hidden_dim
+        self.decoder_transformer_num_layers = decoder_transformer_num_layers
+        self.decoder_transformer_embedding_dim_per_head = decoder_transformer_embedding_dim_per_head
+        self.decoder_transformer_num_heads = decoder_transformer_num_heads
+        self.decoder_num_bins = decoder_num_bins
         self.bagging_size = bagging_size
         self.input_encoding_normalization = input_encoding_normalization
-        self.data_normalization = data_normalization
         self.loss_normalization = loss_normalization
+        self.encoder_type = encoder_type
+        # Training stage / optimizer params
         self.initial_stage = initial_stage
         self.stage2_start_epoch = stage2_start_epoch
-        
+        self.lr_stage1 = lr_stage1
+        self.lr_stage2 = lr_stage2
+        self.weight_decay_stage1 = weight_decay_stage1
+        self.weight_decay_stage2 = weight_decay_stage2
+        self.dropout_rate = dropout_rate
+        self.gradient_clip_val_stage1 = gradient_clip_val_stage1
+        self.gradient_clip_val_stage2 = gradient_clip_val_stage2
+
         # Common parameters
         self.input_size = input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -132,7 +176,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.num_feat_static_real = num_feat_static_real
         self.cardinality = cardinality if cardinality and num_feat_static_cat > 0 else [1]
         self.embedding_dimension = embedding_dimension
-        self.distr_output = distr_output
         self.scaling = scaling
         self.num_parallel_samples = num_parallel_samples
         
@@ -169,14 +212,46 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         -------
         Dict of parameter values.
         """
-        # Example hyperparameters to tune
         params = {
-             "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3, 4]),
-            "flow_series_embedding_dim": trial.suggest_int("flow_series_embedding_dim", 16, 64),
-            "copula_series_embedding_dim": trial.suggest_int("copula_series_embedding_dim", 16, 64),
-            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 1, 3),
-            "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 3),
-            "data_normalization": trial.suggest_categorical("data_normalization", ["none", "series"]),
+            # --- General ---
+            "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3, 4]),
+            "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
+
+            # --- Marginal CDF Encoder ---
+            "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
+            "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
+            "marginal_num_layers": trial.suggest_int("marginal_num_layers", 2, 5),
+            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 7), # Renamed from marginal_input_encoder_layers
+            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256]), # Renamed from marginal_ts_embedding_dim
+
+            # --- Attentional Copula Encoder ---
+            "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
+            "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
+            "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 4),
+            "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 4),
+            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256]), # Renamed from copula_ts_embedding_dim
+
+            # --- Decoder ---
+            "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
+            "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512]),
+            "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
+            "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256]),
+            "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
+            "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", [8, 16, 32, 48, 64, 128, 256]),
+            "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 7),
+            "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", [20, 50, 100, 200]), # Corresponds to AttentionalCopula resolution
+
+            # --- Optimizer Params ---
+            "lr_stage1": trial.suggest_float("lr_stage1", 1e-4, 5e-3, log=True),
+            "lr_stage2": trial.suggest_float("lr_stage2", 1e-4, 5e-3, log=True),
+            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", [0.0, 1e-5, 1e-4, 1e-3]),
+            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3]),
+
+            # --- Dropout & Clipping ---
+            "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.3),
+            "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", [0.0, 1000.0, 10000.0]),
+            "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", [0.0, 1000.0, 10000.0]),
+
         }
         return params
     
@@ -227,13 +302,13 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                     field=FieldName.FEAT_STATIC_REAL,
                     expected_ndim=1,
                 ),
+                # Target field transformation - Ensure it's treated as 2D (time, num_series)
                 AsLazyFrame(
                     field=FieldName.TARGET,
-                    expected_ndim=1 + len(self.distr_output.event_shape)
+                    expected_ndim=2
                 ) if use_lazyframe else AsNumpyArray(
                     field=FieldName.TARGET,
-                    # in the following line, we add 1 for the time dimension 
-                    expected_ndim=1 + len(self.distr_output.event_shape),
+                    expected_ndim=2,
                 ),
                 AddObservedValuesIndicator(
                     target_field=FieldName.TARGET,
@@ -396,7 +471,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             batch_size=self.batch_size,
             prediction_length=self.prediction_length,
             input_transform=transformation + prediction_splitter,
-            forecast_generator=DistributionForecastGenerator(self.distr_output),
+            forecast_generator=SampleForecastGenerator(),
             device=torch.device("cuda" if torch.cuda.is_available() else "cpu"),
         )
 
@@ -408,35 +483,58 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         -------
         A TACTiS2 lightning module.
         """
-        model = TACTiS2Model(
-            num_series=self.input_size,
-            context_length=self.context_length,
-            prediction_length=self.prediction_length,
-            # TACTiS2 specific parameters
-            flow_series_embedding_dim=self.flow_series_embedding_dim,
-            copula_series_embedding_dim=self.copula_series_embedding_dim,
-            flow_input_encoder_layers=self.flow_input_encoder_layers,
-            copula_input_encoder_layers=self.copula_input_encoder_layers,
-            bagging_size=self.bagging_size,
-            input_encoding_normalization=self.input_encoding_normalization,
-            data_normalization=self.data_normalization,
-            loss_normalization=self.loss_normalization,
-            # Common parameters
-            cardinality=self.cardinality,
-            num_feat_dynamic_real=self.num_feat_dynamic_real,
-            num_feat_static_real=self.num_feat_static_real,
-            num_feat_static_cat=self.num_feat_static_cat,
-            embedding_dimension=self.embedding_dimension,
-            distr_output=self.distr_output,
-            scaling=self.scaling,
-            lags_seq=self.lags_seq,
-            num_parallel_samples=self.num_parallel_samples,
-        )
+        # Gather all configured parameters for the TACTiS2Model into a dictionary
+        model_config = {
+            # Data dimensions
+            "num_series": self.input_size,
+            "context_length": self.context_length,
+            "prediction_length": self.prediction_length,
+            # TACTiS specific parameters from __init__
+            "flow_series_embedding_dim": self.flow_series_embedding_dim,
+            "copula_series_embedding_dim": self.copula_series_embedding_dim,
+            "flow_input_encoder_layers": self.flow_input_encoder_layers,
+            "copula_input_encoder_layers": self.copula_input_encoder_layers,
+            "marginal_embedding_dim_per_head": self.marginal_embedding_dim_per_head,
+            "marginal_num_heads": self.marginal_num_heads,
+            "marginal_num_layers": self.marginal_num_layers,
+            "copula_embedding_dim_per_head": self.copula_embedding_dim_per_head,
+            "copula_num_heads": self.copula_num_heads,
+            "copula_num_layers": self.copula_num_layers,
+            "decoder_dsf_num_layers": self.decoder_dsf_num_layers,
+            "decoder_dsf_hidden_dim": self.decoder_dsf_hidden_dim,
+            "decoder_mlp_num_layers": self.decoder_mlp_num_layers,
+            "decoder_mlp_hidden_dim": self.decoder_mlp_hidden_dim,
+            "decoder_transformer_num_layers": self.decoder_transformer_num_layers,
+            "decoder_transformer_embedding_dim_per_head": self.decoder_transformer_embedding_dim_per_head,
+            "decoder_transformer_num_heads": self.decoder_transformer_num_heads,
+            "decoder_num_bins": self.decoder_num_bins,
+            "bagging_size": self.bagging_size,
+            "input_encoding_normalization": self.input_encoding_normalization,
+            "loss_normalization": self.loss_normalization,
+            "encoder_type": self.encoder_type, # Pass encoder type
+            "dropout_rate": self.dropout_rate, # Pass dropout rate
+            # GluonTS compatability parameters
+            "cardinality": self.cardinality,
+            "num_feat_dynamic_real": self.num_feat_dynamic_real,
+            "num_feat_static_real": self.num_feat_static_real,
+            "num_feat_static_cat": self.num_feat_static_cat,
+            "embedding_dimension": self.embedding_dimension,
+            "scaling": self.scaling,
+            "lags_seq": self.lags_seq,
+            "num_parallel_samples": self.num_parallel_samples,
+        }
         
+        # Pass the model configuration dictionary instead of the model instance
         return TACTiS2LightningModule(
-            model=model,
-            lr=1e-3,  # Learning rate can be made configurable
-            weight_decay=1e-8,  # Weight decay can be made configurable
+            model_config=model_config, # Pass config dict
+            # Pass stage-specific optimizer params
+            lr_stage1=self.lr_stage1,
+            lr_stage2=self.lr_stage2,
+            weight_decay_stage1=self.weight_decay_stage1,
+            weight_decay_stage2=self.weight_decay_stage2,
+            # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
+            gradient_clip_val_stage1=self.gradient_clip_val_stage1, # Pass stage 1 clipping
+            gradient_clip_val_stage2=self.gradient_clip_val_stage2, # Pass stage 2 clipping
         )
