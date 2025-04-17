@@ -23,11 +23,11 @@ class DSFMarginal(nn.Module):
         super().__init__()
         self.marginal_flow = DeepSigmoidFlow(n_layers=flow_layers, hidden_dim=flow_hid_dim)
 
-        # Add a dimension reduction layer if the expected context_dim doesn't match what we'll get from the encoder
-        self.input_dim = None  # Will be set on first call if needed
-        self.dim_reducer = None  # Will be initialized on first call if needed
+        # Dimension reduction logic removed as context shape is now expected to be correct
+        # self.input_dim = None
+        # self.dim_reducer = None
 
-        # Create conditioner network
+        # Create conditioner network - Expects context_dim input
         layers = [nn.Linear(context_dim, mlp_dim), nn.ReLU()]
         for _ in range(1, mlp_layers):
             layers += [nn.Linear(mlp_dim, mlp_dim), nn.ReLU()]
@@ -37,24 +37,7 @@ class DSFMarginal(nn.Module):
         # Store the expected context_dim for later checks
         self.expected_context_dim = context_dim
 
-    def _ensure_dimensions_match(self, input_tensor):
-        """Ensure input dimensions match what's expected by adding a dimension reducer if needed"""
-        # Get the dimension of the input tensor
-        input_dim = input_tensor.size(-1)
-
-        # If dimensions don't match and we haven't initialized a reducer yet
-        if input_dim != self.expected_context_dim and self.dim_reducer is None:
-            logger.debug(f"Creating dimension reducer from {input_dim} to {self.expected_context_dim}")
-            self.input_dim = input_dim
-            self.dim_reducer = nn.Linear(input_dim, self.expected_context_dim)
-            # Move to the same device as the input tensor
-            self.dim_reducer = self.dim_reducer.type_as(input_tensor) # CHANGE to(input_tensor.device)
-
-        # Apply dimension reduction if needed
-        if self.dim_reducer is not None:
-            return self.dim_reducer(input_tensor)
-        else:
-            return input_tensor
+    # Removed _ensure_dimensions_match method
 
     def forward_logdet(self, context: torch.Tensor, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Transform with derivative computation"""
@@ -74,42 +57,36 @@ class DSFMarginal(nn.Module):
             logger.info("Clamping extreme values in x")
             x = torch.clamp(x, min=-100.0, max=100.0)
 
-        # Reshape context for linear layer
-        # context comes in as [batch, series, time, dim] but the linear layer expects [batch, dim]
-        # or [N, dim] where N = batch * series * time
-        batch_size, num_series, num_timesteps, feature_dim = context.shape
+        # Expect context shape [batch, N, dim], x shape [batch, N]
+        # No internal reshaping needed for context
+        batch_size = context.shape[0]
+        N = context.shape[1] # N = series * time
 
-        # Reshape to [batch*series*time, feature_dim]
-        reshaped_context = context.reshape(-1, feature_dim)
+        # Check context dim matches conditioner expectation
+        if context.shape[-1] != self.expected_context_dim:
+             # This should ideally not happen if called correctly, but log a warning
+             logger.warning(f"Context dim {context.shape[-1]} != expected {self.expected_context_dim}. Check calling code.")
+             # Attempt to proceed, conditioner might fail
 
-        # Ensure dimensions match before applying conditioner
-        reshaped_context = self._ensure_dimensions_match(reshaped_context)
+        # Check for NaNs after reshaping (now done in calling code)
+        if torch.isnan(context).any():
+            logger.warning("NaN values detected in context, replacing with zeros")
+            context = torch.nan_to_num(context, nan=0.0)
 
-        # Check for NaNs after reshaping
-        if torch.isnan(reshaped_context).any():
-            logger.warning("NaN values detected after reshaping context, replacing with zeros")
-            reshaped_context = torch.nan_to_num(reshaped_context, nan=0.0)
-
-        # Apply conditioner
+        # Apply conditioner directly to context
         try:
-            marginal_params = self.marginal_conditioner(reshaped_context)
+            marginal_params = self.marginal_conditioner(context) # Input [batch, N, dim], Output [batch, N, param_len]
 
             # Check for NaNs in parameters
             if torch.isnan(marginal_params).any():
                 logger.warning("NaN values in marginal parameters, replacing with zeros")
                 marginal_params = torch.nan_to_num(marginal_params, nan=0.0)
 
-            # Reshape back to match x
-            marginal_params = marginal_params.reshape(batch_size, num_series, num_timesteps, -1)
-
-            # Make sure dimensions match
-            if marginal_params.dim() == x.dim():
-                # Check if reshaping is needed
-                if marginal_params.shape != x.shape:
-                    marginal_params = marginal_params[:, :, :, :x.size(-1)]
+            # No reshaping needed for marginal_params, should be [batch, N, param_len]
+            # No dimension matching needed, flow expects params [batch, N, ...] and x [batch, N]
 
             # Forward through the flow
-            transformed_x, logdet = self.marginal_flow.forward(marginal_params, x)
+            transformed_x, logdet = self.marginal_flow.forward(marginal_params, x) # Pass [batch, N, param_len] and [batch, N]
 
             # Check for NaNs in the output
             if torch.isnan(transformed_x).any() or torch.isnan(logdet).any():
@@ -123,7 +100,8 @@ class DSFMarginal(nn.Module):
             logger.error(f"Error in DSFMarginal forward_logdet: {e}")
             # Return zeros as a fallback to avoid crashing
             zeros_x = torch.zeros_like(x)
-            zeros_logdet = torch.zeros(batch_size, num_series, num_timesteps, device=x.device)
+            # Fallback logdet shape should be [batch, N] to match expected output of flow
+            zeros_logdet = torch.zeros_like(x) # Shape [batch, N]
             return zeros_x, zeros_logdet
 
     def forward_no_logdet(self, context: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
@@ -143,40 +121,34 @@ class DSFMarginal(nn.Module):
             logger.info("Clamping extreme values in x for forward_no_logdet")
             x = torch.clamp(x, min=-100.0, max=100.0)
 
-        # Reshape context for linear layer
-        batch_size, num_series, num_timesteps, feature_dim = context.shape
+        # Expect context shape [batch, N, dim], x shape [batch, N]
+        # No internal reshaping needed for context
+        batch_size = context.shape[0]
+        N = context.shape[1] # N = series * time
 
-        # Reshape to [batch*series*time, feature_dim]
-        reshaped_context = context.reshape(-1, feature_dim)
+        # Check context dim matches conditioner expectation
+        if context.shape[-1] != self.expected_context_dim:
+             logger.warning(f"Context dim {context.shape[-1]} != expected {self.expected_context_dim}. Check calling code.")
 
-        # Ensure dimensions match before applying conditioner
-        reshaped_context = self._ensure_dimensions_match(reshaped_context)
-
-        # Check for NaNs after reshaping
-        if torch.isnan(reshaped_context).any():
-            logger.warning("NaN values after reshaping context in forward_no_logdet, replacing with zeros")
-            reshaped_context = torch.nan_to_num(reshaped_context, nan=0.0)
+        # Check for NaNs after reshaping (now done in calling code)
+        if torch.isnan(context).any():
+            logger.warning("NaN values detected in context for forward_no_logdet, replacing with zeros")
+            context = torch.nan_to_num(context, nan=0.0)
 
         try:
-            # Apply conditioner
-            marginal_params = self.marginal_conditioner(reshaped_context)
+            # Apply conditioner directly to context
+            marginal_params = self.marginal_conditioner(context) # Input [batch, N, dim], Output [batch, N, param_len]
 
             # Check for NaNs in parameters
             if torch.isnan(marginal_params).any():
                 logger.warning("NaN values in marginal parameters for forward_no_logdet, replacing with zeros")
                 marginal_params = torch.nan_to_num(marginal_params, nan=0.0)
 
-            # Reshape back to match x
-            marginal_params = marginal_params.reshape(batch_size, num_series, num_timesteps, -1)
-
-            # Make sure dimensions match
-            if marginal_params.dim() == x.dim():
-                # Check if reshaping is needed
-                if marginal_params.shape != x.shape:
-                    marginal_params = marginal_params[:, :, :, :x.size(-1)]
+            # No reshaping needed for marginal_params, should be [batch, N, param_len]
+            # No dimension matching needed, flow expects params [batch, N, ...] and x [batch, N]
 
             # Forward through the flow
-            transformed_x = self.marginal_flow.forward_no_logdet(marginal_params, x)
+            transformed_x = self.marginal_flow.forward_no_logdet(marginal_params, x) # Pass [batch, N, param_len] and [batch, N]
 
             # Check for NaNs in the output
             if torch.isnan(transformed_x).any():
@@ -192,41 +164,21 @@ class DSFMarginal(nn.Module):
 
     def inverse(self, context: torch.Tensor, u: torch.Tensor, max_iter: int = 100) -> torch.Tensor:
         """Compute inverse CDF using binary search"""
-        # Reshape context for linear layer
-        if context.dim() == 4:  # [batch, series, time, dim]
-            batch_size, num_series, num_timesteps, feature_dim = context.shape
+        # Expect context shape [batch, N, dim], u shape [batch, N] or [batch, N, samples]
+        # No internal reshaping needed for context
+        batch_size = context.shape[0]
+        N = context.shape[1] # N = series * time
 
-            # Reshape to [batch*series*time, feature_dim]
-            reshaped_context = context.reshape(-1, feature_dim)
+        # Check context dim matches conditioner expectation
+        if context.shape[-1] != self.expected_context_dim:
+             logger.warning(f"Context dim {context.shape[-1]} != expected {self.expected_context_dim}. Check calling code.")
 
-            # Ensure dimensions match before applying conditioner
-            reshaped_context = self._ensure_dimensions_match(reshaped_context)
+        # Apply conditioner directly to context
+        marginal_params = self.marginal_conditioner(context) # Output [batch, N, param_len]
 
-            # Apply conditioner
-            marginal_params = self.marginal_conditioner(reshaped_context)
-
-            # Reshape back
-            marginal_params = marginal_params.reshape(batch_size, num_series, num_timesteps, -1)
-
-            # Make sure dimensions match
-            if marginal_params.dim() == u.dim():
-                # Check if reshaping is needed
-                if marginal_params.shape != u.shape:
-                    marginal_params = marginal_params[:, :, :, :u.size(-1)]
-        else:
-            # Fall back to original method for other cases
-            reshaped_context = self._ensure_dimensions_match(context)
-            marginal_params = self.marginal_conditioner(reshaped_context)
-
-            # Make sure dimensions match
-            if marginal_params.dim() == u.dim():
-                if marginal_params.shape != u.shape:
-                    # If the parameter is missing a dimension that u has
-                    if marginal_params.dim() < u.dim():
-                        for _ in range(u.dim() - marginal_params.dim()):
-                            marginal_params = marginal_params.unsqueeze(-2)
-                    # Make sure the last dimension matches
-                    marginal_params = marginal_params[..., :u.size(-1)]
+        # Handle potential sample dimension in u for inverse call
+        # The inverse method in DeepSigmoidFlow (copied from original) handles this
+        # by unsqueezing params if needed. No need for explicit handling here.
 
         left = -1000.0 * torch.ones_like(u)
         right = 1000.0 * torch.ones_like(u)
@@ -235,6 +187,7 @@ class DSFMarginal(nn.Module):
             mid = (left + right) / 2
 
             # Evaluate CDF at midpoint
+            # Pass params [batch, N, param_len] and mid [batch, N] or [batch, N, samples]
             cdf_mid = self.marginal_flow.forward_no_logdet(marginal_params, mid)
 
             # Update bounds

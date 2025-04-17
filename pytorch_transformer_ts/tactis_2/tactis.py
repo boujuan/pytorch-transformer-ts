@@ -424,28 +424,27 @@ class TACTiS(nn.Module):
         # flow_encoded shape: [batch, series, time, dim]
 
         # Process with marginal model
-        normalized_data = value # Use the potentially bagged value tensor
-        # DSFMarginal expects input x shape [batch, series, time]
-        # flow_encoded context shape [batch, series, time, dim]
-        u_vals, marginal_logdet = self.marginal.forward_logdet(flow_encoded, normalized_data)
-        # u_vals shape: [batch, series, time]
-        # marginal_logdet shape: [batch, series, time]
+        normalized_data = value # Shape [B, S, T]
+        # DSFMarginal now expects context [B, N, D] and x [B, N] where N = S*T
+        B, S, T_total, D_flow = flow_encoded.shape
+        N = S * T_total
+        flow_encoded_merged = flow_encoded.reshape(B, N, D_flow)
+        normalized_data_merged = normalized_data.reshape(B, N)
 
-        # Calculate marginal loss (negative log-likelihood of base distribution)
-        # Assuming base distribution is standard normal N(0,1)
-        # log_prob = -0.5 * (log(2*pi) + u_vals^2)
-        # We need the log determinant from the flow transformation as well
-        # NLL = - (log_prob_base + log_det)
-        log_prob_base = -0.5 * (math.log(2 * math.pi) + u_vals.pow(2))
-        marginal_nll = -(log_prob_base + marginal_logdet)
+        # Pass merged context and data to marginal flow
+        u_vals_merged, marginal_logdet_batch = self.marginal.forward_logdet(flow_encoded_merged, normalized_data_merged)
+        # u_vals_merged shape: [B, N]
+        # marginal_logdet_batch shape: [B] (Log determinant summed over non-batch dims)
 
-        # Average over the prediction window and series
-        # Only consider the loss for the prediction steps
-        marginal_loss = marginal_nll[:, :, hist_len:].mean() # Average over batch, series, pred_len
-        self.marginal_logdet = marginal_logdet[:, :, hist_len:].mean() # Store mean logdet for logging/debugging
+        # Marginal NLL per batch item is -marginal_logdet_batch
+        # We store the mean over the batch for logging
+        self.marginal_logdet = marginal_logdet_batch.mean()
 
         # Process with copula if needed
-        copula_loss = torch.zeros(1, device=device).mean() # Initialize copula loss
+        # Initialize copula_loss_batch with correct shape [B] and device
+        copula_loss_batch = torch.zeros(B, device=device)
+        copula_loss = torch.zeros(1, device=device).mean()
+
         if not self.skip_copula and self.stage >= 2:
             # Encode inputs for copula using potentially bagged tensors
             # Pass the potentially bagged copula_series_emb directly
@@ -460,13 +459,18 @@ class TACTiS(nn.Module):
                 # AttentionalCopula log_prob expects u_vals [batch, series, time]
                 # and context [batch, series, time, dim]
                 # We only care about the prediction steps for the loss
-                u_vals_pred = u_vals[:, :, hist_len:]
-                copula_encoded_pred = copula_encoded[:, :, hist_len:]
+                # Reshape u_vals to [B, N] for copula input if needed, or use u_vals_merged directly
+                # AttentionalCopula expects u_vals [batch, series, time] -> [B, S, T_pred]
+                # and context [batch, series, time, dim] -> [B, S, T_pred, D_copula]
+                u_vals_pred = u_vals_merged.reshape(B, S, T_total)[:, :, hist_len:] # Shape [B, S, T_pred]
+                copula_encoded_pred = copula_encoded.reshape(B, S, T_total, -1)[:, :, hist_len:] # Shape [B, S, T_pred, D_copula]
 
                 # Calculate copula NLL (negative log probability)
                 # The log_prob method should return the log probability of the copula density
                 copula_log_prob = self.copula.log_prob(u_vals_pred, copula_encoded_pred)
-                copula_loss = -copula_log_prob.mean() # Average over batch, series, pred_len
+                # Sum log probability over series and time dimensions to get per-batch copula NLL
+                copula_loss_batch = -copula_log_prob.sum(dim=(1, 2)) # Shape [B]
+                copula_loss = copula_loss_batch.mean() # Scalar loss for logging/reporting
             else:
                 # If copula_encoded is None or copula not initialized, set loss to zero
                 logger.debug("Skipping copula loss calculation (not initialized or stage 1).")
@@ -475,20 +479,21 @@ class TACTiS(nn.Module):
              logger.debug("Skipping copula loss calculation (skip_copula=True or stage 1).")
              copula_loss = torch.zeros(1, device=device).mean()
 
-        self.copula_loss = copula_loss # Store for logging/debugging
+        # Store mean copula loss for logging/debugging
+        self.copula_loss = copula_loss_batch.mean() if not self.skip_copula else torch.tensor(0.0, device=device)
 
-        # Loss normalization based on potentially bagged num_series
-        # Note: The averaging is already done over the prediction length
-        if self.loss_normalization in {"series", "both"}:
-             # Use the potentially updated num_series after bagging
-             copula_loss = copula_loss / num_series
-             marginal_loss = marginal_loss / num_series
-        # if self.loss_normalization in {"timesteps", "both"}: # Already averaged over time
-        #      copula_loss = copula_loss / pred_len
-        #      marginal_loss = marginal_loss / pred_len
+        # Loss normalization is handled by original TACTiS decoder logic (summing logdets/logprobs)
+        # and potential division in the final mean calculation. Remove explicit normalization here.
 
-        # Total loss is the sum of marginal NLL and copula NLL
-        loss = marginal_loss + copula_loss
+        # Total loss per batch item = Copula NLL - Marginal LogDet
+        # Note: marginal_logdet_batch is log |det(dF/dx)|, so NLL = -log p(z) - log |det(dF/dx)|
+        # Assuming p(z) is standard normal, -log p(z) is handled implicitly if copula_loss includes it,
+        # or needs to be added if copula_loss is purely the copula term.
+        # Original TACTiS decoder loss = copula_loss - marginal_logdet. Let's follow that.
+        loss_batch = copula_loss_batch - marginal_logdet_batch # Shape [B]
+
+        # Final scalar loss is the mean over the batch
+        loss = loss_batch.mean()
 
         # Return output (pred_value for training) and loss
         output = pred_value # For training, return target as "output"
@@ -577,18 +582,23 @@ class TACTiS(nn.Module):
 
         # Reshape u_samples and flow_encoded_pred for marginal.inverse
         # u_samples: [num_samples, batch, series, pred_len] -> [batch, series, pred_len, num_samples]
-        u_samples_permuted = u_samples.permute(1, 2, 3, 0)
+        u_samples_permuted = u_samples.permute(1, 2, 3, 0) # Shape [B, S, pred_len, num_samples]
 
-        # marginal.inverse expects context [batch*N, dim] and u [batch*N, num_samples]
+        # marginal.inverse expects context [batch, N, dim] and u [batch, N, num_samples]
         # where N = series * pred_len
-        # Reshape context: [batch, series, pred_len, dim] -> [batch * series * pred_len, dim]
-        flow_encoded_pred_flat = flow_encoded_pred.reshape(-1, flow_encoded_pred.shape[-1])
-        # Reshape u: [batch, series, pred_len, num_samples] -> [batch * series * pred_len, num_samples]
-        u_samples_flat = u_samples_permuted.reshape(-1, num_samples)
+        N_pred = num_series * pred_len
+        # Reshape context: [batch, series, pred_len, dim] -> [batch, N_pred, dim]
+        flow_encoded_pred_merged = flow_encoded_pred.reshape(batch_size, N_pred, -1)
+        # Reshape u: [batch, series, pred_len, num_samples] -> [batch, N_pred, num_samples]
+        u_samples_merged = u_samples_permuted.reshape(batch_size, N_pred, num_samples)
 
         # Apply inverse transform (inverse CDF)
-        # Output shape: [batch * series * pred_len, num_samples]
-        samples_normalized_flat = self.marginal.inverse(flow_encoded_pred_flat, u_samples_flat)
+        # Output shape: [batch, N_pred, num_samples]
+        samples_normalized_merged = self.marginal.inverse(flow_encoded_pred_merged, u_samples_merged)
+
+        # Reshape flat output for consistency before final reshape
+        # [batch, N_pred, num_samples] -> [batch * N_pred, num_samples]
+        samples_normalized_flat = samples_normalized_merged.reshape(-1, num_samples)
 
         # Reshape back: [batch * series * pred_len, num_samples] -> [batch, series, pred_len, num_samples]
         samples_normalized = samples_normalized_flat.reshape(batch_size, num_series, pred_len, num_samples)
