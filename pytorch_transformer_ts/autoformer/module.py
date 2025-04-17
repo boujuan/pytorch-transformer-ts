@@ -954,7 +954,11 @@ class AutoformerModel(nn.Module):
         # TODO QUESTION why no looping over to make predictions?
         # TODO high output rsults of output_distribution
         if output_distr_params:
-            distr_params = list(distr.base_dist.arg_constraints.keys())
+            if hasattr(distr, "base_dist"):
+                distr_params = list(distr.base_dist.arg_constraints.keys())
+                
+            else:
+                distr_params = list(distr.arg_constraints.keys())
             return tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
                                            for tgt_key in distr_params)
         else:

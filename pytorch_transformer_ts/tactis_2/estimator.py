@@ -197,7 +197,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             self.time_features = time_features
         
     @staticmethod
-    def get_params(trial, context_length_choices):
+    def get_params(trial):
         """
         Get parameters for hyperparameter tuning.
         
@@ -214,7 +214,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         """
         params = {
             # --- General ---
-            "context_length": trial.suggest_categorical("context_length", context_length_choices),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3, 4]),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
 
             # --- Marginal CDF Encoder ---
@@ -251,6 +251,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.3),
             "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", [0.0, 1000.0, 10000.0]),
             "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", [0.0, 1000.0, 10000.0]),
+
         }
         return params
     

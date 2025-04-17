@@ -74,7 +74,7 @@ class DecoderLayer(nn.Module):
             # self attention on each variable in target sequence ind.
             assert self_mask_seq is None
             x1 = self.norm1(x)
-            x1 = Localize(x1, self.d_y) # TODO how is this doing local attention with d_y?
+            x1 = Localize(x1, self.d_y)
             x1, _ = self.local_self_attention(x1, x1, x1, attn_mask=self_mask_seq)
             x1 = ReverseLocalize(x1, self.d_y)
             x = x + self.dropout_attn_out(x1)
@@ -2020,7 +2020,11 @@ class SpacetimeformerModel(nn.Module):
             )
             
             if output_distr_params:
-                distr_params = list(distr.base_dist.arg_constraints.keys())
+                if hasattr(distr, "base_dist"):
+                    distr_params = list(distr.base_dist.arg_constraints.keys())
+                    
+                else:
+                    distr_params = list(distr.arg_constraints.keys())
                 return tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
                                             for tgt_key in distr_params)
             else:

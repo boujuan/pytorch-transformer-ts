@@ -192,8 +192,8 @@ class AttentionLayer(nn.Module):
     ):
         super(AttentionLayer, self).__init__()
 
-        d_keys = d_keys or (d_model // n_heads)
-        d_values = d_values or (d_model // n_heads)
+        d_keys = d_keys or (d_model // n_heads) # not passed here
+        d_values = d_values or (d_model // n_heads) # not passed here
 
         self.inner_attention = attention
         self.query_projection = nn.Linear(d_model, d_keys * n_heads)
@@ -767,13 +767,19 @@ class InformerModel(nn.Module):
             # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
             params = self.param_proj(output[:, -1:])
             # adds scaled mean, variance, stddev params
+            
             distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
                 params, scale=repeated_scale, loc=repeated_loc
             )
             
             # attributes loc, cov_factor, cov_diag = params[0], params[1], params[2] before scaling
             if output_distr_params:
-                distr_params = list(distr.base_dist.arg_constraints.keys())
+                if hasattr(distr, "base_dist"):
+                    distr_params = list(distr.base_dist.arg_constraints.keys())
+                    
+                else:
+                    distr_params = list(distr.arg_constraints.keys())
+                    
                 future_params.append(tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
                                            for tgt_key in distr_params))
             
