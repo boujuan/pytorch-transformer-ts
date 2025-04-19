@@ -464,11 +464,31 @@ class TACTiS(nn.Module):
                 u_vals_pred = u_vals_merged.reshape(B, S, T_total)[:, :, hist_len:] # Shape [B, S, T_pred]
                 copula_encoded_pred = copula_encoded.reshape(B, S, T_total, -1)[:, :, hist_len:] # Shape [B, S, T_pred, D_copula]
 
-                # Calculate copula NLL (negative log probability)
-                # The log_prob method should return the log probability of the copula density
-                copula_log_prob = self.copula.log_prob(u_vals_pred, copula_encoded_pred)
-                # Sum log probability over series and time dimensions to get per-batch copula NLL
-                copula_loss_batch = -copula_log_prob.sum(dim=(1, 2)) # Shape [B]
+                # Calculate copula NLL using the loss method
+                D_copula = copula_encoded.shape[-1]
+                N_hist = S * hist_len
+                N_pred = S * pred_len
+
+                u_vals_all = u_vals_merged.reshape(B, S, T_total)
+                u_vals_hist_flat = u_vals_all[:, :, :hist_len].reshape(B, N_hist)
+                u_vals_pred_flat = u_vals_all[:, :, hist_len:].reshape(B, N_pred)
+
+                copula_encoded_all = copula_encoded # Already [B, S, T_total, D_copula]
+                copula_encoded_hist_flat = copula_encoded_all[:, :, :hist_len, :].reshape(B, N_hist, D_copula)
+                copula_encoded_pred_flat = copula_encoded_all[:, :, hist_len:, :].reshape(B, N_pred, D_copula)
+
+                num_series_arg = S
+                num_timesteps_arg = pred_len # Original uses prediction length here
+
+                # Call the loss function - it returns the NLL per batch item directly
+                copula_loss_batch = self.copula.loss(
+                    hist_encoded=copula_encoded_hist_flat,
+                    hist_true_u=u_vals_hist_flat,
+                    pred_encoded=copula_encoded_pred_flat,
+                    pred_true_u=u_vals_pred_flat,
+                    num_series=num_series_arg,
+                    num_timesteps=num_timesteps_arg,
+                ) # Shape [B]
                 copula_loss = copula_loss_batch.mean() # Scalar loss for logging/reporting
             else:
                 # If copula_encoded is None or copula not initialized, set loss to zero
