@@ -6,8 +6,8 @@ from torch import nn
 
 from .positional_encoding import PositionalEncoding
 from .temporal_encoder import TemporalEncoder
-from .dsf_marginal import DSFMarginal
-from .attentional_copula import AttentionalCopula
+# Import the new decoder which contains marginal and copula
+from .decoder import CopulaDecoder
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -182,64 +182,87 @@ class TACTiS(nn.Module):
               logger.warning(f"dsf_marginal context_dim ({dsf_args['context_dim']}) differs from flow_encoder output dim ({flow_d_model}). Using encoder output dim.")
               dsf_args["context_dim"] = flow_d_model
 
-        self.marginal = DSFMarginal(
-            context_dim=dsf_args["context_dim"],
-            mlp_layers=dsf_args["mlp_layers"],
-            mlp_dim=dsf_args["mlp_dim"],
-            flow_layers=dsf_args["flow_layers"],
-            flow_hid_dim=dsf_args["flow_hid_dim"]
+        # --- Initialize Decoder (which contains Marginal and Copula) ---
+        if self.copula_decoder_args is None:
+            raise ValueError("copula_decoder configuration is required.")
+
+        # Determine initial copula_input_dim based on skip_copula flag
+        copula_input_dim_init = None
+        if not self.skip_copula and self.copula_encoder_args:
+             copula_input_dim_init = self.copula_encoder_args["d_model"]
+        elif not self.skip_copula and self.copula_temporal_encoder_args:
+             copula_input_dim_init = self.copula_temporal_encoder_args["d_model"]
+
+
+        self.decoder = CopulaDecoder(
+             flow_input_dim=flow_d_model,
+             copula_input_dim=copula_input_dim_init, # Pass initial dim or None
+             dsf_marginal=self.copula_decoder_args["dsf_marginal"],
+             attentional_copula=self.copula_decoder_args.get("attentional_copula"), # Pass None if not present
+             min_u=self.copula_decoder_args.get("min_u", 0.0),
+             max_u=self.copula_decoder_args.get("max_u", 1.0),
+             skip_sampling_marginal=self.copula_decoder_args.get("skip_sampling_marginal", False),
+             skip_copula=self.skip_copula # Pass initial skip_copula state
         )
-        logger.debug(f"Initialized marginal (DSF) with context_dim={dsf_args['context_dim']}")
+        logger.debug(f"Initialized CopulaDecoder.")
 
     def _initialize_copula_components(self):
-        """Initialize copula-related components using stored args"""
+        """Initialize copula-related components using stored args. Called during __init__ or set_stage."""
+        # Check if already initialized (e.g., if skip_copula was False initially)
+        if hasattr(self, 'copula_series_encoder') and self.copula_series_encoder is not None:
+            logger.debug("Copula components appear to be already initialized.")
+            return
+
+        # Ensure required args are present
+        if self.copula_encoder_args is None:
+             logger.error("Cannot initialize copula components: copula_encoder_args missing.")
+             return
+        if self.copula_decoder_args is None or "attentional_copula" not in self.copula_decoder_args:
+             logger.error("Cannot initialize copula components: attentional_copula args missing.")
+             return
+
         # Series encoder
         self.copula_series_encoder = nn.Embedding(self.num_series, self.copula_series_embedding_dim)
 
-        # Input encoder - Use copula_input_encoder_layers (passed directly)
+        # Input encoder
         copula_d_model = self.copula_encoder_args["d_model"]
         copula_input_dim = self.copula_series_embedding_dim + 2 # value + mask + embedding
-        copula_encoder_layers_list = [nn.Linear(copula_input_dim, copula_d_model), nn.ReLU()] # First layer
+        copula_encoder_layers_list = [nn.Linear(copula_input_dim, copula_d_model), nn.ReLU()]
         for _ in range(1, self.copula_input_encoder_layers):
              copula_encoder_layers_list += [nn.Linear(copula_d_model, copula_d_model), nn.ReLU()]
-        # Last layer ensures output matches d_model without ReLU
         if self.copula_input_encoder_layers > 1:
-             copula_encoder_layers_list[-2] = nn.Linear(copula_d_model, copula_d_model) # Replace last Linear
-             copula_encoder_layers_list.pop() # Remove last ReLU
-
+             copula_encoder_layers_list[-2] = nn.Linear(copula_d_model, copula_d_model)
+             copula_encoder_layers_list.pop()
         self.copula_input_encoder = nn.Sequential(*copula_encoder_layers_list)
         logger.debug(f"Initialized copula_input_encoder with {self.copula_input_encoder_layers} layers, input_dim={copula_input_dim}, output_dim={copula_d_model}")
 
-        # Positional encoding - Use copula_d_model
+        # Positional encoding
         self.copula_time_encoding = PositionalEncoding(
-             embedding_dim=copula_d_model, # Use copula_d_model directly
+             embedding_dim=copula_d_model,
              dropout=self.positional_encoding_args.get("dropout", 0.1),
              max_len=self.positional_encoding_args.get("max_len", 5000)
         )
         logger.debug(f"Initialized copula_time_encoding with embedding_dim={copula_d_model}")
+        self.copula_pos_adjust = nn.Identity() # Keep identity for consistency
 
-        # Remove copula_pos_adjust as dimensions should now match
-        self.copula_pos_adjust = nn.Identity()
-
-        # Copula encoder (Transformer or TemporalEncoder) - Use parameters from copula_encoder_args
+        # Copula encoder
         if self.copula_encoder_args["d_model"] != copula_d_model:
-              logger.warning(f"copula_encoder_args d_model ({self.copula_encoder_args['d_model']}) differs from calculated copula_d_model ({copula_d_model}). Using calculated value.")
+              logger.warning(f"copula_encoder_args d_model mismatch. Using calculated: {copula_d_model}")
 
         if self.encoder_type == "standard":
-            logger.debug(f"Initializing standard copula_encoder (Transformer) with {self.copula_encoder_args['num_encoder_layers']} layers, d_model={copula_d_model}, nhead={self.copula_encoder_args['nhead']}")
+            logger.debug(f"Initializing standard copula_encoder (Transformer)")
             self.copula_encoder = nn.TransformerEncoder(
                 encoder_layer=nn.TransformerEncoderLayer(
-                    d_model=copula_d_model, # Use consistent d_model
-                nhead=self.copula_encoder_args["nhead"],
-                dim_feedforward=self.copula_encoder_args.get("dim_feedforward", copula_d_model * 4),
-                dropout=self.copula_encoder_args.get("dropout", 0.1),
-                batch_first=True
-            ),
+                    d_model=copula_d_model,
+                    nhead=self.copula_encoder_args["nhead"],
+                    dim_feedforward=self.copula_encoder_args.get("dim_feedforward", copula_d_model * 4),
+                    dropout=self.copula_encoder_args.get("dropout", 0.1),
+                    batch_first=True
+                ),
                 num_layers=self.copula_encoder_args["num_encoder_layers"]
             )
         elif self.encoder_type == "temporal":
-            logger.debug(f"Initializing temporal copula_encoder with {self.copula_temporal_encoder_args['num_encoder_layers']} layers, d_model={copula_d_model}, nhead={self.copula_temporal_encoder_args['nhead']}")
-            # Use copula_temporal_encoder_args here
+            logger.debug(f"Initializing temporal copula_encoder")
             self.copula_encoder = TemporalEncoder(
                 d_model=copula_d_model,
                 nhead=self.copula_temporal_encoder_args["nhead"],
@@ -250,29 +273,17 @@ class TACTiS(nn.Module):
         else:
             raise ValueError(f"Unknown encoder_type for copula: {self.encoder_type}")
 
-        # Attentional copula - Use parameters from copula_decoder_args['attentional_copula']
-        if self.copula_decoder_args is None or "attentional_copula" not in self.copula_decoder_args:
-             raise ValueError("Attentional Copula arguments ('attentional_copula') missing in copula_decoder config.")
-        cop_args = self.copula_decoder_args["attentional_copula"]
-
-        # Ensure input_dim matches the output of the copula_encoder
-        if cop_args.get("input_dim", copula_d_model) != copula_d_model: # Use get with default
-              logger.warning(f"attentional_copula input_dim ({cop_args['input_dim']}) differs from copula_encoder output dim ({copula_d_model}). Using encoder output dim.")
-              cop_args["input_dim"] = copula_d_model
-
-        self.copula = AttentionalCopula(
-            input_dim=cop_args["input_dim"],
-            attention_layers=cop_args["attention_layers"],
-            attention_heads=cop_args["attention_heads"],
-            attention_dim=cop_args["attention_dim"], # This is dim_per_head
-            mlp_layers=cop_args["mlp_layers"],
-            mlp_dim=cop_args["mlp_dim"],
-            resolution=cop_args["resolution"],
-            dropout=cop_args.get("dropout", 0.1),
-            attention_mlp_class=cop_args.get("attention_mlp_class", "_easy_mlp"),
-            activation_function=cop_args.get("activation_function", "relu")
-        )
-        logger.debug(f"Initialized AttentionalCopula with input_dim={cop_args['input_dim']}, resolution={cop_args['resolution']}")
+        # Initialize Attentional Copula within the Decoder
+        # The decoder's __init__ handles creating the AttentionalCopula instance
+        # We just need to ensure the decoder itself is updated if needed
+        if hasattr(self.decoder, 'create_attentional_copula'):
+             # Update decoder's internal state and potentially create the copula instance
+             self.decoder.copula_input_dim = copula_d_model # Ensure decoder knows the dim
+             self.decoder.attentional_copula_args = self.copula_decoder_args["attentional_copula"]
+             self.decoder.create_attentional_copula()
+             logger.debug("Called decoder.create_attentional_copula()")
+        else:
+             logger.error("Decoder object does not have create_attentional_copula method.")
 
     @staticmethod
     def _apply_bagging(
@@ -422,93 +433,38 @@ class TACTiS(nn.Module):
         flow_encoded = self._encode_flow(time_steps, value, mask, series_indices, flow_series_emb)
         # flow_encoded shape: [batch, series, time, dim]
 
-        # Process with marginal model
-        normalized_data = value # Shape [B, S, T]
-        # DSFMarginal now expects context [B, N, D] and x [B, N] where N = S*T
-        B, S, T_total, D_flow = flow_encoded.shape
-        N = S * T_total
-        flow_encoded_merged = flow_encoded.reshape(B, N, D_flow)
-        normalized_data_merged = normalized_data.reshape(B, N)
-
-        # Pass merged context and data to marginal flow
-        u_vals_merged, marginal_logdet_batch = self.marginal.forward_logdet(flow_encoded_merged, normalized_data_merged)
-        # u_vals_merged shape: [B, N]
-        # marginal_logdet_batch shape: [B] (Log determinant summed over non-batch dims)
-
-        # Marginal NLL per batch item is -marginal_logdet_batch
-        # We store the mean over the batch for logging
-        self.marginal_logdet = marginal_logdet_batch.mean()
-
-        # Process with copula if needed
-        # Initialize copula_loss_batch with correct shape [B] and device
-        copula_loss_batch = torch.zeros(B, device=device)
-        copula_loss = torch.zeros(1, device=device).mean()
-
+        # Encode for copula if needed
+        copula_encoded = None
         if not self.skip_copula and self.stage >= 2:
-            # Encode inputs for copula using potentially bagged tensors
-            # Pass the potentially bagged copula_series_emb directly
-            if copula_series_emb is not None: # Check if copula embeddings exist (i.e., stage 2 and initialized)
+            if copula_series_emb is not None:
                  copula_encoded = self._encode_copula(time_steps, value, mask, series_indices, copula_series_emb)
-                 # copula_encoded shape: [batch, series, time, dim]
             else:
-                 copula_encoded = None # Ensure copula_encoded is None if embeddings weren't created
+                 logger.warning("Stage >= 2 but copula components not initialized. Skipping copula encoding.")
 
-            # Process with copula if encoded representation exists
-            if copula_encoded is not None and hasattr(self, 'copula'):
-                # AttentionalCopula log_prob expects u_vals [batch, series, time]
-                # and context [batch, series, time, dim]
-                # We only care about the prediction steps for the loss
-                # Reshape u_vals to [B, N] for copula input if needed, or use u_vals_merged directly
-                # AttentionalCopula expects u_vals [batch, series, time] -> [B, S, T_pred]
-                # and context [batch, series, time, dim] -> [B, S, T_pred, D_copula]
-                u_vals_pred = u_vals_merged.reshape(B, S, T_total)[:, :, hist_len:] # Shape [B, S, T_pred]
-                copula_encoded_pred = copula_encoded.reshape(B, S, T_total, -1)[:, :, hist_len:] # Shape [B, S, T_pred, D_copula]
+        # --- Loss Calculation via Decoder ---
+        # Pass encoded representations, mask, and true values to the decoder
+        marginal_logdet_batch, copula_loss_batch = self.decoder.loss(
+            flow_encoded=flow_encoded,
+            copula_encoded=copula_encoded, # Will be None if skipped
+            mask=mask,
+            true_value=true_value,
+        ) # Returns loss components per batch item [B]
 
-                # Calculate copula NLL using the loss method
-                D_copula = copula_encoded.shape[-1]
-                N_hist = S * hist_len
-                N_pred = S * pred_len
+        # Store mean values for logging
+        self.marginal_logdet = marginal_logdet_batch.mean()
+        self.copula_loss = copula_loss_batch.mean() # Will be 0 if copula was skipped
 
-                u_vals_all = u_vals_merged.reshape(B, S, T_total)
-                u_vals_hist_flat = u_vals_all[:, :, :hist_len].reshape(B, N_hist)
-                u_vals_pred_flat = u_vals_all[:, :, hist_len:].reshape(B, N_pred)
+        # --- Apply Loss Normalization ---
+        # Based on original TACTiS logic
+        if self.loss_normalization in {"series", "both"}:
+            marginal_logdet_batch = marginal_logdet_batch / num_series
+            copula_loss_batch = copula_loss_batch / num_series
+        if self.loss_normalization in {"timesteps", "both"}:
+            marginal_logdet_batch = marginal_logdet_batch / pred_len
+            copula_loss_batch = copula_loss_batch / pred_len
 
-                copula_encoded_all = copula_encoded # Already [B, S, T_total, D_copula]
-                copula_encoded_hist_flat = copula_encoded_all[:, :, :hist_len, :].reshape(B, N_hist, D_copula)
-                copula_encoded_pred_flat = copula_encoded_all[:, :, hist_len:, :].reshape(B, N_pred, D_copula)
-
-                num_series_arg = S
-                num_timesteps_arg = pred_len # Original uses prediction length here
-
-                # Call the loss function - it returns the NLL per batch item directly
-                copula_loss_batch = self.copula.loss(
-                    hist_encoded=copula_encoded_hist_flat,
-                    hist_true_u=u_vals_hist_flat,
-                    pred_encoded=copula_encoded_pred_flat,
-                    pred_true_u=u_vals_pred_flat,
-                    num_series=num_series_arg,
-                    num_timesteps=num_timesteps_arg,
-                ) # Shape [B]
-                copula_loss = copula_loss_batch.mean() # Scalar loss for logging/reporting
-            else:
-                # If copula_encoded is None or copula not initialized, set loss to zero
-                logger.debug("Skipping copula loss calculation (not initialized or stage 1).")
-                copula_loss = torch.zeros(1, device=device).mean()
-        else:
-             logger.debug("Skipping copula loss calculation (skip_copula=True or stage 1).")
-             copula_loss = torch.zeros(1, device=device).mean()
-
-        # Store mean copula loss for logging/debugging
-        self.copula_loss = copula_loss_batch.mean() if not self.skip_copula else torch.tensor(0.0, device=device)
-
-        # Loss normalization is handled by original TACTiS decoder logic (summing logdets/logprobs)
-        # and potential division in the final mean calculation. Remove explicit normalization here.
-
+        # --- Combine Normalized Losses ---
         # Total loss per batch item = Copula NLL - Marginal LogDet
-        # Note: marginal_logdet_batch is log |det(dF/dx)|, so NLL = -log p(z) - log |det(dF/dx)|
-        # Assuming p(z) is standard normal, -log p(z) is handled implicitly if copula_loss includes it,
-        # or needs to be added if copula_loss is purely the copula term.
-        # Original TACTiS decoder loss = copula_loss - marginal_logdet. Let's follow that.
         loss_batch = copula_loss_batch - marginal_logdet_batch # Shape [B]
 
         # Final scalar loss is the mean over the batch
@@ -519,7 +475,6 @@ class TACTiS(nn.Module):
 
         return output, loss
 
-    # Sample method simplified assuming forecasting mode and external normalization
     def sample(
         self,
         num_samples: int,
@@ -528,7 +483,7 @@ class TACTiS(nn.Module):
         pred_time: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Generate samples from the model.
+        Generate samples from the model using the CopulaDecoder.
         Returns normalized samples [num_samples, batch, series, pred_len].
         """
         batch_size, num_series, hist_len = hist_value.shape
@@ -546,86 +501,36 @@ class TACTiS(nn.Module):
             torch.ones(batch_size, num_series, hist_len, dtype=torch.bool, device=device),
             torch.zeros(batch_size, num_series, pred_len, dtype=torch.bool, device=device)
         ], dim=2) # [batch, series, hist_len + pred_len]
+        # True value here only needs the history part for the decoder's sample method
+        true_value_hist = hist_value # Shape [batch, series, hist_len]
 
-        # Create series embeddings (needed for encoding)
-        # Expand over batches as encoding expects batch dimension
-        flow_series_emb = self.flow_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1) # [batch, series, flow_dim]
+        # Create series embeddings
+        flow_series_emb = self.flow_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1)
         copula_series_emb = None
         if not self.skip_copula and self.stage >= 2 and hasattr(self, 'copula_series_encoder'):
-             copula_series_emb = self.copula_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1) # [batch, series, copula_dim]
+             copula_series_emb = self.copula_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1)
 
         # Encode inputs
-        # Pass the created series embeddings directly
-        flow_encoded = self._encode_flow(time_steps, value_placeholder, mask, series_indices, flow_series_emb) # [batch, series, time, flow_dim]
+        flow_encoded = self._encode_flow(time_steps, value_placeholder, mask, series_indices, flow_series_emb)
         copula_encoded = None
-        if copula_series_emb is not None: # Check if copula embeddings exist
-             copula_encoded = self._encode_copula(time_steps, value_placeholder, mask, series_indices, copula_series_emb) # [batch, series, time, copula_dim]
+        if copula_series_emb is not None:
+             copula_encoded = self._encode_copula(time_steps, value_placeholder, mask, series_indices, copula_series_emb)
 
-        # Generate uniform samples or copula samples
-        if copula_encoded is None or not hasattr(self, 'copula'): # Stage 1 or copula skipped/not initialized
-            logger.debug("Sampling: Generating uniform samples (Stage 1 or Copula skipped/uninitialized).")
-            # Generate uniform samples in shape [num_samples, batch, series, pred_len]
-            u_samples = torch.rand(num_samples, batch_size, num_series, pred_len, device=device)
-        else:
-            logger.debug("Sampling: Generating samples from Copula (Stage 2).")
-            # Sample from copula using encoded representation of prediction steps
-            # Select the copula encoding corresponding to prediction steps
-            copula_encoded_pred = copula_encoded[:, :, hist_len:] # Shape [batch, series, pred_len, dim]
+        # Delegate sampling to the decoder
+        # Decoder expects full time range for encoded, mask, and true_value (with history)
+        samples_normalized = self.decoder.sample(
+            num_samples=num_samples,
+            flow_encoded=flow_encoded,       # [B, S, T_total, D_flow]
+            copula_encoded=copula_encoded,   # [B, S, T_total, D_copula] or None
+            mask=mask,                       # [B, S, T_total]
+            true_value=value_placeholder,    # [B, S, T_total] (contains history)
+        ) # Output shape: [num_samples, B, S, T_total]
 
-            # AttentionalCopula.sample expects flow_encoded [batch, series * pred_len, dim]
-            # Reshape context for copula sampling
-            copula_encoded_pred_flat = copula_encoded_pred.reshape(batch_size, num_series * pred_len, -1)
-
-            # Sample from the copula
-            # Output shape: [batch, series*pred_len, num_samples]
-            u_samples_flat = self.copula.sample(
-                num_samples,
-                copula_encoded_pred_flat, # Pass flattened copula encoding for prediction steps
-                copula_encoded_pred_flat.shape[-1] # Pass embedding dim
-            )
-            # Reshape back to [num_samples, batch, series, pred_len]
-            try:
-                 # Reshape: [batch, series*pred_len, num_samples] -> [batch, series, pred_len, num_samples]
-                 u_samples_reshaped = u_samples_flat.reshape(batch_size, num_series, pred_len, num_samples)
-                 # Permute: [batch, series, pred_len, num_samples] -> [num_samples, batch, series, pred_len]
-                 u_samples = u_samples_reshaped.permute(3, 0, 1, 2)
-            except RuntimeError as e:
-                 logger.error(f"Error reshaping copula samples: {e}. Input shape: {u_samples_flat.shape}. Falling back to uniform samples.")
-                 # Fallback: generate uniform samples
-                 u_samples = torch.rand(num_samples, batch_size, num_series, pred_len, device=device)
-
-        # Transform samples using marginal inverse CDF
-        # Select flow encoding for prediction steps
-        flow_encoded_pred = flow_encoded[:, :, hist_len:] # Shape [batch, series, pred_len, dim]
-
-        # Reshape u_samples and flow_encoded_pred for marginal.inverse
-        # u_samples: [num_samples, batch, series, pred_len] -> [batch, series, pred_len, num_samples]
-        u_samples_permuted = u_samples.permute(1, 2, 3, 0) # Shape [B, S, pred_len, num_samples]
-
-        # marginal.inverse expects context [batch, N, dim] and u [batch, N, num_samples]
-        # where N = series * pred_len
-        N_pred = num_series * pred_len
-        # Reshape context: [batch, series, pred_len, dim] -> [batch, N_pred, dim]
-        flow_encoded_pred_merged = flow_encoded_pred.reshape(batch_size, N_pred, -1)
-        # Reshape u: [batch, series, pred_len, num_samples] -> [batch, N_pred, num_samples]
-        u_samples_merged = u_samples_permuted.reshape(batch_size, N_pred, num_samples)
-
-        # Apply inverse transform (inverse CDF)
-        # Output shape: [batch, N_pred, num_samples]
-        samples_normalized_merged = self.marginal.inverse(flow_encoded_pred_merged, u_samples_merged)
-
-        # Reshape flat output for consistency before final reshape
-        # [batch, N_pred, num_samples] -> [batch * N_pred, num_samples]
-        samples_normalized_flat = samples_normalized_merged.reshape(-1, num_samples)
-
-        # Reshape back: [batch * series * pred_len, num_samples] -> [batch, series, pred_len, num_samples]
-        samples_normalized = samples_normalized_flat.reshape(batch_size, num_series, pred_len, num_samples)
-
-        # Permute to final shape: [num_samples, batch, series, pred_len]
-        samples = samples_normalized.permute(3, 0, 1, 2)
+        # Extract only the prediction part
+        samples_pred = samples_normalized[..., :, :, hist_len:] # Shape [num_samples, B, S, pred_len]
 
         # Return normalized samples; denormalization is external
-        return samples
+        return samples_pred
 
     def _encode_flow(self, time_steps, value, mask, series_indices, flow_series_emb):
         """
@@ -760,34 +665,32 @@ class TACTiS(nn.Module):
         return encoded.contiguous()
 
     def set_stage(self, stage: int):
-        """Set the training stage"""
+        """Set the training stage and initialize copula components if needed."""
         assert stage in [1, 2], "Stage must be 1 or 2"
+        logger.info(f"TACTiS model: Setting stage to {stage}")
         self.stage = stage
 
-        # Re-initialize copula components if switching to stage 2 and they weren't initialized before
-        if stage == 2 and self.skip_copula:
-             # Check if args are available before initializing
-             # Check specifically for copula_encoder_args as it's needed for d_model
-             if self.copula_decoder_args is not None and self.copula_encoder_args is not None:
-                 logger.info("Initializing copula components for stage 2...")
-                 self.skip_copula = False
-                 # Pass the stored config dictionaries
-                 self._initialize_copula_components()
-                 # Ensure the initialized components are moved to the correct device
-                 # This assumes the TACTiS module itself is already on the correct device
-                 device = next(self.parameters()).device
-                 if hasattr(self, 'copula_series_encoder'):
-                      self.copula_series_encoder.to(device)
-                 if hasattr(self, 'copula_input_encoder'):
-                      self.copula_input_encoder.to(device)
-                 if hasattr(self, 'copula_time_encoding'):
-                      self.copula_time_encoding.to(device)
-                 if hasattr(self, 'copula_pos_adjust'):
-                      self.copula_pos_adjust.to(device)
-                 if hasattr(self, 'copula_encoder'):
-                      self.copula_encoder.to(device)
-                 if hasattr(self, 'copula'):
-                      self.copula.to(device)
+        # Update skip_copula flag based on the new stage
+        self.skip_copula = (stage == 1)
+        if hasattr(self.decoder, 'skip_copula'):
+             self.decoder.skip_copula = self.skip_copula
 
-             else:
-                logger.warning("Cannot initialize copula components for stage 2 - config args missing.")
+        # Initialize copula components if switching to stage 2 and they weren't initialized before
+        # The decoder might handle its own internal initialization now
+        if stage == 2:
+             # Ensure copula-specific encoders/embeddings are created if not already
+             if not hasattr(self, 'copula_series_encoder') or self.copula_series_encoder is None:
+                  logger.info("Initializing TACTiS copula encoders/embeddings for stage 2...")
+                  self._initialize_copula_components() # This will also call decoder.create_attentional_copula
+             # Or, if encoders exist but decoder's copula doesn't, create it
+             elif hasattr(self.decoder, 'copula') and self.decoder.copula is None:
+                  logger.info("Initializing decoder's attentional copula for stage 2...")
+                  if hasattr(self.decoder, 'create_attentional_copula'):
+                      # Make sure decoder knows the input dim before creating copula
+                      if hasattr(self, 'copula_encoder'):
+                           self.decoder.copula_input_dim = self.copula_encoder.embedding_dim
+                           self.decoder.create_attentional_copula()
+                      else:
+                           logger.error("Cannot create attentional copula in decoder: copula_encoder not found.")
+                  else:
+                      logger.error("Decoder has no create_attentional_copula method.")
