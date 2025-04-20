@@ -145,28 +145,30 @@ class InformerEstimator(PyTorchLightningEstimator):
         )
     
     @staticmethod
-    def get_params(trial, tuning_phase=1):
+    def get_params(trial, tuning_phase=1, dynamic_kwargs=None):
         """ generate dictionary of tunable parameters compatible with optuna """
         # in paper: batch-size=32, num_decoder_layers=2, num_epochs=8, learning rate starts at 1e-4 and decays by 0.5 every epoch
         # encoder is a "3-layer stack and a 1-layer stack" e.g. num_encoder_layers=3
         # d_model=512, num_heads=8, dim_feedforward=2048, lr=0.0001
+        if dynamic_kwargs is None:
+            dynamic_kwargs = {}
         if tuning_phase == 1:
             return {
-                "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3]),
+                "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [1, 2, 3])),
                 # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
-                "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
-                "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", [2, 3, 4]),
-                "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", [1, 2, 3]),
+                "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [32, 64, 128])),
+                "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [2, 3, 4])),
+                "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", dynamic_kwargs.get("num_decoder_layers", [1, 2, 3])),
                 # "dim_feedforward": trial.suggest_categorical("dim_feedforward", [512, 1024, 2048]),
-                "d_model": trial.suggest_categorical("d_model", [128, 256, 512]),
-                "n_heads": trial.suggest_categorical("n_heads", [4, 6, 8])
+                "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [128, 256, 512])),
+                "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8]))
                 # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
             }
         else:
             return {
-                "resample_freq": trial.suggest_categorical("resample_freq", [15, 30, 45, 60]),
+                "resample_freq": trial.suggest_categorical("resample_freq", dynamic_kwargs.get("resample_freq", [60, 120, 180])),# [15, 30, 45, 60]), # TODO
                 "per_turbine": trial.suggest_categorical("per_turbine", [True, False]),
-                "rank": trial.suggest_categorical("rank", [8, 12, 16, 20, 24])
+                "rank": trial.suggest_categorical("rank", dynamic_kwargs.get("rank", [8, 12, 16, 20, 24]))
             }
     
      
