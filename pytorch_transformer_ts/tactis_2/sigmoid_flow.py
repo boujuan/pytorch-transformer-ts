@@ -87,12 +87,12 @@ class SigmoidFlow(nn.Module):
             return x_pre, logdet
 
         # Apply logit transform with numerical stability
-        x_pre_clipped = torch.clamp(x_pre, min=EPSILON, max=1.0-EPSILON)
+        x_pre_clipped = x_pre * (1 - EPSILON) + EPSILON * 0.5
         xnew = torch.log(x_pre_clipped) - torch.log(1 - x_pre_clipped)
 
         # Update logdet to account for logit transform
-        logdet_logit = torch.log(x_pre_clipped) + torch.log(1 - x_pre_clipped)
-        logdet = logdet - logdet_logit.sum(dim=tuple(range(1, logdet_logit.dim())))
+        logdet_ = logj + math.log(1 - EPSILON) - (torch.log(x_pre_clipped) + torch.log(1 - x_pre_clipped))
+        logdet = logdet_.sum(dim=tuple(range(1, logdet_.dim()))) + logdet
 
         # Final NaN check
         if torch.isnan(xnew).any() or torch.isnan(logdet).any():
