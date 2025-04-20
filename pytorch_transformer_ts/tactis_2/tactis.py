@@ -703,7 +703,18 @@ class TACTiS(nn.Module):
              # Check if attentional copula exists in decoder but is disabled
              if hasattr(self.decoder, 'copula') and self.decoder.copula is None:
                   logger.info("Enabling attentional copula in decoder for stage 2...")
-                  if hasattr(self.decoder, 'create_attentional_copula'):
-                      self.decoder.create_attentional_copula()
+                  # Check if copula encoder args exist and contain d_model
+                  if hasattr(self, 'copula_encoder_args') and self.copula_encoder_args and "d_model" in self.copula_encoder_args:
+                      copula_d_model = self.copula_encoder_args["d_model"]
+                      # Explicitly set the decoder's expected input dimension
+                      self.decoder.copula_input_dim = copula_d_model
+                      logger.info(f"Set decoder.copula_input_dim to {copula_d_model} before creating attentional copula.")
+                      # Now attempt to create the copula
+                      if hasattr(self.decoder, 'create_attentional_copula'):
+                          self.decoder.create_attentional_copula()
+                      else:
+                          logger.error("Decoder has no create_attentional_copula method.")
                   else:
-                      logger.error("Decoder has no create_attentional_copula method.")
+                      logger.error("Cannot create attentional copula: copula_encoder_args or 'd_model' key is missing. Skipping copula creation.")
+                      # Optionally raise an error here if this is critical
+                      # raise ValueError("Cannot proceed to stage 2 without copula encoder d_model")
