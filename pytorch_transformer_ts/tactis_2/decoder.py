@@ -237,46 +237,54 @@ class CopulaDecoder(nn.Module):
         Returns:
         --------
         samples: torch.Tensor [num_samples, batch, series, time steps]
-            Generated samples (normalized).
+            Generated samples (normalized). The output shape is designed to be compatible
+            with TACTiS's sample method, which will extract only the prediction part.
+            Final shape after extraction will be [num_samples, batch, series, pred_len].
         """
         B, S, T_total, D_flow = flow_encoded.shape
         N = S * T_total
         device = flow_encoded.device
 
-        # Merge dims for processing
-        flow_encoded_merged = flow_encoded.reshape(B, N, D_flow)
+        # Merge dims for processing - flatten series and time dimensions
+        # This creates a single dimension that represents all series-time combinations
+        flow_encoded_merged = flow_encoded.reshape(B, N, D_flow)  # [B, S*T_total, D_flow]
         copula_encoded_merged = copula_encoded.reshape(B, N, -1) if copula_encoded is not None else None
-        mask_merged = mask.reshape(B, N)
-        true_value_merged = true_value.reshape(B, N)
+        mask_merged = mask.reshape(B, N)  # [B, S*T_total]
+        true_value_merged = true_value.reshape(B, N)  # [B, S*T_total]
 
-        # Get indices for hist/pred based on mask
-        mask_first = mask[0, 0, :] # Shape [T_total]
-        hist_indices = torch.where(mask_first)[0]
-        pred_indices = torch.where(~mask_first)[0]
+        # Get indices for historical and prediction periods based on mask
+        # Assuming mask is consistent across series and batch
+        mask_first = mask[0, 0, :]  # Shape [T_total]
+        hist_indices = torch.where(mask_first)[0]  # Indices where mask is True (observed)
+        pred_indices = torch.where(~mask_first)[0]  # Indices where mask is False (prediction)
         num_hist_steps = len(hist_indices)
         num_pred_steps = len(pred_indices)
 
-        # Map T_total indices back to N indices
+        # Map time indices to flattened S*T indices
+        # For each series, we need to map the corresponding time indices
         hist_indices_n = torch.cat([hist_indices + s * T_total for s in range(S)]).sort().values
         pred_indices_n = torch.cat([pred_indices + s * T_total for s in range(S)]).sort().values
 
         # --- Prepare History for Copula Sampling ---
-        hist_encoded_flow_flat = flow_encoded_merged[:, hist_indices_n, :] # [B, S*hist_len, D_flow]
-        hist_true_x_flat = true_value_merged[:, hist_indices_n] # [B, S*hist_len]
+        # Extract historical encodings and values from merged tensors
+        hist_encoded_flow_flat = flow_encoded_merged[:, hist_indices_n, :]  # [B, S*hist_len, D_flow]
+        hist_true_x_flat = true_value_merged[:, hist_indices_n]  # [B, S*hist_len]
 
-        # Transform history to U(0,1) using marginals
-        hist_true_u_flat = self.marginal.forward_no_logdet(hist_encoded_flow_flat, hist_true_x_flat) # [B, S*hist_len]
+        # Transform historical values to U(0,1) using marginals
+        # This is needed for copula sampling which works in uniform space
+        hist_true_u_flat = self.marginal.forward_no_logdet(hist_encoded_flow_flat, hist_true_x_flat)  # [B, S*hist_len]
 
         # --- Sample U(0,1) values for Prediction Period ---
-        pred_encoded_flow_flat = flow_encoded_merged[:, pred_indices_n, :] # [B, S*pred_len, D_flow]
+        # Extract prediction period encodings
+        pred_encoded_flow_flat = flow_encoded_merged[:, pred_indices_n, :]  # [B, S*pred_len, D_flow]
 
+        # Generate samples in U(0,1) space
         if not self.skip_copula and copula_encoded_merged is not None and self.copula is not None:
-            # Use Copula to sample correlated U values
-            hist_encoded_copula_flat = copula_encoded_merged[:, hist_indices_n, :] # [B, S*hist_len, D_copula]
-            pred_encoded_copula_flat = copula_encoded_merged[:, pred_indices_n, :] # [B, S*pred_len, D_copula]
+            # Use Copula to sample correlated U values (Stage 2)
+            hist_encoded_copula_flat = copula_encoded_merged[:, hist_indices_n, :]  # [B, S*hist_len, D_copula]
+            pred_encoded_copula_flat = copula_encoded_merged[:, pred_indices_n, :]  # [B, S*pred_len, D_copula]
 
-            # Copula sample method expects hist_u [B, S*hist_len] and pred_encoded [B, S*pred_len, D_copula]
-            # Output shape: [B, S*pred_len, num_samples]
+            # Sample from copula - returns shape: [B, S*pred_len, num_samples]
             pred_samples_u_flat = self.copula.sample(
                 num_samples=num_samples,
                 hist_encoded=hist_encoded_copula_flat,
@@ -284,37 +292,38 @@ class CopulaDecoder(nn.Module):
                 pred_encoded=pred_encoded_copula_flat,
             )
         else:
-            # Stage 1 or Copula skipped: Sample uniformly
+            # Stage 1 or Copula skipped: Sample uniformly (independent samples)
             N_pred = S * num_pred_steps
-            # Shape: [B, N_pred, num_samples]
-            pred_samples_u_flat = torch.rand(B, N_pred, num_samples, device=device)
+            pred_samples_u_flat = torch.rand(B, N_pred, num_samples, device=device)  # [B, S*pred_len, num_samples]
 
-        # --- Transform Sampled U values using Marginal Inverse CDF ---
+        # --- Transform Sampled U values to real space using Marginal Inverse CDF ---
         if not self.skip_sampling_marginal:
-            # Scale U samples if needed (original TACTiS logic)
+            # Scale U samples if needed (from original TACTiS)
             pred_samples_u_flat = self.min_u + (self.max_u - self.min_u) * pred_samples_u_flat
 
-            # Marginal inverse expects context [B, N_pred, D_flow] and u [B, N_pred, num_samples]
-            # Output shape: [B, N_pred, num_samples]
+            # Apply inverse CDF to transform U(0,1) samples to real values
+            # Output shape: [B, S*pred_len, num_samples]
             pred_samples_x_flat = self.marginal.inverse(
-                pred_encoded_flow_flat, # Context for prediction steps
-                pred_samples_u_flat,    # U values for prediction steps
+                pred_encoded_flow_flat,  # Context for prediction steps [B, S*pred_len, D_flow]
+                pred_samples_u_flat,     # U values for prediction steps [B, S*pred_len, num_samples]
             )
         else:
             # If skipping marginal transform, output is just the U samples
             pred_samples_x_flat = pred_samples_u_flat
 
         # --- Combine History and Samples ---
-        # Create output tensor matching input true_value shape but with sample dim
-        # Target shape: [B, N, num_samples]
-        samples_merged = torch.zeros(B, N, num_samples, device=device)
+        # Create output tensor for the full time range
+        samples_merged = torch.zeros(B, N, num_samples, device=device)  # [B, S*T_total, num_samples]
 
         # Fill in historical values (repeated across samples)
         samples_merged[:, hist_indices_n, :] = hist_true_x_flat.unsqueeze(-1).expand(-1, -1, num_samples)
         # Fill in predicted samples
         samples_merged[:, pred_indices_n, :] = pred_samples_x_flat
 
-        # Reshape back to [num_samples, B, S, T_total]
-        samples_final = samples_merged.reshape(B, S, T_total, num_samples).permute(3, 0, 1, 2)
+        # Reshape to final output format: [num_samples, batch, series, time_steps]
+        # First reshape to [B, S, T_total, num_samples]
+        samples_reshaped = samples_merged.reshape(B, S, T_total, num_samples)
+        # Then permute to [num_samples, B, S, T_total]
+        samples_final = samples_reshaped.permute(3, 0, 1, 2)
 
         return samples_final.contiguous()

@@ -484,7 +484,25 @@ class TACTiS(nn.Module):
     ) -> torch.Tensor:
         """
         Generate samples from the model using the CopulaDecoder.
-        Returns normalized samples [num_samples, batch, series, pred_len].
+        
+        Parameters:
+        -----------
+        num_samples: int
+            Number of sample paths to generate
+        hist_time: torch.Tensor [batch, hist_len]
+            Time values for historical data
+        hist_value: torch.Tensor [batch, series, hist_len]
+            Historical values (normalized externally)
+        pred_time: torch.Tensor [batch, pred_len]
+            Time values for prediction period
+            
+        Returns:
+        --------
+        torch.Tensor [num_samples, batch, series, pred_len]
+            Normalized samples for the prediction period.
+            Each sample represents one possible future trajectory.
+            This shape is compatible with module.py which will permute it to
+            [batch, num_samples, pred_len, series] for GluonTS compatibility.
         """
         batch_size, num_series, hist_len = hist_value.shape
         pred_len = pred_time.shape[1]
@@ -501,8 +519,6 @@ class TACTiS(nn.Module):
             torch.ones(batch_size, num_series, hist_len, dtype=torch.bool, device=device),
             torch.zeros(batch_size, num_series, pred_len, dtype=torch.bool, device=device)
         ], dim=2) # [batch, series, hist_len + pred_len]
-        # True value here only needs the history part for the decoder's sample method
-        true_value_hist = hist_value # Shape [batch, series, hist_len]
 
         # Create series embeddings
         flow_series_emb = self.flow_series_encoder(series_indices).unsqueeze(0).expand(batch_size, -1, -1)
@@ -529,18 +545,21 @@ class TACTiS(nn.Module):
         # Extract only the prediction part
         samples_pred = samples_normalized[..., :, :, hist_len:] # Shape [num_samples, B, S, pred_len]
 
-        # Return normalized samples; denormalization is external
+        # Return normalized samples with shape [num_samples, batch, series, pred_len]
+        # Module.py will handle permuting this to [batch, num_samples, pred_len, series] for GluonTS
         return samples_pred
 
     def _encode_flow(self, time_steps, value, mask, series_indices, flow_series_emb):
         """
         Encode data for flow component, accepting pre-computed embeddings.
+        
         Input shapes:
             time_steps: [batch, time]
             value: [batch, series, time]
             mask: [batch, series, time]
             series_indices: [series] (used only if flow_series_emb is None)
             flow_series_emb: [batch, series, dim]
+            
         Output shape: [batch, series, time, embed_dim]
         """
         batch_size, num_series, num_timesteps = value.shape # Get dimensions from value tensor
@@ -555,7 +574,7 @@ class TACTiS(nn.Module):
         flow_input = torch.cat([
             value.permute(0, 2, 1).unsqueeze(-1),          # [batch, time, series, 1]
             series_emb_expanded.permute(0, 2, 1, 3),       # [batch, time, series, dim]
-            mask.permute(0, 2, 1).unsqueeze(-1).float(),  # [batch, time, series, 1]
+            mask.permute(0, 2, 1).unsqueeze(-1).float(),   # [batch, time, series, 1]
         ], dim=-1) # Shape: [batch, time, series, 1 + dim + 1]
 
         # Reshape for input encoder [batch * time * series, features]
@@ -571,45 +590,43 @@ class TACTiS(nn.Module):
         # Apply positional encoding
         # time_steps shape [batch, time] -> unsqueeze for pos encoding [batch, time, 1]
         time_tensor = time_steps.unsqueeze(-1)
-        # encoded shape [batch, time, series, embed_dim]
-        # PositionalEncoding handles broadcasting/expanding time encoding to match series dim
         pos_encoded = self.flow_time_encoding(encoded, time_tensor) # Shape: [batch, time, series, embed_dim]
-        # encoded = self.flow_pos_adjust(pos_encoded) # Adjustment layer removed
         encoded = pos_encoded # Use pos_encoded directly
 
         # Apply flow encoder (handles standard vs temporal internally now)
-        # Standard Transformer expects [batch, seq_len, embed_dim] where seq_len = time * series
-        # TemporalEncoder expects [batch, series, time, embed_dim]
         if isinstance(self.flow_encoder, nn.TransformerEncoder):
-            # Reshape for standard Transformer: [batch, time, series, embed_dim] -> [batch, time * series, embed_dim]
+            # For standard Transformer: reshape [batch, time, series, embed_dim] -> [batch, time*series, embed_dim]
             encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, embed_dim)
             encoded_out = self.flow_encoder(encoded_reshaped)
-            # Reshape back: [batch, time * series, embed_dim] -> [batch, time, series, embed_dim]
+            # Reshape back: [batch, time*series, embed_dim] -> [batch, time, series, embed_dim]
             encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, embed_dim)
         elif isinstance(self.flow_encoder, TemporalEncoder):
-            # TemporalEncoder expects [batch, series, time, embed_dim]
-            # Permute current shape [batch, time, series, embed_dim] -> [batch, series, time, embed_dim]
-            encoded_permuted = encoded.permute(0, 2, 1, 3)
-            encoded = self.flow_encoder(encoded_permuted) # Output shape: [batch, series, time, embed_dim]
-            # Permute back to [batch, time, series, embed_dim] for consistency before final permute
+            # For TemporalEncoder: permute [batch, time, series, embed_dim] -> [batch, series, time, embed_dim]
             encoded = encoded.permute(0, 2, 1, 3)
+            encoded = self.flow_encoder(encoded) # Output shape: [batch, series, time, embed_dim]
+            # No need to permute back as we'll do final permute below
         else:
             raise TypeError(f"Unexpected flow_encoder type: {type(self.flow_encoder)}")
 
-        # Final reshape and permute to [batch, series, time, dim]
-        encoded = encoded.permute(0, 2, 1, 3)
+        # Ensure final shape is [batch, series, time, dim]
+        if isinstance(self.flow_encoder, nn.TransformerEncoder):
+            # For standard Transformer: current shape is [batch, time, series, embed_dim]
+            encoded = encoded.permute(0, 2, 1, 3)
+        # For TemporalEncoder: already in [batch, series, time, embed_dim]
 
         return encoded.contiguous()
 
     def _encode_copula(self, time_steps, value, mask, series_indices, copula_series_emb):
         """
         Encode data for copula component, accepting pre-computed embeddings.
+        
         Input shapes:
             time_steps: [batch, time]
             value: [batch, series, time]
             mask: [batch, series, time]
             series_indices: [series] (used only if copula_series_emb is None)
             copula_series_emb: [batch, series, dim]
+            
         Output shape: [batch, series, time, embed_dim]
         """
         batch_size, num_series, num_timesteps = value.shape
@@ -623,7 +640,7 @@ class TACTiS(nn.Module):
         copula_input = torch.cat([
             value.permute(0, 2, 1).unsqueeze(-1),          # [batch, time, series, 1]
             series_emb_expanded.permute(0, 2, 1, 3),       # [batch, time, series, dim]
-            mask.permute(0, 2, 1).unsqueeze(-1).float(),  # [batch, time, series, 1]
+            mask.permute(0, 2, 1).unsqueeze(-1).float(),   # [batch, time, series, 1]
         ], dim=-1) # Shape: [batch, time, series, 1 + dim + 1]
 
         # Reshape for input encoder [batch * time * series, features]
@@ -639,28 +656,28 @@ class TACTiS(nn.Module):
         # Apply positional encoding
         time_tensor = time_steps.unsqueeze(-1) # [batch, time, 1]
         pos_encoded = self.copula_time_encoding(encoded, time_tensor) # Shape: [batch, time, series, embed_dim]
-        # encoded = self.copula_pos_adjust(pos_encoded) # Adjustment layer removed
         encoded = pos_encoded # Use pos_encoded directly
 
         # Apply copula encoder (handles standard vs temporal internally now)
         if isinstance(self.copula_encoder, nn.TransformerEncoder):
-            # Reshape for standard Transformer: [batch, time, series, embed_dim] -> [batch, time * series, embed_dim]
+            # For standard Transformer: reshape [batch, time, series, embed_dim] -> [batch, time*series, embed_dim]
             encoded_reshaped = encoded.reshape(batch_size, num_timesteps * num_series, embed_dim)
             encoded_out = self.copula_encoder(encoded_reshaped)
-            # Reshape back: [batch, time * series, embed_dim] -> [batch, time, series, embed_dim]
+            # Reshape back: [batch, time*series, embed_dim] -> [batch, time, series, embed_dim]
             encoded = encoded_out.reshape(batch_size, num_timesteps, num_series, embed_dim)
         elif isinstance(self.copula_encoder, TemporalEncoder):
-            # TemporalEncoder expects [batch, series, time, embed_dim]
-            # Permute current shape [batch, time, series, embed_dim] -> [batch, series, time, embed_dim]
-            encoded_permuted = encoded.permute(0, 2, 1, 3)
-            encoded = self.copula_encoder(encoded_permuted) # Output shape: [batch, series, time, embed_dim]
-            # Permute back to [batch, time, series, embed_dim] for consistency before final permute
+            # For TemporalEncoder: permute [batch, time, series, embed_dim] -> [batch, series, time, embed_dim]
             encoded = encoded.permute(0, 2, 1, 3)
+            encoded = self.copula_encoder(encoded) # Output shape: [batch, series, time, embed_dim]
+            # No need to permute back as we'll do final permute below
         else:
             raise TypeError(f"Unexpected copula_encoder type: {type(self.copula_encoder)}")
 
-        # Final reshape and permute to [batch, series, time, dim]
-        encoded = encoded.permute(0, 2, 1, 3)
+        # Ensure final shape is [batch, series, time, dim]
+        if isinstance(self.copula_encoder, nn.TransformerEncoder):
+            # For standard Transformer: current shape is [batch, time, series, embed_dim]
+            encoded = encoded.permute(0, 2, 1, 3)
+        # For TemporalEncoder: already in [batch, series, time, embed_dim]
 
         return encoded.contiguous()
 
