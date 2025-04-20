@@ -67,6 +67,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self,
         freq: str,
         prediction_length: int,
+        context_length: int,
         # --- TACTiS2 specific arguments ---
         # Passed directly to TACTiS2Model/TACTiS
         flow_series_embedding_dim: int = 5,
@@ -103,7 +104,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         gradient_clip_val_stage2: float = 1000.0,
         # General Estimator arguments
         use_lazyframe: bool = False,
-        context_length: Optional[int] = None,
         num_feat_dynamic_real: int = 0,
         num_feat_static_cat: int = 0,
         num_feat_static_real: int = 0,
@@ -119,6 +119,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
+        **kwargs,
     ) -> None:
         trainer_kwargs = {
             "max_epochs": 100,
@@ -128,9 +129,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         self.freq = freq
         self.prediction_length = prediction_length
-        self.context_length = (
-            context_length if context_length is not None else prediction_length
-        )
+        self.context_length = context_length
         
         self.use_lazyframe = use_lazyframe
         
@@ -196,6 +195,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         else:
             self.time_features = time_features
         
+        # Log any remaining kwargs
+        if kwargs:
+            logger.warning(f"TACTiS2Estimator received unused kwargs: {kwargs}")
+            
     @staticmethod
     def get_params(trial):
         """
@@ -221,15 +224,15 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
             "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
             "marginal_num_layers": trial.suggest_int("marginal_num_layers", 2, 5),
-            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 7), # Renamed from marginal_input_encoder_layers
-            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256]), # Renamed from marginal_ts_embedding_dim
+            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 7),
+            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256]),
 
             # --- Attentional Copula Encoder ---
             "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
             "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
             "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 4),
             "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 4),
-            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256]), # Renamed from copula_ts_embedding_dim
+            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256]),
 
             # --- Decoder ---
             "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),

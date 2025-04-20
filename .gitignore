@@ -36,7 +36,6 @@ pytorch_transformer_ts/tactis_2/deprecated/*
 #  before PyInstaller builds the exe, so as to inject date/other infos into it.
 *.manifest
 *.spec
-*.roomodes
 
 # Installer logs
 pip-log.txt
