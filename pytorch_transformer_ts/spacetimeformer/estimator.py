@@ -210,7 +210,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         )
     
     @staticmethod
-    def get_params(trial):
+    def get_params(trial, tuning_phase=None):
         # in paper: lr=1e-4, 3 encoder layers, 3 decoder layers, 4 heads, d_v=d_qk=30, d_model=200, d_ff=800, attn_factor=5, dropout_emb=0.2, dropout_qkv=0.0, dropout_attn_matrix=0.0, dropout_ff=0.3, dropout_attn_out=0.0
         # global_self_attn=global_cross_attn=local_self_attn=performer, activation=gelu, norm=batch, 
         # batch_size=128

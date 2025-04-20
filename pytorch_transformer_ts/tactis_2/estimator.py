@@ -197,7 +197,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             self.time_features = time_features
         
     @staticmethod
-    def get_params(trial):
+    def get_params(trial, tuning_phase=None):
         """
         Get parameters for hyperparameter tuning.
         
