@@ -34,6 +34,7 @@ class TACTiS(nn.Module):
         copula_decoder: Optional[Dict[str, Any]] = None,
         skip_copula: bool = True,
         encoder_type: str = "standard",
+        stage: int = 1,
     ):
         """
         Initialize TACTiS model components.
@@ -88,7 +89,7 @@ class TACTiS(nn.Module):
         self.encoder_type = encoder_type
 
         # Stage tracks whether to use flow only (1) or flow+copula (2)
-        self.stage = 1
+        self.stage = stage
         self.marginal_logdet = None
         self.copula_loss = None
 
@@ -107,11 +108,14 @@ class TACTiS(nn.Module):
         # Initialize model components using stored args
         self._initialize_flow_components()
 
-        # Initialize copula components if not skipping initially and args are provided
-        if not skip_copula and self.copula_decoder_args is not None:
+        # Initialize copula components if:
+        # 1. Not skipping (skip_copula is False)
+        # 2. In stage 2
+        # 3. Args are provided
+        if (not skip_copula or stage == 2) and self.copula_decoder_args is not None:
              self._initialize_copula_components()
-        elif not skip_copula and self.copula_decoder_args is None:
-             logger.warning("skip_copula is False, but copula_decoder args were not provided. Copula components not initialized.")
+        elif (not skip_copula or stage == 2) and self.copula_decoder_args is None:
+             logger.warning("Copula components requested, but copula_decoder args were not provided. Copula components not initialized.")
 
     def _initialize_flow_components(self):
         """Initialize flow-related components using stored args"""
@@ -682,7 +686,7 @@ class TACTiS(nn.Module):
         return encoded.contiguous()
 
     def set_stage(self, stage: int):
-        """Set the training stage and initialize copula components if needed."""
+        """Set the training stage."""
         assert stage in [1, 2], "Stage must be 1 or 2"
         logger.info(f"TACTiS model: Setting stage to {stage}")
         self.stage = stage
@@ -692,22 +696,14 @@ class TACTiS(nn.Module):
         if hasattr(self.decoder, 'skip_copula'):
              self.decoder.skip_copula = self.skip_copula
 
-        # Initialize copula components if switching to stage 2 and they weren't initialized before
-        # The decoder might handle its own internal initialization now
+        # We don't need to initialize components here anymore as they should already
+        # be initialized properly based on the stage parameter in __init__
+        # Just update the state in the decoder if it's stage 2
         if stage == 2:
-             # Ensure copula-specific encoders/embeddings are created if not already
-             if not hasattr(self, 'copula_series_encoder') or self.copula_series_encoder is None:
-                  logger.info("Initializing TACTiS copula encoders/embeddings for stage 2...")
-                  self._initialize_copula_components() # This will also call decoder.create_attentional_copula
-             # Or, if encoders exist but decoder's copula doesn't, create it
-             elif hasattr(self.decoder, 'copula') and self.decoder.copula is None:
-                  logger.info("Initializing decoder's attentional copula for stage 2...")
+             # Check if attentional copula exists in decoder but is disabled
+             if hasattr(self.decoder, 'copula') and self.decoder.copula is None:
+                  logger.info("Enabling attentional copula in decoder for stage 2...")
                   if hasattr(self.decoder, 'create_attentional_copula'):
-                      # Make sure decoder knows the input dim before creating copula
-                      if hasattr(self, 'copula_encoder'):
-                           self.decoder.copula_input_dim = self.copula_encoder.embedding_dim
-                           self.decoder.create_attentional_copula()
-                      else:
-                           logger.error("Cannot create attentional copula in decoder: copula_encoder not found.")
+                      self.decoder.create_attentional_copula()
                   else:
                       logger.error("Decoder has no create_attentional_copula method.")
