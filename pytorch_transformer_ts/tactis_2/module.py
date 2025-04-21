@@ -405,16 +405,33 @@ class TACTiS2Model(nn.Module):
 
     def output_params(self, network_input):
         """
-        Compute the parameters of the output distribution.
+        Compute the parameters of the output distribution or generate samples.
         
         Parameters
         ----------
-        network_input
-            Output from create_network_inputs.
+        network_input : dict
+            Output from create_network_inputs containing processed tensors including:
+            - hist_time [batch, context_length]
+            - past_target [batch, series, context_length]
+            - pred_time [batch, prediction_length]
+            - future_target [batch, series, prediction_length] (only for training)
+            - scale and loc for denormalization
             
         Returns
         -------
-        Parameters of the output distribution.
+        For training mode (when future_target is provided):
+            The computed loss from TACTiS model forward pass.
+            
+        For inference mode (when future_target is None):
+            Samples in the format expected by GluonTS SampleForecastGenerator:
+            [batch, num_samples, prediction_length, series]
+            
+        Notes
+        -----
+        The shape transformation during inference is critical for GluonTS compatibility:
+        1. TACTiS.sample returns: [num_samples, batch, series, pred_len]
+        2. This method transforms it to: [batch, num_samples, pred_len, series]
+        This transformation ensures compatibility with GluonTS forecast generators.
         """
         if network_input["future_target"] is not None:
             # Training mode - compute loss

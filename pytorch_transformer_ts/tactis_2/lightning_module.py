@@ -82,24 +82,52 @@ class TACTiS2LightningModule(pl.LightningModule):
         """
         current_epoch = self.current_epoch
         if self.stage == 1 and current_epoch >= self.stage2_start_epoch:
+            logger.info(f"Epoch {current_epoch}: Entering Stage 2 transition.")
             self.stage = 2
-            # Update optimizer parameters for stage 2
+
+            # 1. Ensure underlying model knows the stage (initializes copula components if needed)
+            if hasattr(self.model.tactis, "set_stage"):
+                self.model.tactis.set_stage(self.stage)
+                # Move newly initialized parameters to the correct device
+                self.model.tactis.to(self.device)
+                logger.info(f"Epoch {current_epoch}: Called model.tactis.set_stage(2) and moved model to {self.device}.")
+            else:
+                 logger.warning("model.tactis does not have set_stage method.")
+                 # Cannot proceed with freezing/optimizer update if stage cannot be set in model
+
+            # 2. Freeze flow/marginal parameters, unfreeze copula parameters
+            logger.info("Freezing flow/marginal parameters and unfreezing copula parameters...")
+            frozen_count = 0
+            unfrozen_count = 0
+            for name, param in self.model.tactis.named_parameters():
+                if name.startswith("flow_") or name.startswith("marginal"):
+                    param.requires_grad = False
+                    frozen_count += 1
+                elif name.startswith("copula_") or name.startswith("copula."): # Check for direct attribute 'copula' too
+                    param.requires_grad = True
+                    unfrozen_count += 1
+                else:
+                    # Default: Keep requires_grad as is, but log a warning if it's unexpected
+                    logger.debug(f"Parameter '{name}' not explicitly frozen/unfrozen.")
+
+            logger.info(f"Froze {frozen_count} flow/marginal parameters. Ensured {unfrozen_count} copula parameters are trainable.")
+
+            # 3. Update optimizer settings for the (potentially new) set of trainable parameters
             optimizer = self.optimizers()
-            # Check if optimizer is a list (e.g., with scheduler) or single instance
-            if isinstance(optimizer, list):
-                 optimizer = optimizer[0] # Assume first element is the optimizer
+            if isinstance(optimizer, list): # Handle cases with LR schedulers
+                 optimizer = optimizer[0]
 
             if optimizer:
+                 # Update LR and WD for all parameter groups.
+                 # The requires_grad=False flags will prevent updates to frozen parameters.
                  for param_group in optimizer.param_groups:
                      param_group['lr'] = self.lr_stage2
                      param_group['weight_decay'] = self.weight_decay_stage2
                  self.log_dict({"stage": 2, "learning_rate": self.lr_stage2, "weight_decay": self.weight_decay_stage2})
-                 logger.info(f"Epoch {current_epoch}: Switched to Stage 2. Updated optimizer lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}")
+                 logger.info(f"Epoch {current_epoch}: Switched to Stage 2. Updated optimizer lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}. Parameter freezing applied.")
             else:
-                 logger.warning(f"Epoch {current_epoch}: Tried to switch to Stage 2, but optimizer not found.")
+                 logger.warning(f"Epoch {current_epoch}: Tried to switch to Stage 2, but optimizer not found. Cannot update LR/WD.")
 
-            if hasattr(self.model.tactis, "set_stage"):
-                self.model.tactis.set_stage(self.stage)
             self.log("stage", self.stage, on_step=False, on_epoch=True)
                 
     def training_step(self, batch, batch_idx: int):
