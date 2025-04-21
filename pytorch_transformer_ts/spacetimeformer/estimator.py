@@ -210,21 +210,23 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         )
     
     @staticmethod
-    def get_params(trial):
+    def get_params(trial, tuning_phase=None, dynamic_kwargs=None):
         # in paper: lr=1e-4, 3 encoder layers, 3 decoder layers, 4 heads, d_v=d_qk=30, d_model=200, d_ff=800, attn_factor=5, dropout_emb=0.2, dropout_qkv=0.0, dropout_attn_matrix=0.0, dropout_ff=0.3, dropout_attn_out=0.0
         # global_self_attn=global_cross_attn=local_self_attn=performer, activation=gelu, norm=batch, 
         # batch_size=128
+        if dynamic_kwargs is None:
+            dynamic_kwargs = {}
         d_qkv = trial.suggest_categorical("d_model", [20, 30, 40])
         return {
-            "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3]),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [1, 2, 3])),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
-            "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
-            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", [3, 5, 6]),
-            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", [3, 5, 6]),
-            "d_model": trial.suggest_categorical("d_model", [100, 150, 200]),
+            "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [32, 64, 128])),
+            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [3, 5, 6])),
+            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", dynamic_kwargs.get("num_decoder_layers", [3, 5, 6])),
+            "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [100, 150, 200])),
             "d_queries_keys": d_qkv,
             "d_values": d_qkv,
-            "n_heads": trial.suggest_categorical("n_heads", [4, 6, 8])
+            "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8]))
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
         }
         
@@ -463,4 +465,4 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
 
         # return SpacetimeformerLightningModule(model=model, loss=self.loss)
         # return SpacetimeformerLightningModule(model=model)
-        return SpacetimeformerLightningModule(model=model_params)
+        return SpacetimeformerLightningModule(model_config=model_params)

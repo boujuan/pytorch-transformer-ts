@@ -32,7 +32,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         Parameters
         ----------
-        model_config
+        model
             Dictionary containing the configuration for the TACTiS2Model.
         lr_stage1
             Learning rate for stage 1 optimizer.
