@@ -367,4 +367,4 @@ class InformerEstimator(PyTorchLightningEstimator):
         )
 
         # return InformerLightningModule(model=model, loss=self.loss) CHANGE
-        return InformerLightningModule(model=model_params)
+        return InformerLightningModule(model_config=model_params)

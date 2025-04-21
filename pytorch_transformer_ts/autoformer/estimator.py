@@ -350,4 +350,4 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         )
 
         # return AutoformerLightningModule(model=model, loss=self.loss)
-        return AutoformerLightningModule(model=model_params)
+        return AutoformerLightningModule(model_config=model_params)

@@ -10,19 +10,19 @@ from pytorch_transformer_ts.autoformer.module import AutoformerModel
 class AutoformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: dict,
+        model_config: dict,
         # loss: DistributionLoss = NegativeLogLikelihood(),
         lr: float = 1e-4,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
-        if isinstance(model, dict):
-            self.model = AutoformerModel(**model)
-            self.save_hyperparameters()
-        else:
-            self.model = model
-            self.save_hyperparameters(ignore=["model"])
+        # if isinstance(model_config, dict):
+        self.model = AutoformerModel(**model_config)
+        self.save_hyperparameters()
+        # else:
+        #     self.model = model
+        #     self.save_hyperparameters(ignore=["model"])
         # self.loss = loss
         self.lr = lr
         self.weight_decay = weight_decay

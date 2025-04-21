@@ -465,4 +465,4 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
 
         # return SpacetimeformerLightningModule(model=model, loss=self.loss)
         # return SpacetimeformerLightningModule(model=model)
-        return SpacetimeformerLightningModule(model=model_params)
+        return SpacetimeformerLightningModule(model_config=model_params)

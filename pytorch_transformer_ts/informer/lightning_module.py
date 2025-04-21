@@ -11,19 +11,19 @@ from pytorch_transformer_ts.informer.module import InformerModel
 class InformerLightningModule(pl.LightningModule):
     def __init__(
         self,
-        model: dict,
+        model_config: dict,
         # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         lr: float = 1e-4,
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
         
-        if isinstance(model, dict):
-            self.model = InformerModel(**model)
-            self.save_hyperparameters()
-        else:
-            self.model = model
-            self.save_hyperparameters(ignore=["model"])
+        # if isinstance(model_config, dict):
+        self.model = InformerModel(**model_config)
+        self.save_hyperparameters()
+        # else:
+        #     self.model = model
+        #     self.save_hyperparameters(ignore=["model"])
         # self.loss = loss CHANGE
         self.lr = lr
         self.weight_decay = weight_decay
