@@ -296,9 +296,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         # This helps with numerical stability by preventing extreme gradient values
         self.automatic_optimization = False
         
-        # Check for scheduler configuration in hparams
-        trainer_kwargs = getattr(self.hparams, 'trainer_kwargs', {})
-        scheduler_config = trainer_kwargs.get('scheduler') if trainer_kwargs else None
+        # Access the top-level config directly from hparams
+        scheduler_config = self.hparams.get('scheduler_config')
         
         if scheduler_config and isinstance(scheduler_config, dict) and 'class_path' in scheduler_config:
             try:
@@ -337,7 +336,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                 logger.error(f"Error configuring scheduler: {e}", exc_info=True)
                 return optimizer
         else:
-            logger.info("No valid LR scheduler configuration found in trainer_kwargs.")
+            logger.info("No valid scheduler configuration found at top level hparams ('scheduler_config').")
             return optimizer
     
     def forward(
