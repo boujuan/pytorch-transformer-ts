@@ -137,17 +137,20 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         )
     
     @staticmethod
-    def get_params(trial):
+    def get_params(trial, tuning_phase=None, dynamic_kwargs=None):
         """ generate dictionary of tunable parameters compatible with optuna"""
         # in paper: 2 encoder layers and 1 decoder layer. batch_size=32, init_lr=1e-4, early stopping with 10 epchs, dmodel=512, d_ff=2048
+        if dynamic_kwargs is None:
+            dynamic_kwargs = {}
+            
         return {
-            "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3]),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [1, 2, 3])),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
-            "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128]),
-            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", [2, 3, 4]),
-            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", [1, 2, 3]),
-            "d_model": trial.suggest_categorical("d_model", [128, 256, 512]),
-            "n_heads": trial.suggest_categorical("n_heads", [4, 6, 8])
+            "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [32, 64, 128])),
+            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [2, 3, 4])),
+            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", dynamic_kwargs.get("num_decoder_layers", [1, 2, 3])),
+            "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [128, 256, 512])),
+            "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8]))
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
         }
 
@@ -347,4 +350,4 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         )
 
         # return AutoformerLightningModule(model=model, loss=self.loss)
-        return AutoformerLightningModule(model=model_params)
+        return AutoformerLightningModule(model_config=model_params)

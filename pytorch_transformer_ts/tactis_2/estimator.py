@@ -200,7 +200,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             logger.warning(f"TACTiS2Estimator received unused kwargs: {kwargs}")
             
     @staticmethod
-    def get_params(trial):
+    def get_params(trial, tuning_phase=None, dynamic_kwargs=None):
         """
         Get parameters for hyperparameter tuning.
         
@@ -215,45 +215,47 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         -------
         Dict of parameter values.
         """
+        if dynamic_kwargs is None:
+            dynamic_kwargs = {}
         params = {
             # --- General ---
-            "context_length_factor": trial.suggest_categorical("context_length_factor", [1, 2, 3, 4]),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [1, 2, 3, 4])),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
 
             # --- Marginal CDF Encoder ---
-            "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
+            "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
             "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
             "marginal_num_layers": trial.suggest_int("marginal_num_layers", 2, 5),
-            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 7),
-            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256]),
+            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 7), # Renamed from marginal_input_encoder_layers
+            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", dynamic_kwargs.get("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256])), # Renamed from marginal_ts_embedding_dim
 
             # --- Attentional Copula Encoder ---
-            "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256]),
+            "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
             "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
             "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 4),
             "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 4),
-            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256]),
+            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])), # Renamed from copula_ts_embedding_dim
 
             # --- Decoder ---
             "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
-            "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512]),
+            "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", dynamic_kwargs.get("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512])),
             "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
-            "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256]),
+            "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", dynamic_kwargs.get("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256])),
             "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
-            "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", [8, 16, 32, 48, 64, 128, 256]),
+            "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", dynamic_kwargs.get("decoder_transformer_embedding_dim_per_head", [8, 16, 32, 48, 64, 128, 256])),
             "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 7),
-            "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", [20, 50, 100, 200]), # Corresponds to AttentionalCopula resolution
+            "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [20, 50, 100, 200])), # Corresponds to AttentionalCopula resolution
 
             # --- Optimizer Params ---
             "lr_stage1": trial.suggest_float("lr_stage1", 1e-4, 5e-3, log=True),
             "lr_stage2": trial.suggest_float("lr_stage2", 1e-4, 5e-3, log=True),
-            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", [0.0, 1e-5, 1e-4, 1e-3]),
-            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3]),
+            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-5, 1e-4, 1e-3])),
+            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3])),
 
             # --- Dropout & Clipping ---
             "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.3),
-            "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", [0.0, 1000.0, 10000.0]),
-            "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", [0.0, 1000.0, 10000.0]),
+            "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0.0, 1000.0, 10000.0])),
+            "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0.0, 1000.0, 10000.0])),
 
         }
         return params

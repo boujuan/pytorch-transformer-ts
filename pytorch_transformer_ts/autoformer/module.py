@@ -866,7 +866,9 @@ class AutoformerModel(nn.Module):
         sliced_params = params
         if trailing_n is not None:
             sliced_params = [p[:, -trailing_n:] for p in params]
-        return self.distr_output.loss(target=future_target, distr_args=sliced_params, loc=loc, scale=scale)
+        return self.distr_output.loss(target=future_target, 
+                                      distr_args=tuple(x.double() for x in sliced_params), 
+                                      loc=loc, scale=scale)
 
     @torch.jit.ignore
     def output_distribution(
