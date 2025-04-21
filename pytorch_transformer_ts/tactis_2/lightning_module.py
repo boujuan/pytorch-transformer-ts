@@ -1,10 +1,8 @@
 # Use the newer namespace consistent with Lightning > v2.0
 import logging
-import importlib
 import lightning.pytorch as pl
 import torch
 from gluonts.torch.util import weighted_average
-# from torch.optim.lr_scheduler import ReduceLROnPlateau, CosineAnnealingLR, StepLR
 # from gluonts.dataset.field_names import FieldName
 
 from .module import TACTiS2Model
@@ -278,7 +276,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         Returns
         -------
-        The optimizer to use, and the scheduler configuration.
+        The optimizer to use.
         """
         # Initialize optimizer with parameters for the current stage
         current_lr = self.lr_stage1 if self.stage == 1 else self.lr_stage2
@@ -296,48 +294,19 @@ class TACTiS2LightningModule(pl.LightningModule):
         # This helps with numerical stability by preventing extreme gradient values
         self.automatic_optimization = False
         
-        # Access the top-level config directly from hparams
-        scheduler_config = self.hparams.get('scheduler_config')
+        # Can add learning rate scheduler here if needed
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        #     optimizer, mode="min", factor=0.5, patience=10
+        # )
+        # return {
+        #     "optimizer": optimizer,
+        #     "lr_scheduler": {
+        #         "scheduler": scheduler,
+        #         "monitor": "val_loss",
+        #     },
+        # }
         
-        if scheduler_config and isinstance(scheduler_config, dict) and 'class_path' in scheduler_config:
-            try:
-                module_path, class_name = scheduler_config['class_path'].rsplit('.', 1)
-                SchedulerClass = getattr(importlib.import_module(module_path), class_name)
-                
-                init_args = scheduler_config.get('init_args', {})
-                interval = scheduler_config.get('interval', 'epoch')
-                frequency = scheduler_config.get('frequency', 1)
-                monitor = scheduler_config.get('monitor', 'val_loss')
-                strict = scheduler_config.get('strict', True)
-                name = scheduler_config.get('name', None)
-                
-                scheduler = SchedulerClass(optimizer, **init_args)
-                logger.info(f"Configured LR Scheduler: {class_name} with args: {init_args}")
-                
-                lr_scheduler_config = {
-                    "scheduler": scheduler,
-                    "interval": interval,
-                    "frequency": frequency,
-                    "strict": strict
-                }
-                
-                if monitor:
-                    lr_scheduler_config["monitor"] = monitor
-                
-                if name:
-                    lr_scheduler_config["name"] = name
-                
-                return [optimizer], [lr_scheduler_config]
-                
-            except ImportError:
-                logger.error(f"Could not import scheduler class: {scheduler_config['class_path']}", exc_info=True)
-                return optimizer
-            except Exception as e:
-                logger.error(f"Error configuring scheduler: {e}", exc_info=True)
-                return optimizer
-        else:
-            logger.info("No valid scheduler configuration found at top level hparams ('scheduler_config').")
-            return optimizer
+        return optimizer
     
     def forward(
         self,
