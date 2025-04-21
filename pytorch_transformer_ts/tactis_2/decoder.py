@@ -108,6 +108,11 @@ class CopulaDecoder(nn.Module):
              self.attentional_copula_args["input_dim"] = self.copula_input_dim
 
         self.copula = AttentionalCopula(**self.attentional_copula_args)
+        # Get device from marginal parameters and move copula to the same device
+        device = next(self.marginal.parameters()).device
+        logger.info(f"Moving AttentionalCopula to device: {device}")
+        self.copula = self.copula.to(device)
+        logger.info("AttentionalCopula moved to device.")
         self.skip_copula = False # Ensure flag is set correctly
         logger.debug(f"Initialized AttentionalCopula in CopulaDecoder with input_dim={self.copula_input_dim}")
 

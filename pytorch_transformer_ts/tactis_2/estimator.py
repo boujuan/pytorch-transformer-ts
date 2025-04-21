@@ -200,7 +200,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             logger.warning(f"TACTiS2Estimator received unused kwargs: {kwargs}")
             
     @staticmethod
-    def get_params(trial, tuning_phase=None, dynamic_kwargs=None):
+    def get_params(trial, tuning_phase: int = 0, dynamic_kwargs: Optional[Dict[str, Any]] = None):
         """
         Get parameters for hyperparameter tuning.
         
@@ -208,15 +208,21 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         ----------
         trial
             Optuna trial object.
-        context_length_choices
-            List of possible context lengths.
+        tuning_phase
+            The current phase of tuning (default: 0).
+        dynamic_kwargs
+            Optional dictionary of dynamic keyword arguments.
         
         Returns
         -------
         Dict of parameter values.
         """
-        if dynamic_kwargs is None:
-            dynamic_kwargs = {}
+        # Optional logging
+        logger.debug(f"get_params called with tuning_phase={tuning_phase}, dynamic_kwargs={dynamic_kwargs}")
+        if dynamic_kwargs and 'resample_freq' in dynamic_kwargs:
+            logger.debug(f"Available resample frequencies: {dynamic_kwargs['resample_freq']}")
+            # Could potentially use dynamic_kwargs['resample_freq'] to adjust search space
+            
         params = {
             # --- General ---
             "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [1, 2, 3, 4])),

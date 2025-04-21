@@ -65,6 +65,7 @@ class TACTiS2Model(nn.Module):
         scaling: Optional[str] = "std", # Note: TACTiS handles internal scaling/normalization
         lags_seq: Optional[List[int]] = None,
         num_parallel_samples: int = 100,
+        stage: int = 1,  # Add stage parameter with default value 1
     ) -> None:
         """
         Initialize the TACTiS2Model.
@@ -239,6 +240,7 @@ class TACTiS2Model(nn.Module):
             copula_temporal_encoder=copula_temporal_encoder_args, # Using copula_encoder args for now
             copula_decoder=copula_decoder_args,
             encoder_type=encoder_type,
+            stage=stage,  # Pass the stage parameter to TACTiS
         )
     
     @property
