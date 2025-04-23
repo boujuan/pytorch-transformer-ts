@@ -67,6 +67,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self,
         freq: str,
         prediction_length: int,
+        context_length: int,
         # --- TACTiS2 specific arguments ---
         # Passed directly to TACTiS2Model/TACTiS
         flow_series_embedding_dim: int = 5,
@@ -103,7 +104,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         gradient_clip_val_stage2: float = 1000.0,
         # General Estimator arguments
         use_lazyframe: bool = False,
-        context_length: Optional[int] = None,
         num_feat_dynamic_real: int = 0,
         num_feat_static_cat: int = 0,
         num_feat_static_real: int = 0,
@@ -119,6 +119,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
+        **kwargs,
     ) -> None:
         trainer_kwargs = {
             "max_epochs": 100,
@@ -128,9 +129,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         self.freq = freq
         self.prediction_length = prediction_length
-        self.context_length = (
-            context_length if context_length is not None else prediction_length
-        )
+        self.context_length = context_length
         
         self.use_lazyframe = use_lazyframe
         
@@ -196,6 +195,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         else:
             self.time_features = time_features
         
+        # Log any remaining kwargs
+        if kwargs:
+            logger.warning(f"TACTiS2Estimator received unused kwargs: {kwargs}")
+            
     @staticmethod
     def get_params(trial, tuning_phase=None, dynamic_kwargs=None):
         """

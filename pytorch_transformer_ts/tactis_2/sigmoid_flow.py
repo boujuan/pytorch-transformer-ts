@@ -6,6 +6,28 @@ from torch import nn
 # Constants
 EPSILON = 1e-6
 
+# Helper functions from original flow.py for numerical stability
+def log_sum_exp(A, dim=-1, keepdim=False):
+    """
+    Compute a sum in logarithm space: log(exp(a) + exp(b))
+    Properly handle values which exponential cannot be represented in float32.
+    """
+    max_A = A.max(axis=dim, keepdim=True).values
+    norm_A = A - max_A
+    result = torch.log(torch.exp(norm_A).sum(axis=dim, keepdim=True)) + max_A
+    if keepdim:
+        return result
+    else:
+        return torch.squeeze(result, dim=dim)
+
+def log_sigmoid(x):
+    """
+    Logarithm of the sigmoid function.
+    Substract the epsilon to avoid 0 as a possible value for large x.
+    """
+    return -nn.functional.softplus(-x) - EPSILON
+
+
 # Set up logging
 logger = logging.getLogger(__name__)
 
@@ -40,23 +62,20 @@ class SigmoidFlow(nn.Module):
         # Compute weighted sum
         x_pre = (w * sigm).sum(dim=-1)
 
-        # Compute log jacobian with numerical stability
-        # (1-sigm) can be close to 0 for large pre_sigm values
-        logj = (w * sigm * (1 - sigm) * a).sum(dim=-1)
-        # Add epsilon to prevent log of zero
-        logj = torch.clamp(logj, min=EPSILON)
+        # Compute log jacobian using original stable method
+        # logj shape: [b, v, h] or [b, n, h] etc.
+        logj_per_hidden = (
+            nn.functional.log_softmax(params[..., 2*self.hidden_dim:], dim=-1) # log(w)
+            + log_sigmoid(pre_sigm)                                            # log(sigmoid(ax+b))
+            + log_sigmoid(-pre_sigm)                                           # log(1-sigmoid(ax+b))
+            + torch.log(a)                                                     # log(a)
+        )
 
-        # Remove the dimension mismatch fix section (lines 50-55)
+        # logj shape: [b, v] or [b, n] etc. (summed over hidden dim h)
+        logj = log_sum_exp(logj_per_hidden, dim=-1, keepdim=False)
 
-        # Add log jacobian with checks for NaN
-        log_logj = torch.log(logj) # logj shape is likely [batch, series, time] or similar
-        if torch.isnan(log_logj).any():
-            logger.warning("NaN detected in log_logj, replacing with log(EPSILON)")
-            # Replace NaNs with a large negative number (log of EPSILON)
-            log_logj = torch.nan_to_num(log_logj, nan=math.log(EPSILON))
-
-        # Sum log_logj over all non-batch dimensions before adding to logdet (which has shape [batch])
-        logdet = logdet + log_logj.sum(dim=tuple(range(1, log_logj.dim())))
+        # Sum logj over all non-batch dimensions before adding to logdet (which has shape [batch])
+        logdet = logdet + logj.sum(dim=tuple(range(1, logj.dim())))
 
         # Check for NaNs in logdet
         if torch.isnan(logdet).any():
@@ -68,12 +87,12 @@ class SigmoidFlow(nn.Module):
             return x_pre, logdet
 
         # Apply logit transform with numerical stability
-        x_pre_clipped = torch.clamp(x_pre, min=EPSILON, max=1.0-EPSILON)
+        x_pre_clipped = x_pre * (1 - EPSILON) + EPSILON * 0.5
         xnew = torch.log(x_pre_clipped) - torch.log(1 - x_pre_clipped)
 
         # Update logdet to account for logit transform
-        logdet_logit = torch.log(x_pre_clipped) + torch.log(1 - x_pre_clipped)
-        logdet = logdet - logdet_logit.sum(dim=tuple(range(1, logdet_logit.dim())))
+        logdet_ = logj + math.log(1 - EPSILON) - (torch.log(x_pre_clipped) + torch.log(1 - x_pre_clipped))
+        logdet = logdet_.sum(dim=tuple(range(1, logdet_.dim()))) + logdet
 
         # Final NaN check
         if torch.isnan(xnew).any() or torch.isnan(logdet).any():
