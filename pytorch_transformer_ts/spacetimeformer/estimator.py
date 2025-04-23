@@ -216,7 +216,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         # batch_size=128
         if dynamic_kwargs is None:
             dynamic_kwargs = {}
-        d_qkv = trial.suggest_categorical("d_model", [20, 30, 40])
+        d_qkv = trial.suggest_categorical("d_qkv", [20, 30, 40])
         return {
             "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [1, 2, 3])),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
