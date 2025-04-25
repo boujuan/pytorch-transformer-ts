@@ -53,7 +53,9 @@ class TACTiS2LightningModule(pl.LightningModule):
         """
         super().__init__()
         # Instantiate the model internally using the provided config
-        self.model = TACTiS2Model(**model_config)
+        # Include the stage parameter from hyperparameters
+        model_config_with_stage = {**model_config, 'stage': stage}
+        self.model = TACTiS2Model(**model_config_with_stage)
         # Save hyperparameters, including the model_config
         self.save_hyperparameters()
         # Store stage-specific optimizer parameters
@@ -85,12 +87,11 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.info(f"Epoch {current_epoch}: Entering Stage 2 transition.")
             self.stage = 2
 
-            # 1. Ensure underlying model knows the stage (initializes copula components if needed)
+            # Update the stage in the model - this no longer initializes components
+            # but just updates the flags and enables already initialized components
             if hasattr(self.model.tactis, "set_stage"):
                 self.model.tactis.set_stage(self.stage)
-                # Move newly initialized parameters to the correct device
-                self.model.tactis.to(self.device)
-                logger.info(f"Epoch {current_epoch}: Called model.tactis.set_stage(2) and moved model to {self.device}.")
+                logger.info(f"Epoch {current_epoch}: Called model.tactis.set_stage(2)")
             else:
                  logger.warning("model.tactis does not have set_stage method.")
                  # Cannot proceed with freezing/optimizer update if stage cannot be set in model

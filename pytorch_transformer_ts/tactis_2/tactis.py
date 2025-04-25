@@ -34,6 +34,7 @@ class TACTiS(nn.Module):
         copula_decoder: Optional[Dict[str, Any]] = None,
         skip_copula: bool = True,
         encoder_type: str = "standard",
+        stage: int = 1,
     ):
         """
         Initialize TACTiS model components.
@@ -88,7 +89,7 @@ class TACTiS(nn.Module):
         self.encoder_type = encoder_type
 
         # Stage tracks whether to use flow only (1) or flow+copula (2)
-        self.stage = 1
+        self.stage = stage
         self.marginal_logdet = None
         self.copula_loss = None
 
@@ -107,11 +108,14 @@ class TACTiS(nn.Module):
         # Initialize model components using stored args
         self._initialize_flow_components()
 
-        # Initialize copula components if not skipping initially and args are provided
-        if not skip_copula and self.copula_decoder_args is not None:
+        # Initialize copula components if:
+        # 1. Not skipping (skip_copula is False)
+        # 2. In stage 2
+        # 3. Args are provided
+        if (not skip_copula or stage == 2) and self.copula_decoder_args is not None:
              self._initialize_copula_components()
-        elif not skip_copula and self.copula_decoder_args is None:
-             logger.warning("skip_copula is False, but copula_decoder args were not provided. Copula components not initialized.")
+        elif (not skip_copula or stage == 2) and self.copula_decoder_args is None:
+             logger.warning("Copula components requested, but copula_decoder args were not provided. Copula components not initialized.")
 
     def _initialize_flow_components(self):
         """Initialize flow-related components using stored args"""
@@ -221,8 +225,13 @@ class TACTiS(nn.Module):
              logger.error("Cannot initialize copula components: attentional_copula args missing.")
              return
 
+        # Determine device from an existing parameter
+        device = self.flow_series_encoder.weight.device
+        logger.debug(f"Initializing copula components on device: {device}")
+
         # Series encoder
-        self.copula_series_encoder = nn.Embedding(self.num_series, self.copula_series_embedding_dim)
+        copula_series_encoder_instance = nn.Embedding(self.num_series, self.copula_series_embedding_dim)
+        self.copula_series_encoder = copula_series_encoder_instance.to(device)
 
         # Input encoder
         copula_d_model = self.copula_encoder_args["d_model"]
@@ -233,15 +242,17 @@ class TACTiS(nn.Module):
         if self.copula_input_encoder_layers > 1:
              copula_encoder_layers_list[-2] = nn.Linear(copula_d_model, copula_d_model)
              copula_encoder_layers_list.pop()
-        self.copula_input_encoder = nn.Sequential(*copula_encoder_layers_list)
+        copula_input_encoder_instance = nn.Sequential(*copula_encoder_layers_list)
+        self.copula_input_encoder = copula_input_encoder_instance.to(device)
         logger.debug(f"Initialized copula_input_encoder with {self.copula_input_encoder_layers} layers, input_dim={copula_input_dim}, output_dim={copula_d_model}")
 
         # Positional encoding
-        self.copula_time_encoding = PositionalEncoding(
+        copula_time_encoding_instance = PositionalEncoding(
              embedding_dim=copula_d_model,
              dropout=self.positional_encoding_args.get("dropout", 0.1),
              max_len=self.positional_encoding_args.get("max_len", 5000)
         )
+        self.copula_time_encoding = copula_time_encoding_instance.to(device)
         logger.debug(f"Initialized copula_time_encoding with embedding_dim={copula_d_model}")
         self.copula_pos_adjust = nn.Identity() # Keep identity for consistency
 
@@ -251,7 +262,7 @@ class TACTiS(nn.Module):
 
         if self.encoder_type == "standard":
             logger.debug(f"Initializing standard copula_encoder (Transformer)")
-            self.copula_encoder = nn.TransformerEncoder(
+            copula_encoder_instance = nn.TransformerEncoder(
                 encoder_layer=nn.TransformerEncoderLayer(
                     d_model=copula_d_model,
                     nhead=self.copula_encoder_args["nhead"],
@@ -261,29 +272,43 @@ class TACTiS(nn.Module):
                 ),
                 num_layers=self.copula_encoder_args["num_encoder_layers"]
             )
+            self.copula_encoder = copula_encoder_instance.to(device)
         elif self.encoder_type == "temporal":
             logger.debug(f"Initializing temporal copula_encoder")
-            self.copula_encoder = TemporalEncoder(
+            copula_encoder_instance = TemporalEncoder(
                 d_model=copula_d_model,
                 nhead=self.copula_temporal_encoder_args["nhead"],
                 num_encoder_layers=self.copula_temporal_encoder_args["num_encoder_layers"],
                 dim_feedforward=self.copula_temporal_encoder_args.get("dim_feedforward", copula_d_model * 4),
                 dropout=self.copula_temporal_encoder_args.get("dropout", 0.1),
             )
+            self.copula_encoder = copula_encoder_instance.to(device)
         else:
             raise ValueError(f"Unknown encoder_type for copula: {self.encoder_type}")
 
-        # Initialize Attentional Copula within the Decoder
+        # Initialize Attentional Copula within the Decoder *after* other components are on device
         # The decoder's __init__ handles creating the AttentionalCopula instance
         # We just need to ensure the decoder itself is updated if needed
         if hasattr(self.decoder, 'create_attentional_copula'):
              # Update decoder's internal state and potentially create the copula instance
              self.decoder.copula_input_dim = copula_d_model # Ensure decoder knows the dim
              self.decoder.attentional_copula_args = self.copula_decoder_args["attentional_copula"]
-             self.decoder.create_attentional_copula()
+             self.decoder.create_attentional_copula() # This method should handle device placement internally if needed, or rely on the decoder being on the correct device.
              logger.debug("Called decoder.create_attentional_copula()")
         else:
              logger.error("Decoder object does not have create_attentional_copula method.")
+
+        # Add debugging log to check parameter registration
+        logger.debug("Checking parameters within TACTiS after copula initialization:")
+        found_copula_params = False
+        # Use self.named_parameters() which should include parameters from all submodules
+        for name, param in self.named_parameters():
+            # Check prefixes for copula components directly under self or within the decoder
+            if name.startswith("copula_") or name.startswith("decoder.copula"):
+                logger.debug(f"  Found registered copula parameter: {name} on device {param.device}")
+                found_copula_params = True
+        if not found_copula_params:
+            logger.warning("  No parameters starting with 'copula_' or 'decoder.copula' found registered within TACTiS module after initialization!")
 
     @staticmethod
     def _apply_bagging(
@@ -682,7 +707,7 @@ class TACTiS(nn.Module):
         return encoded.contiguous()
 
     def set_stage(self, stage: int):
-        """Set the training stage and initialize copula components if needed."""
+        """Set the training stage."""
         assert stage in [1, 2], "Stage must be 1 or 2"
         logger.info(f"TACTiS model: Setting stage to {stage}")
         self.stage = stage
@@ -692,22 +717,10 @@ class TACTiS(nn.Module):
         if hasattr(self.decoder, 'skip_copula'):
              self.decoder.skip_copula = self.skip_copula
 
-        # Initialize copula components if switching to stage 2 and they weren't initialized before
-        # The decoder might handle its own internal initialization now
+        # We don't need to initialize components here anymore as they should already
+        # be initialized properly based on the stage parameter in __init__
+        # Just update the state in the decoder if it's stage 2
         if stage == 2:
-             # Ensure copula-specific encoders/embeddings are created if not already
-             if not hasattr(self, 'copula_series_encoder') or self.copula_series_encoder is None:
-                  logger.info("Initializing TACTiS copula encoders/embeddings for stage 2...")
-                  self._initialize_copula_components() # This will also call decoder.create_attentional_copula
-             # Or, if encoders exist but decoder's copula doesn't, create it
-             elif hasattr(self.decoder, 'copula') and self.decoder.copula is None:
-                  logger.info("Initializing decoder's attentional copula for stage 2...")
-                  if hasattr(self.decoder, 'create_attentional_copula'):
-                      # Make sure decoder knows the input dim before creating copula
-                      if hasattr(self, 'copula_encoder'):
-                           self.decoder.copula_input_dim = self.copula_encoder.embedding_dim
-                           self.decoder.create_attentional_copula()
-                      else:
-                           logger.error("Cannot create attentional copula in decoder: copula_encoder not found.")
-                  else:
-                      logger.error("Decoder has no create_attentional_copula method.")
+             # Ensure copula components are initialized when moving to stage 2
+             logger.info("Ensuring all copula components are initialized for Stage 2...")
+             self._initialize_copula_components()
