@@ -227,7 +227,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             
         params = {
             # --- General ---
-            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [1, 2, 3, 4])),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
 
             # --- Marginal CDF Encoder ---
