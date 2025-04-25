@@ -376,7 +376,7 @@ class AutoCorrelation(nn.Module):
         channel = values.shape[2]
         length = values.shape[3]
         # find top k
-        top_k = int(self.factor * math.log(length))
+        top_k = max(int(self.factor * math.log(length)), 1)
         mean_value = torch.mean(torch.mean(corr, dim=1), dim=1)
         _, index = torch.topk(torch.mean(mean_value, dim=0), top_k, dim=-1)
         weights = torch.stack([mean_value[:, index[i]] for i in range(top_k)], dim=-1)

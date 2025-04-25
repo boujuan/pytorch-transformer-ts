@@ -154,7 +154,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             dynamic_kwargs = {}
         if tuning_phase == 1:
             return {
-                "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [1, 2, 3])),
+                "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
                 # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
                 "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [32, 64, 128])),
                 "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [2, 3, 4])),
