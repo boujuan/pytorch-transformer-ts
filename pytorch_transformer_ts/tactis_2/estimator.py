@@ -217,6 +217,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         -------
         Dict of parameter values.
         """
+        if dynamic_kwargs is None:
+            dynamic_kwargs = {}
         # Optional logging
         logger.debug(f"get_params called with tuning_phase={tuning_phase}, dynamic_kwargs={dynamic_kwargs}")
         if dynamic_kwargs and 'resample_freq' in dynamic_kwargs:
