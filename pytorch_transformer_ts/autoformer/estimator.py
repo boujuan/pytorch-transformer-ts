@@ -149,6 +149,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [32, 64, 128])),
             "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [2, 3, 4])),
             "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", dynamic_kwargs.get("num_decoder_layers", [1, 2, 3])),
+            "dim_feedforward": trial.suggest_categorical("dim_feedforward", dynamic_kwargs.get("dim_feedforward", [512, 1028, 2048])),
             # "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [128, 256, 512])),
             "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8]))
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
