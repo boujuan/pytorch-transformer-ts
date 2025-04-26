@@ -213,7 +213,7 @@ class CopulaDecoder(nn.Module):
 
         # Return the two loss components per batch item
         # BUGFIX @boujuan possible fix to "The size of tensor a (128) must match the size of tensor b (5280) at non-singleton dimension 1" bug 
-        return marginal_logdet_batch.sum(dim=1), copula_loss_batch
+        return marginal_logdet_batch, copula_loss_batch
 
 
     def sample(
