@@ -119,6 +119,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
+        ac_mlp_layers: int = 2,
+        ac_activation_function: str = "relu",
         **kwargs,
     ) -> None:
         trainer_kwargs = {
@@ -167,6 +169,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.dropout_rate = dropout_rate
         self.gradient_clip_val_stage1 = gradient_clip_val_stage1
         self.gradient_clip_val_stage2 = gradient_clip_val_stage2
+        self.ac_mlp_layers = ac_mlp_layers
+        self.ac_activation_function = ac_activation_function
 
         # Common parameters
         self.input_size = input_size
@@ -265,6 +269,17 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 10.0])), # INFO @boujuan changed from 0.0,1000.0,10000.0
             "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 10.0])), # INFO @boujuan changed from 0.0,1000.0,10000.0
 
+            # --- INFO @boujuan 26/4/25 Additional Hyperparameters ---
+            # Loss normalization strategy
+            "loss_normalization": trial.suggest_categorical("loss_normalization", ["none", "series", "timesteps", "both"]),
+            
+            # AttentionalCopula hyperparameters
+            "ac_mlp_layers": trial.suggest_int("ac_mlp_layers", 1, 4),  # MLP layers for AttentionalCopula
+            "ac_activation_function": trial.suggest_categorical("ac_activation_function", ["relu", "gelu", "swish", "mish"]),  # Activation function for AttentionalCopula
+            
+            # Training configuration
+            "bagging_size": trial.suggest_categorical("bagging_size", [None, 64, 128, 256]),  # Bagging ensemble size
+            "stage2_start_epoch": trial.suggest_categorical("stage2_start_epoch", [5, 10, 15, 20]),  # When to switch to stage 2 training
         }
         return params
     
@@ -526,6 +541,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "loss_normalization": self.loss_normalization,
             "encoder_type": self.encoder_type, # Pass encoder type
             "dropout_rate": self.dropout_rate, # Pass dropout rate
+            "ac_mlp_layers": self.ac_mlp_layers, # Pass attentional copula MLP layers
+            "ac_activation_function": self.ac_activation_function, # Pass attentional copula activation function
             # GluonTS compatability parameters
             "cardinality": self.cardinality,
             "num_feat_dynamic_real": self.num_feat_dynamic_real,
