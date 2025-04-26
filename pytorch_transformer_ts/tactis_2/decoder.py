@@ -212,7 +212,6 @@ class CopulaDecoder(nn.Module):
         self.copula_loss_val = copula_loss_batch # Store for potential logging
 
         # Return the two loss components per batch item
-        # BUGFIX @boujuan possible fix to "The size of tensor a (128) must match the size of tensor b (5280) at non-singleton dimension 1" bug 
         return marginal_logdet_batch, copula_loss_batch
 
 
