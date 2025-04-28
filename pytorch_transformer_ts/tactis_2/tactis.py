@@ -587,8 +587,9 @@ class TACTiS(nn.Module):
             
         Output shape: [batch, series, time, embed_dim]
         """
+        # TODO JUAN dim of value is (n_turbines, 2, 30), of time_steps is (n_tubines, 50)
         batch_size, num_series, num_timesteps = value.shape # Get dimensions from value tensor
-        device = time_steps.device
+        # device = time_steps.device
 
         # flow_series_emb is now passed in, shape [batch, series, dim]
         # Expand series embedding to match time dimension

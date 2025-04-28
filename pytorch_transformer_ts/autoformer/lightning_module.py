@@ -16,7 +16,6 @@ class AutoformerLightningModule(pl.LightningModule):
         weight_decay: float = 1e-8,
     ) -> None:
         super().__init__()
-        self.save_hyperparameters()
         # if isinstance(model_config, dict):
         self.model = AutoformerModel(**model_config)
         self.save_hyperparameters()
