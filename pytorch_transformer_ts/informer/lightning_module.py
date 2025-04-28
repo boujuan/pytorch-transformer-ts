@@ -14,13 +14,13 @@ class InformerLightningModule(pl.LightningModule):
         model_config: dict,
         # loss: DistributionLoss = NegativeLogLikelihood(), CHANGE
         lr: float = 1e-4,
-        weight_decay: float = 1e-8,
+        weight_decay: float = 1e-8
     ) -> None:
         super().__init__()
         
         # if isinstance(model_config, dict):
         self.model = InformerModel(**model_config)
-        self.save_hyperparameters()
+        self.save_hyperparameters("model_config", "lr", "weight_decay")
         # else:
         #     self.model = model
         #     self.save_hyperparameters(ignore=["model"])

@@ -13,12 +13,11 @@ class SpacetimeformerLightningModule(pl.LightningModule):
         model_config: dict, # CHANGE
         # loss: DistributionLoss = NegativeLogLikelihood(),
         lr: float = 1e-4,
-        weight_decay: float = 1e-8,
+        weight_decay: float = 1e-8
     ) -> None:
         super().__init__()
-        self.save_hyperparameters()
         self.model = SpacetimeformerModel(**model_config)
-        self.save_hyperparameters()
+        self.save_hyperparameters("model_config", "lr", "weight_decay")
         # self.loss = loss
         self.lr = lr
         self.weight_decay = weight_decay
