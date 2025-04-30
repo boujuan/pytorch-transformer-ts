@@ -877,7 +877,7 @@ class AutoformerModel(nn.Module):
         sliced_params = params
         if trailing_n is not None:
             sliced_params = [p[:, -trailing_n:] for p in params]
-        return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
+        return self.distr_output.distribution(tuple(x.double() for x in sliced_params), loc=loc, scale=scale)
 
     # for prediction
     def forward(
