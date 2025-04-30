@@ -497,7 +497,7 @@ class ConvBlock(nn.Module):
         self.pool = (
             nn.MaxPool1d(kernel_size=pool_kernel_size, stride=pool_stride, padding=1)
             if pool
-            else lambda x: x
+            else return_unchanged
         )
 
     def conv_forward(self, x):
@@ -653,7 +653,7 @@ class Normalization(nn.Module):
         elif method == "power":
             self.norm = MaskPowerNorm(d_model, warmup_iters=1000)
         elif method == "none":
-            self.norm = lambda x: x
+            self.norm = return_unchanged
         else:
             assert d_model
             self.norm = nn.BatchNorm1d(d_model)
@@ -697,6 +697,9 @@ class Time2Vec(nn.Module):
             x_output = x
         return x_output
 
+def return_unchanged(y):
+    return y
+
 class Embedding(nn.Module):
     def __init__(
         self,
@@ -731,7 +734,7 @@ class Embedding(nn.Module):
          
         assert method in ["spatio-temporal", "temporal"]
         if data_dropout is None:
-            self.data_drop = lambda y: y
+            self.data_drop = return_unchanged
         else:
             self.data_drop = data_dropout
 
@@ -1819,6 +1822,9 @@ class SpacetimeformerModel(nn.Module):
         # time_feat = transformer_inputs[:, : -self.num_feat_dynamic_real:] 
         return transformer_inputs, loc, scale, static_feat
 
+    def create_dim_string(self, param):
+        return ' '.join([f"dy{s}" for s in range(len(param.shape[2:]))])
+    
     def output_params(self, transformer_inputs):
         enc_vt_emb, enc_s_emb, _, enc_mask_seq  \
             = self.enc_embedding(
@@ -1864,10 +1870,9 @@ class SpacetimeformerModel(nn.Module):
         # dec_output = torch.transpose(dec_output, 1, 2)
         # dec_output = torch.transpose(self.reshape_layer(dec_output), 1, 2)
         forecast_out = self.param_proj(dec_output) # this outputs #distr_params (3) for each element in 1th dim
-        dim_string = lambda param: ' '.join([f"dy{s}" for s in range(len(param.shape[2:]))])
         forecast_out = tuple(
             rearrange(param, 
-            f"batch (d_y length) {dim_string(param)} -> batch length d_y {dim_string(param)}", 
+            f"batch (d_y length) {self.create_dim_string(param)} -> batch length d_y {self.create_dim_string(param)}", 
             **{f"dy{s}": v for s, v in enumerate(param.shape[2:])}, length=self.prediction_length) for param in forecast_out)
         forecast_out = tuple(param.squeeze(3) for param in forecast_out)
         return forecast_out
@@ -2009,10 +2014,9 @@ class SpacetimeformerModel(nn.Module):
             # Note shouldnt I be generating all predictions in the horizon in one go, rather than with ascestral sampling?
             #      YES don't need a loop, output_dim = pred_len * input_size * num_distr_params, select input_size from dec_output, then reshape
             params = self.param_proj(dec_output)
-            dim_string = lambda param: ' '.join([f"dy{s}" for s in range(len(param.shape[2:]))])
             params = tuple(
                 rearrange(param, 
-                f"batch (d_y length) {dim_string(param)} -> batch length d_y {dim_string(param)}", 
+                f"batch (d_y length) {self.create_dim_string(param)} -> batch length d_y {self.create_dim_string(param)}", 
                 **{f"dy{s}": v for s, v in enumerate(param.shape[2:])}, length=self.prediction_length) for param in params)
             params = tuple(param.squeeze(3) for param in params)
             # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]

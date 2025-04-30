@@ -4,7 +4,7 @@ import lightning.pytorch as pl
 import torch
 from gluonts.torch.util import weighted_average
 # from gluonts.dataset.field_names import FieldName
-
+import sys
 from .module import TACTiS2Model
 
 # Set up logging
@@ -57,7 +57,10 @@ class TACTiS2LightningModule(pl.LightningModule):
         model_config_with_stage = {**model_config, 'stage': stage}
         self.model = TACTiS2Model(**model_config_with_stage)
         # Save hyperparameters, including the model_config
-        self.save_hyperparameters()
+        self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2", 
+                                  "weight_decay_stage1", "weight_decay_stage2",
+                                  "stage", "stage2_start_epoch", 
+                                  "gradient_clip_val_stage1", "gradient_clip_val_stage2")
         # Store stage-specific optimizer parameters
         # Note: These are already saved by save_hyperparameters() if passed to __init__
         # self.lr_stage1 = lr_stage1

@@ -499,6 +499,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # Gather all configured parameters for the TACTiS2Model into a dictionary
         model_config = {
             # Data dimensions
+            "freq": self.freq,
             "num_series": self.input_size,
             "context_length": self.context_length,
             "prediction_length": self.prediction_length,
