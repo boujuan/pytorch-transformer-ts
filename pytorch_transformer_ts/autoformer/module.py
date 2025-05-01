@@ -964,7 +964,7 @@ class AutoformerModel(nn.Module):
             return tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
                                            for tgt_key in distr_params)
         else:
-            samples = distr.sample()
+            samples = distr.sample().float()
             return samples.reshape(
                 (-1, self.num_parallel_samples, self.prediction_length) + self.target_shape,
             )

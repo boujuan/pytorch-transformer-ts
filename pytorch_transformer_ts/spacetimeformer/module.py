@@ -2034,7 +2034,7 @@ class SpacetimeformerModel(nn.Module):
                 return tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
                                             for tgt_key in distr_params)
             else:
-                next_sample = distr.sample()
+                next_sample = distr.sample().float()
                 return next_sample.reshape(
                 (-1, num_parallel_samples, self.prediction_length) + (self.input_size,), 
                 )
@@ -2104,7 +2104,7 @@ class SpacetimeformerModel(nn.Module):
                     future_params.append(tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
                                             for tgt_key in distr_params))
                 
-                next_sample = distr.sample()
+                next_sample = distr.sample().float()
                 repeated_past_target = torch.cat(
                     (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
                     dim=1,
