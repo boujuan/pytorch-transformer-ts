@@ -106,6 +106,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         dropout_rate: float = 0.1,
         gradient_clip_val_stage1: float = 1000.0,
         gradient_clip_val_stage2: float = 1000.0,
+        warmup_steps: int = 1000, # Added warmup_steps argument
         # General Estimator arguments
         use_lazyframe: bool = False,
         num_feat_dynamic_real: int = 0,
@@ -175,7 +176,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.dropout_rate = dropout_rate
         self.gradient_clip_val_stage1 = gradient_clip_val_stage1
         self.gradient_clip_val_stage2 = gradient_clip_val_stage2
-
+        self.warmup_steps = warmup_steps # Store warmup_steps
+ 
         # Common parameters
         self.input_size = input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -568,4 +570,5 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             stage2_start_epoch=self.stage2_start_epoch,
             gradient_clip_val_stage1=self.gradient_clip_val_stage1, # Pass stage 1 clipping
             gradient_clip_val_stage2=self.gradient_clip_val_stage2, # Pass stage 2 clipping
+            warmup_steps=self.warmup_steps, # Pass warmup_steps
         )

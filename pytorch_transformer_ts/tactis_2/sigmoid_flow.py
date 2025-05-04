@@ -41,64 +41,51 @@ class SigmoidFlow(nn.Module):
         self.no_logit = no_logit
 
     def forward(self, params, x, logdet):
-        """Transform with derivative computation"""
-        # Apply softplus with numerical stability
-        a = torch.nn.functional.softplus(params[..., :self.hidden_dim]) + EPSILON
-        b = params[..., self.hidden_dim:2*self.hidden_dim]
-        w = torch.nn.functional.softmax(params[..., 2*self.hidden_dim:], dim=-1)
+        """
+        Transform the given value according to the given parameters,
+        computing the derivative of the transformation at the same time.
+        params third dimension must be equal to 3 times the number of hidden units.
+        """
+        # Indices:
+        # b: batch
+        # v: variables
+        # h: hidden dimension
 
-        # Compute pre-sigmoid with better numerical stability
-        # Clamp x to avoid extreme values that could cause instability
-        x_clamped = torch.clamp(x, min=-100.0, max=100.0)
-        pre_sigm = a * x_clamped[..., None] + b # Revert: Broadcasting works directly here during training
+        # params: b, v, 3*h
+        # x: b, v
+        # logdet: b
+        # output x: b, v
+        # output logdet: b
+        assert params.shape[-1] == 3 * self.hidden_dim
 
-        # Apply sigmoid with numerical stability
-        # Use torch.sigmoid which is more numerically stable than manual computation
-        sigm = torch.sigmoid(pre_sigm)
+        a = torch.nn.functional.softplus(params[..., : self.hidden_dim]) + EPSILON  # b, v, h - Use softplus directly
+        b = params[..., self.hidden_dim : 2 * self.hidden_dim]  # b, v, h
+        pre_w = params[..., 2 * self.hidden_dim :]  # b, v, h
+        w = torch.nn.functional.softmax(pre_w, dim=-1)  # b, v, h
 
-        # Add small epsilon to prevent zeros
-        sigm = torch.clamp(sigm, min=EPSILON, max=1.0-EPSILON)
+        pre_sigm = a * x[..., None] + b  # b, v, h
+        sigm = torch.sigmoid(pre_sigm)  # b, v, h
+        x_pre = (w * sigm).sum(dim=-1)  # b, v
 
-        # Compute weighted sum
-        x_pre = (w * sigm).sum(dim=-1)
+        logj = (
+            nn.functional.log_softmax(pre_w, dim=-1) + log_sigmoid(pre_sigm) + log_sigmoid(-pre_sigm) + torch.log(a)
+        )  # b, v, h
 
-        # Compute log jacobian using original stable method
-        # logj shape: [b, v, h] or [b, n, h] etc.
-        logj_per_hidden = (
-            nn.functional.log_softmax(params[..., 2*self.hidden_dim:], dim=-1) # log(w)
-            + log_sigmoid(pre_sigm)                                            # log(sigmoid(ax+b))
-            + log_sigmoid(-pre_sigm)                                           # log(1-sigmoid(ax+b))
-            + torch.log(a)                                                     # log(a)
-        )
-
-        # logj shape: [b, v] or [b, n] etc. (summed over hidden dim h)
-        logj = log_sum_exp(logj_per_hidden, dim=-1, keepdim=False)
-
-        # Sum logj over all non-batch dimensions before adding to logdet (which has shape [batch])
-        logdet = logdet + logj.sum(dim=tuple(range(1, logj.dim())))
-
-        # Check for NaNs in logdet
-        if torch.isnan(logdet).any():
-            logger.warning("NaN detected in logdet after addition")
-            # Replace NaNs with zeros to allow training to continue
-            logdet = torch.nan_to_num(logdet, nan=0.0)
+        logj = log_sum_exp(logj, dim=-1, keepdim=False)  # b, v
 
         if self.no_logit:
+            # Only keep the batch dimension, summing all others in case this method is called with more dimensions
+            # Adding the passed logdet here to accumulate
+            logdet = logj.sum(dim=tuple(range(1, logj.dim()))) + logdet
             return x_pre, logdet
 
-        # Apply logit transform with numerical stability
-        x_pre_clipped = x_pre * (1 - EPSILON) + EPSILON * 0.5
-        xnew = torch.log(x_pre_clipped) - torch.log(1 - x_pre_clipped)
+        x_pre_clipped = x_pre * (1 - EPSILON) + EPSILON * 0.5  # b, v
+        xnew = torch.log(x_pre_clipped) - torch.log(1 - x_pre_clipped)  # b, v
 
-        # Update logdet to account for logit transform
-        logdet_ = logj + math.log(1 - EPSILON) - (torch.log(x_pre_clipped) + torch.log(1 - x_pre_clipped))
+        logdet_ = logj + math.log(1 - EPSILON) - (torch.log(x_pre_clipped) + torch.log(-x_pre_clipped + 1))  # b, v
+
+        # Only keep the batch dimension, summing all others in case this method is called with more dimensions
         logdet = logdet_.sum(dim=tuple(range(1, logdet_.dim()))) + logdet
-
-        # Final NaN check
-        if torch.isnan(xnew).any() or torch.isnan(logdet).any():
-            logger.warning(f"NaNs in final SigmoidFlow output, replacing with zeros")
-            xnew = torch.nan_to_num(xnew)
-            logdet = torch.nan_to_num(logdet)
 
         return xnew, logdet
 
@@ -108,7 +95,7 @@ class SigmoidFlow(nn.Module):
         b = params[..., self.hidden_dim:2*self.hidden_dim]
         w = torch.nn.functional.softmax(params[..., 2*self.hidden_dim:], dim=-1)
 
-        pre_sigm = a * x[..., None] + b # Unsqueeze a and b for broadcasting
+        pre_sigm = a * x[..., None] + b # Unsqueeze x for broadcasting
         sigm = torch.sigmoid(pre_sigm)
         x_pre = (w * sigm).sum(dim=-1)
 
@@ -116,6 +103,7 @@ class SigmoidFlow(nn.Module):
             return x_pre
 
         x_pre_clipped = x_pre * (1 - EPSILON) + EPSILON * 0.5
-        xnew = torch.log(x_pre_clipped) - torch.log(1 - x_pre_clipped)
-
+        # Rely on x_pre_clipped to prevent exact 0/1 for logit
+        # x_pre_log_safe = torch.clamp(x_pre_clipped, min=EPSILON, max=1.0-EPSILON) # Removed clamp
+        xnew = torch.log(x_pre_clipped) - torch.log(1 - x_pre_clipped) # Use x_pre_clipped directly
         return xnew

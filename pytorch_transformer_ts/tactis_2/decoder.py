@@ -288,7 +288,6 @@ class CopulaDecoder(nn.Module):
             # Use Copula to sample correlated U values (Stage 2)
             hist_encoded_copula_flat = copula_encoded_merged[:, hist_indices_n, :]  # [B, S*hist_len, D_copula]
             pred_encoded_copula_flat = copula_encoded_merged[:, pred_indices_n, :]  # [B, S*pred_len, D_copula]
-
             # Sample from copula - returns shape: [B, S*pred_len, num_samples]
             pred_samples_u_flat = self.copula.sample(
                 num_samples=num_samples,
@@ -304,13 +303,13 @@ class CopulaDecoder(nn.Module):
         # --- Transform Sampled U values to real space using Marginal Inverse CDF ---
         if not self.skip_sampling_marginal:
             # Scale U samples if needed (from original TACTiS)
-            pred_samples_u_flat = self.min_u + (self.max_u - self.min_u) * pred_samples_u_flat
+            pred_samples_u_flat_scaled = self.min_u + (self.max_u - self.min_u) * pred_samples_u_flat
 
             # Apply inverse CDF to transform U(0,1) samples to real values
             # Output shape: [B, S*pred_len, num_samples]
             pred_samples_x_flat = self.marginal.inverse(
-                pred_encoded_flow_flat,  # Context for prediction steps [B, S*pred_len, D_flow]
-                pred_samples_u_flat,     # U values for prediction steps [B, S*pred_len, num_samples]
+                pred_encoded_flow_flat,      # Context for prediction steps [B, S*pred_len, D_flow]
+                pred_samples_u_flat_scaled,  # U values for prediction steps [B, S*pred_len, num_samples]
             )
         else:
             # If skipping marginal transform, output is just the U samples
