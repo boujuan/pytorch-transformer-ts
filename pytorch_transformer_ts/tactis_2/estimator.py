@@ -568,7 +568,5 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
-            gradient_clip_val_stage1=self.gradient_clip_val_stage1, # Pass stage 1 clipping
-            gradient_clip_val_stage2=self.gradient_clip_val_stage2, # Pass stage 2 clipping
             warmup_steps=self.warmup_steps, # Pass warmup_steps
         )
