@@ -42,26 +42,8 @@ class DeepSigmoidFlow(nn.Module):
 
     def forward_no_logdet(self, params, x):
         """Transform without derivative computation"""
-        # --- Roo Debug ---
-        print(f"DEBUG (DeepSigmoidFlow.fwd_no_logdet): Input x range: [{x.min().item():.4f}, {x.max().item():.4f}], shape: {x.shape}")
-        if torch.isnan(x).any(): print("  WARNING: NaNs in input x!")
-        if torch.isnan(params).any(): print("  WARNING: NaNs in input params!")
-        # ---------------
         # Original logic: Iterate through layers calling forward_no_logdet
         for i, layer in enumerate(self.layers):
             layer_params = params[..., i * self.params_length : (i + 1) * self.params_length]
-            # --- Roo Debug ---
-            print(f"DEBUG (DeepSigmoidFlow.fwd_no_logdet): Layer {i} input x range: [{x.min().item():.4f}, {x.max().item():.4f}]")
-            if torch.isnan(x).any(): print(f"  WARNING: NaNs in x before layer {i}!")
-            if torch.isnan(layer_params).any(): print(f"  WARNING: NaNs in params for layer {i}!")
-            # ---------------
             x = layer.forward_no_logdet(layer_params, x)
-            # --- Roo Debug ---
-            print(f"DEBUG (DeepSigmoidFlow.fwd_no_logdet): Layer {i} output x range: [{x.min().item():.4f}, {x.max().item():.4f}]")
-            if torch.isnan(x).any(): print(f"  WARNING: NaNs in x output from layer {i}!")
-            # ---------------
-        # --- Roo Debug ---
-        print(f"DEBUG (DeepSigmoidFlow.fwd_no_logdet): Final output x range: [{x.min().item():.4f}, {x.max().item():.4f}]")
-        if torch.isnan(x).any(): print("  WARNING: NaNs in final output x!")
-        # ---------------
         return x

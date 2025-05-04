@@ -108,46 +108,15 @@ class DSFMarginal(nn.Module):
         # Adjust bounds for [-1, 1] normalized data scale
         left = -2.0 * torch.ones_like(u)
         right = 2.0 * torch.ones_like(u)
- 
-        # --- Roo Debug ---
-        initial_u_min, initial_u_max = u.min().item(), u.max().item()
-        print(f"DEBUG (inverse): Start binary search. Input u range: [{initial_u_min:.4f}, {initial_u_max:.4f}]")
-        # ---------------
 
-        # --- Roo Debug ---
-        # Select a single element to log detailed values for (e.g., batch 0, item 0, sample 0)
-        log_idx = (0, 0, 0) if u.dim() == 3 else (0, 0) # Adjust if u has different dims
-        print_limit = 5 # Print details for first few iterations
-        # --- End Roo Debug ---
         for iter_num in range(max_iter): # Add iter_num for logging
             mid = (left + right) / 2
             cdf_mid = self.marginal_flow.forward_no_logdet(marginal_params, mid)
-
-            # --- Roo Debug ---
-            if iter_num < print_limit:
-                 try:
-                     print(f"DEBUG (inverse): Iter {iter_num}: Element {log_idx}")
-                     print(f"  u      : {u[log_idx].item():.6f}")
-                     print(f"  left   : {left[log_idx].item():.6f}")
-                     print(f"  right  : {right[log_idx].item():.6f}")
-                     print(f"  mid    : {mid[log_idx].item():.6f}")
-                     print(f"  cdf_mid: {cdf_mid[log_idx].item():.6f}")
-                     if torch.isnan(cdf_mid[log_idx]): print("    WARNING: cdf_mid is NaN!")
-                 except IndexError:
-                     print(f"DEBUG (inverse): Iter {iter_num}: Cannot log element {log_idx}, tensor shape might be smaller.")
-                 except Exception as e:
-                     print(f"DEBUG (inverse): Iter {iter_num}: Error logging element {log_idx}: {e}")
-            if iter_num == print_limit:
-                 print(f"DEBUG (inverse): ... (further iterations omitted for brevity)")
-            # ---------------
 
             # Update bounds
             left = torch.where(cdf_mid < u, mid, left)
             right = torch.where(cdf_mid >= u, mid, right)
 
-        # --- Roo Debug ---
         final_mid = (left + right) / 2
-        print(f"DEBUG (inverse): End binary search. Final mid range: [{final_mid.min().item():.4f}, {final_mid.max().item():.4f}]")
-        # ---------------
 
         return final_mid # Return the final mid value

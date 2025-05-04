@@ -278,23 +278,16 @@ class CopulaDecoder(nn.Module):
         # Transform historical values to U(0,1) using marginals
         # This is needed for copula sampling which works in uniform space
         hist_true_u_flat = self.marginal.forward_no_logdet(hist_encoded_flow_flat, hist_true_x_flat)  # [B, S*hist_len]
-        # --- Roo Debug ---
-        print(f"DEBUG (CopulaDecoder.sample): hist_true_u_flat range: [{hist_true_u_flat.min().item():.4f}, {hist_true_u_flat.max().item():.4f}], shape: {hist_true_u_flat.shape}")
-        # ---------------
 
         # --- Sample U(0,1) values for Prediction Period ---
         # Extract prediction period encodings
         pred_encoded_flow_flat = flow_encoded_merged[:, pred_indices_n, :]  # [B, S*pred_len, D_flow]
-        # --- Roo Debug ---
-        print(f"DEBUG (CopulaDecoder.sample): pred_encoded_flow_flat range: [{pred_encoded_flow_flat.min().item():.4f}, {pred_encoded_flow_flat.max().item():.4f}], shape: {pred_encoded_flow_flat.shape}")
-        # ---------------
 
         # Generate samples in U(0,1) space
         if not self.skip_copula and copula_encoded_merged is not None and self.copula is not None:
             # Use Copula to sample correlated U values (Stage 2)
             hist_encoded_copula_flat = copula_encoded_merged[:, hist_indices_n, :]  # [B, S*hist_len, D_copula]
             pred_encoded_copula_flat = copula_encoded_merged[:, pred_indices_n, :]  # [B, S*pred_len, D_copula]
-            print(f"DEBUG (CopulaDecoder.sample): Calling copula.sample...") # Roo Debug
             # Sample from copula - returns shape: [B, S*pred_len, num_samples]
             pred_samples_u_flat = self.copula.sample(
                 num_samples=num_samples,
@@ -302,41 +295,25 @@ class CopulaDecoder(nn.Module):
                 hist_true_u=hist_true_u_flat,
                 pred_encoded=pred_encoded_copula_flat,
             )
-            print(f"DEBUG (CopulaDecoder.sample): Finished copula.sample.") # Roo Debug
         else:
             # Stage 1 or Copula skipped: Sample uniformly (independent samples)
-            print(f"DEBUG (CopulaDecoder.sample): Sampling uniformly (skip_copula={self.skip_copula})...") # Roo Debug
             N_pred = S * num_pred_steps
             pred_samples_u_flat = torch.rand(B, N_pred, num_samples, device=device)  # [B, S*pred_len, num_samples]
-
-        # --- Roo Debug ---
-        print(f"DEBUG (CopulaDecoder.sample): pred_samples_u_flat range: [{pred_samples_u_flat.min().item():.4f}, {pred_samples_u_flat.max().item():.4f}], shape: {pred_samples_u_flat.shape}")
-        # ---------------
 
         # --- Transform Sampled U values to real space using Marginal Inverse CDF ---
         if not self.skip_sampling_marginal:
             # Scale U samples if needed (from original TACTiS)
             pred_samples_u_flat_scaled = self.min_u + (self.max_u - self.min_u) * pred_samples_u_flat
-            # --- Roo Debug ---
-            print(f"DEBUG (CopulaDecoder.sample): pred_samples_u_flat_scaled range: [{pred_samples_u_flat_scaled.min().item():.4f}, {pred_samples_u_flat_scaled.max().item():.4f}]")
-            # ---------------
 
             # Apply inverse CDF to transform U(0,1) samples to real values
             # Output shape: [B, S*pred_len, num_samples]
-            print(f"DEBUG (CopulaDecoder.sample): Calling marginal.inverse...") # Roo Debug
             pred_samples_x_flat = self.marginal.inverse(
                 pred_encoded_flow_flat,      # Context for prediction steps [B, S*pred_len, D_flow]
                 pred_samples_u_flat_scaled,  # U values for prediction steps [B, S*pred_len, num_samples]
             )
-            print(f"DEBUG (CopulaDecoder.sample): Finished marginal.inverse.") # Roo Debug
         else:
             # If skipping marginal transform, output is just the U samples
-            print(f"DEBUG (CopulaDecoder.sample): Skipping marginal.inverse (skip_sampling_marginal=True).") # Roo Debug
             pred_samples_x_flat = pred_samples_u_flat
-
-        # --- Roo Debug ---
-        print(f"DEBUG (CopulaDecoder.sample): pred_samples_x_flat range: [{pred_samples_x_flat.min().item():.4f}, {pred_samples_x_flat.max().item():.4f}], shape: {pred_samples_x_flat.shape}")
-        # ---------------
 
         # --- Combine History and Samples ---
         # Create output tensor for the full time range
