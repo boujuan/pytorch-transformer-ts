@@ -183,9 +183,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         -------
         The loss.
         """
-        # Manual optimization
-        opt = self.optimizers()
-        opt.zero_grad()
+        # Automatic optimization handles optimizer steps, zero_grad, backward
         
         # Extract data from the batch
         past_target = batch["past_target"]
@@ -229,31 +227,12 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.warning("NaN detected in loss! Replacing with large value to continue training.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
-        # Manual backward pass
-        self.manual_backward(loss)
-        
-        # Apply gradient clipping based on current stage
-        current_clip_val = self.gradient_clip_val_stage1 if self.stage == 1 else self.gradient_clip_val_stage2
-        if current_clip_val > 0:
-             torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=current_clip_val)
-        
-        # Step the optimizer
-        opt.step()
-        
-        # Step the scheduler (if one exists)
-        # self.lr_schedulers() returns the scheduler instance or None
-        sch = self.lr_schedulers()
-        if sch is not None:
-             # We configured it with interval='step' in configure_optimizers,
-             # so we step it here in the training_step when using manual optimization.
-             sch.step()
-             
+        # Loss is returned for automatic optimization
+
         # Log the loss
         self.log("train_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
         
-        # Manually log learning rate
-        current_lr = opt.param_groups[0]['lr']
-        self.log("lr_manual", current_lr, on_step=True, on_epoch=False, prog_bar=False, logger=True)
+        # Manual LR logging removed as LearningRateMonitor is now working
         
         return loss
         
@@ -341,7 +320,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         # Configure gradient clipping directly in the lightning module
         # This helps with numerical stability by preventing extreme gradient values
-        self.automatic_optimization = False # Use manual optimization loop
+        # self.automatic_optimization = False # Use automatic optimization loop
+        self.automatic_optimization = True # Explicitly set to True
         
         # Add LR Warmup Scheduler ONLY for Stage 1 and if warmup_steps > 0
         if self.stage == 1 and self.warmup_steps > 0:
