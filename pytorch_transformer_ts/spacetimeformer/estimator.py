@@ -348,7 +348,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         **kwargs,
     ) -> Iterable:
         # TODO can set number of epochs/steps per epoch in PyTorchLightningEstimator
-        data = Cyclic(data).stream() # continuously samples windows from dataset, bc these windows are sampled w replacement, so total number of windows is large, define epoch as 100 steps, each step samples some number of batches
+        if self.num_batches_per_epoch is not None:
+            data = Cyclic(data).stream() # continuously samples windows from dataset, bc these windows are sampled w replacement, so total number of windows is large, define epoch as 100 steps, each step samples some number of batches
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )

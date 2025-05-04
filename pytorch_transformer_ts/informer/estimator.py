@@ -284,7 +284,10 @@ class InformerEstimator(PyTorchLightningEstimator):
         shuffle_buffer_length: Optional[int] = None,
         **kwargs,
     ) -> Iterable:
-        data = Cyclic(data).stream() # will just repeat over same dataset if we only provide one
+        # NEW CHANGE
+        if self.num_batches_per_epoch is not None:
+            data = Cyclic(data).stream() # will just repeat over same dataset if we only provide one
+        
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
