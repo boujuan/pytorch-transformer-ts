@@ -25,8 +25,6 @@ class TACTiS2LightningModule(pl.LightningModule):
         weight_decay_stage2: float = 0.0,
         stage: int = 1,  # Start with stage 1 (flow-only)
         stage2_start_epoch: int = 10,  # When to start stage 2
-        gradient_clip_val_stage1: float = 1000.0, # Stage 1 clipping
-        gradient_clip_val_stage2: float = 1000.0, # Stage 2 clipping
         warmup_steps: int = 1000, # Number of warmup steps for Stage 1 LR
     ) -> None:
         """
@@ -48,10 +46,6 @@ class TACTiS2LightningModule(pl.LightningModule):
             Initial training stage (1 for flow-only, 2 for flow+copula).
         stage2_start_epoch
             Epoch at which to switch to stage 2 (flow+copula) if starting with stage 1.
-        gradient_clip_val_stage1
-            Value for gradient clipping in stage 1. 0.0 means disabled.
-        gradient_clip_val_stage2
-            Value for gradient clipping in stage 2. 0.0 means disabled.
         warmup_steps
             Number of linear warmup steps for the learning rate during Stage 1.
         """
@@ -92,7 +86,6 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2",
                                   "weight_decay_stage1", "weight_decay_stage2",
                                   "stage", "stage2_start_epoch",
-                                  "gradient_clip_val_stage1", "gradient_clip_val_stage2",
                                   "warmup_steps") # Add warmup_steps here
         # Store stage-specific optimizer parameters
         # Note: These are already saved by save_hyperparameters() if passed to __init__
@@ -105,8 +98,6 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.weight_decay_stage2 = self.hparams.weight_decay_stage2
         self.stage = self.hparams.stage
         self.stage2_start_epoch = self.hparams.stage2_start_epoch
-        self.gradient_clip_val_stage1 = self.hparams.gradient_clip_val_stage1
-        self.gradient_clip_val_stage2 = self.hparams.gradient_clip_val_stage2
         self.warmup_steps = self.hparams.warmup_steps # Store warmup steps
 
         # Set the stage in the model
