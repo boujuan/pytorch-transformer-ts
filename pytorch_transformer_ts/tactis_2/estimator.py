@@ -92,6 +92,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         input_encoding_normalization: bool = True,
         loss_normalization: str = "series",
         encoder_type: str = "standard",
+        ac_activation_function: str = "ReLU",
         # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
@@ -157,6 +158,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.input_encoding_normalization = input_encoding_normalization
         self.loss_normalization = loss_normalization
         self.encoder_type = encoder_type
+        self.ac_activation_function = ac_activation_function
         # Training stage / optimizer params
         self.initial_stage = initial_stage
         self.stage2_start_epoch = stage2_start_epoch
@@ -243,6 +245,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 4),
             "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 4),
             "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])), # Renamed from copula_ts_embedding_dim
+            "ac_activation_function": trial.suggest_categorical("ac_activation_function", ["ReLU", "GeLU"]),
 
             # --- Decoder ---
             "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
@@ -255,10 +258,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [20, 50, 100, 200])), # Corresponds to AttentionalCopula resolution
 
             # --- Optimizer Params ---
-            "lr_stage1": trial.suggest_float("lr_stage1", 1e-6, 1e-5, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
+            "lr_stage1": trial.suggest_float("lr_stage1", 1e-6, 5e-5, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
             "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 5e-5, log=True), # INFO @boujuan kept the same lr.
-            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-5, 1e-4, 1e-3])),
-            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3])),
+            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-5, 1e-4])),
+            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 1e-6, 1e-5, 1e-4])),
 
             # --- Dropout & Clipping ---
             "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.3),
@@ -527,6 +530,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "input_encoding_normalization": self.input_encoding_normalization,
             "loss_normalization": self.loss_normalization,
             "encoder_type": self.encoder_type, # Pass encoder type
+            "ac_activation_function": self.ac_activation_function,
             "dropout_rate": self.dropout_rate, # Pass dropout rate
             # GluonTS compatability parameters
             "cardinality": self.cardinality,
