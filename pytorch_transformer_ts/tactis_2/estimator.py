@@ -255,8 +255,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [20, 50, 100, 200])), # Corresponds to AttentionalCopula resolution
 
             # --- Optimizer Params ---
-            "lr_stage1": trial.suggest_float("lr_stage1", 1e-4, 1e-3, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
-            "lr_stage2": trial.suggest_float("lr_stage2", 1e-4, 5e-3, log=True), # INFO @boujuan kept the same lr.
+            "lr_stage1": trial.suggest_float("lr_stage1", 1e-6, 1e-5, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
+            "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 5e-5, log=True), # INFO @boujuan kept the same lr.
             "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-5, 1e-4, 1e-3])),
             "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3])),
 
