@@ -53,9 +53,35 @@ class TACTiS2LightningModule(pl.LightningModule):
         """
         super().__init__()
         # Instantiate the model internally using the provided config
-        # Include the stage parameter from hyperparameters
-        model_config_with_stage = {**model_config, 'stage': stage}
-        self.model = TACTiS2Model(**model_config_with_stage)
+        # Separate Attentional Copula parameters from the main model config
+        ac_params = {}
+        model_direct_params = {}
+        # Mapping from config keys (with ac_ prefix) to AttentionalCopula internal arg names
+        ac_param_mapping = {
+            'ac_mlp_num_layers': 'mlp_layers',
+            'ac_mlp_dim': 'mlp_dim',
+            'ac_activation_function': 'activation_function'
+            # Add other ac_ mappings here if needed in the future
+        }
+
+        for key, value in model_config.items():
+            if key.startswith('ac_') and key in ac_param_mapping:
+                # Map and store in ac_params
+                mapped_key = ac_param_mapping[key]
+                ac_params[mapped_key] = value
+                logger.debug(f"Extracted AttentionalCopula parameter: {key} -> {mapped_key}={value}")
+            else:
+                # Keep non-ac_ parameters in the direct dictionary
+                model_direct_params[key] = value
+
+        # Include the stage parameter in the direct params
+        model_direct_params['stage'] = stage
+
+        # Instantiate the model with separated parameters
+        self.model = TACTiS2Model(
+            **model_direct_params, # Pass only direct model params here
+            attentional_copula_kwargs=ac_params if ac_params else None # Pass mapped AC params separately
+        )
         # Save hyperparameters, including the model_config
         self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2", 
                                   "weight_decay_stage1", "weight_decay_stage2",
