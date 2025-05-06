@@ -26,13 +26,15 @@ class TACTiS2LightningModule(pl.LightningModule):
         stage: int = 1,  # Start with stage 1 (flow-only)
         stage2_start_epoch: int = 10,  # When to start stage 2
         warmup_steps: int = 1000, # Number of warmup steps for Stage 1 LR
+        stage1_activation_function: str = "ReLU", # Added direct parameter
+        stage2_activation_function: str = "ReLU", # Added direct parameter
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
         
         Parameters
         ----------
-        model
+        model_config
             Dictionary containing the configuration for the TACTiS2Model.
         lr_stage1
             Learning rate for stage 1 optimizer.
@@ -48,8 +50,19 @@ class TACTiS2LightningModule(pl.LightningModule):
             Epoch at which to switch to stage 2 (flow+copula) if starting with stage 1.
         warmup_steps
             Number of linear warmup steps for the learning rate during Stage 1.
+        stage1_activation_function
+            Activation function for stage 1.
+        stage2_activation_function
+            Activation function for stage 2.
         """
         super().__init__()
+        
+        # Save hyperparameters first, so self.hparams is populated
+        self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2",
+                                  "weight_decay_stage1", "weight_decay_stage2",
+                                  "stage", "stage2_start_epoch",
+                                  "warmup_steps", "stage1_activation_function", "stage2_activation_function")
+
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
         ac_params = {}
@@ -62,43 +75,33 @@ class TACTiS2LightningModule(pl.LightningModule):
             # Add other ac_ mappings here if needed in the future
         }
 
-        for key, value in model_config.items():
+        # Use self.hparams.model_config as it's now saved
+        for key, value in self.hparams.model_config.items():
             if key.startswith('ac_') and key in ac_param_mapping:
                 # Map and store in ac_params
                 mapped_key = ac_param_mapping[key]
                 ac_params[mapped_key] = value
                 logger.debug(f"Extracted AttentionalCopula parameter: {key} -> {mapped_key}={value}")
-            elif key == 'stage1_activation_function':
-                model_direct_params[key] = value
-                logger.debug(f"Extracted stage1_activation_function: {value}")
-            elif key == 'stage2_activation_function':
-                model_direct_params[key] = value
-                logger.debug(f"Extracted stage2_activation_function: {value}")
+            elif key == 'stage1_activation_function' or key == 'stage2_activation_function':
+                # These are now direct hparams, so skip them from model_config when passing to TACTiS2Model
+                logger.debug(f"Skipping {key} from model_config for model_direct_params, as it's a direct hparam.")
+                pass
             else:
-                # Keep non-ac_ parameters in the direct dictionary
+                # Keep other non-ac_ parameters in the direct dictionary
                 model_direct_params[key] = value
 
-        # Include the stage parameter in the direct params
-        model_direct_params['stage'] = stage
-
-        # Ensure activation function parameters are explicitly set with defaults if not in config
-        stage1_activation_function = model_config.get("stage1_activation_function", "ReLU")
-        stage2_activation_function = model_config.get("stage2_activation_function", "ReLU")
+        # Include the stage parameter in the direct params (from hparams)
+        model_direct_params['stage'] = self.hparams.stage
         
         # Instantiate the model with separated parameters
         self.model = TACTiS2Model(
             **model_direct_params, # Pass only direct model params here
-            stage1_activation_function=stage1_activation_function,
-            stage2_activation_function=stage2_activation_function,
+            stage1_activation_function=self.hparams.stage1_activation_function, # Use direct hparam
+            stage2_activation_function=self.hparams.stage2_activation_function, # Use direct hparam
             attentional_copula_kwargs=ac_params if ac_params else None # Pass mapped AC params separately
         )
-        # Save hyperparameters, including the model_config
-        self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2",
-                                  "weight_decay_stage1", "weight_decay_stage2",
-                                  "stage", "stage2_start_epoch",
-                                  "warmup_steps", "stage1_activation_function", "stage2_activation_function") # Add stage2_activation_function
-        # Store stage-specific optimizer parameters
-        # Note: These are already saved by save_hyperparameters() if passed to __init__
+        
+        # Store stage-specific optimizer parameters (already in self.hparams)
         # self.lr_stage1 = lr_stage1
         # self.lr_stage2 = lr_stage2
         # Access hyperparameters via self.hparams
