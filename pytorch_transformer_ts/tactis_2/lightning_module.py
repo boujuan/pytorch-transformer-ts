@@ -68,6 +68,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                 mapped_key = ac_param_mapping[key]
                 ac_params[mapped_key] = value
                 logger.debug(f"Extracted AttentionalCopula parameter: {key} -> {mapped_key}={value}")
+            elif key == 'stage2_activation_function':
+                model_direct_params[key] = value
+                logger.debug(f"Extracted stage2_activation_function: {value}")
             else:
                 # Keep non-ac_ parameters in the direct dictionary
                 model_direct_params[key] = value
@@ -84,7 +87,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2",
                                   "weight_decay_stage1", "weight_decay_stage2",
                                   "stage", "stage2_start_epoch",
-                                  "warmup_steps") # Add warmup_steps here
+                                  "warmup_steps", "stage1_activation_function", "stage2_activation_function") # Add stage2_activation_function
         # Store stage-specific optimizer parameters
         # Note: These are already saved by save_hyperparameters() if passed to __init__
         # self.lr_stage1 = lr_stage1

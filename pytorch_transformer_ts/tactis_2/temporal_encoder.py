@@ -25,6 +25,7 @@ class TemporalEncoder(nn.Module):
         num_encoder_layers: int, # Renamed from attention_layers (represents pairs)
         dim_feedforward: int, # Renamed from attention_feedforward_dim
         dropout: float = 0.1,
+        activation: nn.Module = nn.ReLU,
         # attention_dim: int, # Removed, use d_model / nhead if needed internally
     ):
         """
@@ -51,6 +52,7 @@ class TemporalEncoder(nn.Module):
         self.num_encoder_layers = num_encoder_layers
         self.dim_feedforward = dim_feedforward
         self.dropout = dropout
+        self.activation = activation
         self.total_attention_time = 0.0 # Keep for potential timing analysis
 
         # Create pairs of layers: one for time attention, one for series attention
@@ -61,6 +63,7 @@ class TemporalEncoder(nn.Module):
                     nhead=self.nhead,
                     dim_feedforward=self.dim_feedforward,
                     dropout=self.dropout,
+                    activation=self.activation(),  # Use the provided activation function
                     batch_first=True # Important: Assume batch_first for easier handling
                 )
                 for _ in range(self.num_encoder_layers)
@@ -74,6 +77,7 @@ class TemporalEncoder(nn.Module):
                     nhead=self.nhead,
                     dim_feedforward=self.dim_feedforward,
                     dropout=self.dropout,
+                    activation=self.activation(),  # Use the provided activation function
                     batch_first=True # Important: Assume batch_first for easier handling
                 )
                 for _ in range(self.num_encoder_layers)

@@ -56,6 +56,9 @@ class TACTiS2Model(nn.Module):
         loss_normalization: str = "series",
         encoder_type: str = "standard",
         dropout_rate: float = 0.1,
+        # Activation function parameters
+        stage1_activation_function: str = "ReLU",  # Added parameter for stage 1 activation
+        stage2_activation_function: str = "ReLU",  # Added parameter for stage 2 activation
         # GluonTS compatability parameters
         cardinality: List[int] = [1],
         num_feat_dynamic_real: int = 0,
@@ -117,6 +120,10 @@ class TACTiS2Model(nn.Module):
         self.num_series = num_series
         self.context_length = context_length
         self.prediction_length = prediction_length
+        
+        # Store activation function parameters
+        self.stage1_activation_function = stage1_activation_function
+        self.stage2_activation_function = stage2_activation_function
         
         # GluonTS compatibility parameters
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -181,6 +188,7 @@ class TACTiS2Model(nn.Module):
             "num_encoder_layers": marginal_num_layers,
             "dim_feedforward": marginal_d_model * 4, # Standard practice
             "dropout": dropout_rate,
+            "activation": self.stage1_activation_function,  # Add stage1 activation function
         }
 
         copula_encoder_args = {
@@ -189,6 +197,7 @@ class TACTiS2Model(nn.Module):
             "num_encoder_layers": copula_num_layers,
             "dim_feedforward": copula_d_model * 4, # Standard practice
             "dropout": dropout_rate,
+            "activation": self.stage2_activation_function,  # Add stage2 activation function
         }
 
         # Note: flow_temporal_encoder and copula_temporal_encoder args are not directly in the table
@@ -214,7 +223,7 @@ class TACTiS2Model(nn.Module):
                 "resolution": decoder_num_bins,
                 "dropout": dropout_rate, # Use configured dropout
                 "attention_mlp_class": "_easy_mlp", # Default value
-                "activation_function": "relu", # Default value, will be overridden if provided
+                "activation_function": self.stage2_activation_function, # Use stage2 activation function
             },
             "dsf_marginal": {
                 "context_dim": marginal_d_model, # Use flow encoder output dim

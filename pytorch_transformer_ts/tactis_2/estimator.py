@@ -95,7 +95,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # Attentional Copula specific MLP params (passed down) - Aligned with AttentionalCopula class
         ac_mlp_num_layers: int = 2, # Default: Number of layers in AC's internal MLP
         ac_mlp_dim: int = 128,      # Default: Dimension of AC's internal MLP layers
-        ac_activation_function: str = "ReLU", # Default: Activation in AC's internal MLP
+        stage2_activation_function: str = "ReLU", # Default: Activation in Stage 2 components (copula input encoder, copula main encoder, AC MLP)
+        stage1_activation_function: str = "ReLU", # Activation function for Stage 1 components (flow input encoder, flow main encoder, marginal conditioner)
         # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
@@ -165,7 +166,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # Store AC params (aligned with AttentionalCopula class)
         self.ac_mlp_num_layers = ac_mlp_num_layers
         self.ac_mlp_dim = ac_mlp_dim
-        self.ac_activation_function = ac_activation_function
+        self.stage2_activation_function = stage2_activation_function
+        self.stage1_activation_function = stage1_activation_function
         # Training stage / optimizer params
         self.initial_stage = initial_stage
         self.stage2_start_epoch = stage2_start_epoch
@@ -239,6 +241,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # --- General ---
             "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
+            "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["ReLU", "GeLU"])), # Tune activation for Stage 2 components
+            "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["ReLU", "GeLU"])),
 
             # --- Marginal CDF Encoder ---
             "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
@@ -257,7 +261,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # --- Attentional Copula MLP (Aligned with AttentionalCopula class) ---
             "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 1, 4), # Tune number of layers
             "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])), # Tune layer dimension
-            "ac_activation_function": trial.suggest_categorical("ac_activation_function", dynamic_kwargs.get("ac_activation_function", ["ReLU", "GeLU", "leaky_relu"])), # Tune activation
 
             # --- Decoder ---
             "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
@@ -542,11 +545,12 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "input_encoding_normalization": self.input_encoding_normalization,
             "loss_normalization": self.loss_normalization,
             "encoder_type": self.encoder_type, # Pass encoder type
-            "dropout_rate": self.dropout_rate, # Pass dropout rate
+            "dropout_rate": self.dropout_rate, # Pass dropout rate            
+            "stage1_activation_function": self.stage1_activation_function,
             # Attentional Copula specific MLP params (Aligned with AttentionalCopula class)
             "ac_mlp_num_layers": self.ac_mlp_num_layers,
             "ac_mlp_dim": self.ac_mlp_dim,
-            "ac_activation_function": self.ac_activation_function,
+            "stage2_activation_function": self.stage2_activation_function,
             # GluonTS compatability parameters
             "cardinality": self.cardinality,
             "num_feat_dynamic_real": self.num_feat_dynamic_real,
