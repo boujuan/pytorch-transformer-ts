@@ -68,6 +68,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                 mapped_key = ac_param_mapping[key]
                 ac_params[mapped_key] = value
                 logger.debug(f"Extracted AttentionalCopula parameter: {key} -> {mapped_key}={value}")
+            elif key == 'stage1_activation_function':
+                model_direct_params[key] = value
+                logger.debug(f"Extracted stage1_activation_function: {value}")
             elif key == 'stage2_activation_function':
                 model_direct_params[key] = value
                 logger.debug(f"Extracted stage2_activation_function: {value}")
@@ -78,9 +81,15 @@ class TACTiS2LightningModule(pl.LightningModule):
         # Include the stage parameter in the direct params
         model_direct_params['stage'] = stage
 
+        # Ensure activation function parameters are explicitly set with defaults if not in config
+        stage1_activation_function = model_config.get("stage1_activation_function", "ReLU")
+        stage2_activation_function = model_config.get("stage2_activation_function", "ReLU")
+        
         # Instantiate the model with separated parameters
         self.model = TACTiS2Model(
             **model_direct_params, # Pass only direct model params here
+            stage1_activation_function=stage1_activation_function,
+            stage2_activation_function=stage2_activation_function,
             attentional_copula_kwargs=ac_params if ac_params else None # Pass mapped AC params separately
         )
         # Save hyperparameters, including the model_config

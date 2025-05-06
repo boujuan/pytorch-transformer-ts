@@ -241,8 +241,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # --- General ---
             "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
-            "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["ReLU", "GeLU"])), # Tune activation for Stage 2 components
-            "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["ReLU", "GeLU"])),
+            "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu"])), # Tune activation for Stage 2 components
+            "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu", "gelu"])),
 
             # --- Marginal CDF Encoder ---
             "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
