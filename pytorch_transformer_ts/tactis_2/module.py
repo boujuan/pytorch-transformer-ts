@@ -67,7 +67,6 @@ class TACTiS2Model(nn.Module):
         num_parallel_samples: int = 100,
         stage: int = 1,  # Add stage parameter with default value 1
         attentional_copula_kwargs: Optional[dict] = None,  # Parameters for AttentionalCopula component
-        attentional_copula_kwargs: Optional[dict] = None,  # Parameters for AttentionalCopula component
     ) -> None:
         """
         Initialize the TACTiS2Model.

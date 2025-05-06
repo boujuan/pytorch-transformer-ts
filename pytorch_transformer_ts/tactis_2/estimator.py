@@ -542,7 +542,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "input_encoding_normalization": self.input_encoding_normalization,
             "loss_normalization": self.loss_normalization,
             "encoder_type": self.encoder_type, # Pass encoder type
-            "ac_activation_function": self.ac_activation_function,
             "dropout_rate": self.dropout_rate, # Pass dropout rate
             # Attentional Copula specific MLP params (Aligned with AttentionalCopula class)
             "ac_mlp_num_layers": self.ac_mlp_num_layers,
