@@ -119,7 +119,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
         batch_size: int = 32,
-        num_batches_per_epoch: int = 50,
+        num_batches_per_epoch: Optional[int] = 50,
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
@@ -270,10 +270,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [20, 50, 100, 200])), # Corresponds to AttentionalCopula resolution
 
             # --- Optimizer Params ---
-            "lr_stage1": trial.suggest_float("lr_stage1", 1e-4, 1e-3, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
-            "lr_stage2": trial.suggest_float("lr_stage2", 1e-4, 5e-3, log=True), # INFO @boujuan kept the same lr.
-            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-5, 1e-4, 1e-3])),
-            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 1e-5, 1e-4, 1e-3])),
+            "lr_stage1": trial.suggest_float("lr_stage1", 1e-6, 5e-5, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
+            "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 5e-5, log=True), # INFO @boujuan kept the same lr.
+            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-5, 1e-4])),
+            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 1e-6, 1e-5, 1e-4])),
 
             # --- Dropout & Clipping ---
             "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.3),
@@ -542,6 +542,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "input_encoding_normalization": self.input_encoding_normalization,
             "loss_normalization": self.loss_normalization,
             "encoder_type": self.encoder_type, # Pass encoder type
+            "ac_activation_function": self.ac_activation_function,
             "dropout_rate": self.dropout_rate, # Pass dropout rate
             # Attentional Copula specific MLP params (Aligned with AttentionalCopula class)
             "ac_mlp_num_layers": self.ac_mlp_num_layers,

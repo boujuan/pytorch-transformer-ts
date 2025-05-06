@@ -67,6 +67,7 @@ class TACTiS2Model(nn.Module):
         num_parallel_samples: int = 100,
         stage: int = 1,  # Add stage parameter with default value 1
         attentional_copula_kwargs: Optional[dict] = None,  # Parameters for AttentionalCopula component
+        attentional_copula_kwargs: Optional[dict] = None,  # Parameters for AttentionalCopula component
     ) -> None:
         """
         Initialize the TACTiS2Model.
@@ -109,6 +110,8 @@ class TACTiS2Model(nn.Module):
             Sequence of lags to use as features.
         num_parallel_samples
             Number of samples to generate in parallel during inference.
+        attentional_copula_kwargs
+            Optional dictionary containing specific arguments for the AttentionalCopula.
         """
         super().__init__()
         
@@ -226,9 +229,13 @@ class TACTiS2Model(nn.Module):
 
         # Apply AttentionalCopula custom parameters if provided
         if attentional_copula_kwargs is not None and isinstance(attentional_copula_kwargs, dict):
-            logger.info(f"Applying custom AttentionalCopula parameters: {attentional_copula_kwargs}")
-            # Update the attentional_copula dictionary with custom parameters
-            copula_decoder_args["attentional_copula"].update(attentional_copula_kwargs)
+            logger.info(f"Applying custom AttentionalCopula parameters from kwargs: {attentional_copula_kwargs}")
+            # Update the attentional_copula dictionary within copula_decoder_args
+            if "attentional_copula" in copula_decoder_args:
+                copula_decoder_args["attentional_copula"].update(attentional_copula_kwargs)
+            else:
+                logger.warning("attentional_copula key missing in copula_decoder_args, creating it.")
+                copula_decoder_args["attentional_copula"] = attentional_copula_kwargs
 
         # Initialize the TACTiS model with constructed args
         self.tactis = TACTiS(
