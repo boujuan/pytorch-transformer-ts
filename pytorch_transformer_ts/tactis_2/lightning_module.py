@@ -5,6 +5,7 @@ import torch
 from gluonts.torch.util import weighted_average
 # from gluonts.dataset.field_names import FieldName
 import sys
+from torch.optim.lr_scheduler import LambdaLR # Import LambdaLR
 from .module import TACTiS2Model
 
 # Set up logging
@@ -24,8 +25,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         weight_decay_stage2: float = 0.0,
         stage: int = 1,  # Start with stage 1 (flow-only)
         stage2_start_epoch: int = 10,  # When to start stage 2
-        gradient_clip_val_stage1: float = 1000.0, # Stage 1 clipping
-        gradient_clip_val_stage2: float = 1000.0, # Stage 2 clipping
+        warmup_steps: int = 1000, # Number of warmup steps for Stage 1 LR
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -46,47 +46,47 @@ class TACTiS2LightningModule(pl.LightningModule):
             Initial training stage (1 for flow-only, 2 for flow+copula).
         stage2_start_epoch
             Epoch at which to switch to stage 2 (flow+copula) if starting with stage 1.
-        gradient_clip_val_stage1
-            Value for gradient clipping in stage 1. 0.0 means disabled.
-        gradient_clip_val_stage2
-            Value for gradient clipping in stage 2. 0.0 means disabled.
+        warmup_steps
+            Number of linear warmup steps for the learning rate during Stage 1.
         """
         super().__init__()
         # Instantiate the model internally using the provided config
-        # Separate Attentional Copula parameters from the main model config
+        # Extract Attentional Copula specific parameters with ac_ prefix
         ac_params = {}
         model_direct_params = {}
-        # Mapping from config keys (with ac_ prefix) to AttentionalCopula internal arg names
+        
+        # Map from config ac_ prefix to the actual parameter names in AttentionalCopula
         ac_param_mapping = {
             'ac_mlp_num_layers': 'mlp_layers',
             'ac_mlp_dim': 'mlp_dim',
             'ac_activation_function': 'activation_function'
-            # Add other ac_ mappings here if needed in the future
         }
-
+        
+        # Separate parameters into proper dictionaries
         for key, value in model_config.items():
             if key.startswith('ac_') and key in ac_param_mapping:
-                # Map and store in ac_params
+                # Store in ac_params with proper mapping
                 mapped_key = ac_param_mapping[key]
                 ac_params[mapped_key] = value
-                logger.debug(f"Extracted AttentionalCopula parameter: {key} -> {mapped_key}={value}")
+                logger.info(f"Extracted AttentionalCopula parameter: {key} -> {mapped_key}={value}")
             else:
-                # Keep non-ac_ parameters in the direct dictionary
+                # All other parameters go to the direct params dictionary
                 model_direct_params[key] = value
-
+        
         # Include the stage parameter in the direct params
         model_direct_params['stage'] = stage
-
-        # Instantiate the model with separated parameters
+        
+        # Pass both direct parameters and AC parameters to TACTiS2Model
+        # This ensures AC parameters are properly handled without interfering with other parameters
         self.model = TACTiS2Model(
-            **model_direct_params, # Pass only direct model params here
-            attentional_copula_kwargs=ac_params if ac_params else None # Pass mapped AC params separately
+            **model_direct_params,
+            attentional_copula_kwargs=ac_params if ac_params else None
         )
         # Save hyperparameters, including the model_config
-        self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2", 
+        self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2",
                                   "weight_decay_stage1", "weight_decay_stage2",
-                                  "stage", "stage2_start_epoch", 
-                                  "gradient_clip_val_stage1", "gradient_clip_val_stage2")
+                                  "stage", "stage2_start_epoch",
+                                  "warmup_steps") # Add warmup_steps here
         # Store stage-specific optimizer parameters
         # Note: These are already saved by save_hyperparameters() if passed to __init__
         # self.lr_stage1 = lr_stage1
@@ -98,8 +98,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.weight_decay_stage2 = self.hparams.weight_decay_stage2
         self.stage = self.hparams.stage
         self.stage2_start_epoch = self.hparams.stage2_start_epoch
-        self.gradient_clip_val_stage1 = self.hparams.gradient_clip_val_stage1
-        self.gradient_clip_val_stage2 = self.hparams.gradient_clip_val_stage2
+        self.warmup_steps = self.hparams.warmup_steps # Store warmup steps
 
         # Set the stage in the model
         if hasattr(self.model.tactis, "set_stage"):
@@ -175,9 +174,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         -------
         The loss.
         """
-        # Manual optimization
-        opt = self.optimizers()
-        opt.zero_grad()
+        # Automatic optimization handles optimizer steps, zero_grad, backward
         
         # Extract data from the batch
         past_target = batch["past_target"]
@@ -221,19 +218,12 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.warning("NaN detected in loss! Replacing with large value to continue training.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
-        # Manual backward pass
-        self.manual_backward(loss)
-        
-        # Apply gradient clipping based on current stage
-        current_clip_val = self.gradient_clip_val_stage1 if self.stage == 1 else self.gradient_clip_val_stage2
-        if current_clip_val > 0:
-             torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=current_clip_val)
-        
-        # Step the optimizer
-        opt.step()
-        
+        # Loss is returned for automatic optimization
+
         # Log the loss
         self.log("train_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
+        
+        # Manual LR logging removed as LearningRateMonitor is now working
         
         return loss
         
@@ -321,9 +311,35 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         # Configure gradient clipping directly in the lightning module
         # This helps with numerical stability by preventing extreme gradient values
-        self.automatic_optimization = False
+        # self.automatic_optimization = False # Use automatic optimization loop
+        self.automatic_optimization = True # Explicitly set to True
         
-        # Can add learning rate scheduler here if needed
+        # Add LR Warmup Scheduler ONLY for Stage 1 and if warmup_steps > 0
+        if self.stage == 1 and self.warmup_steps > 0:
+            logger.info(f"Configuring LR scheduler: Linear warmup for {self.warmup_steps} steps.")
+            
+            # Define linear warmup function
+            def lr_lambda_func(current_step: int):
+                if current_step < self.warmup_steps:
+                    return float(current_step) / float(max(1, self.warmup_steps))
+                return 1.0
+                
+            scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda_func)
+            
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "step",  # Step scheduler every training step
+                    "frequency": 1,
+                },
+            }
+        else:
+            # No scheduler for Stage 2 or if warmup_steps is 0
+            logger.info(f"No LR scheduler configured for Stage {self.stage} (warmup_steps={self.warmup_steps}).")
+            return optimizer
+            
+        # Example for ReduceLROnPlateau (keep commented out)
         # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         #     optimizer, mode="min", factor=0.5, patience=10
         # )

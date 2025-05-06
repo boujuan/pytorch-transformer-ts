@@ -92,7 +92,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         input_encoding_normalization: bool = True,
         loss_normalization: str = "series",
         encoder_type: str = "standard",
-        ac_activation_function: str = "ReLU",
+        # Attentional Copula specific MLP params (passed down) - Aligned with AttentionalCopula class
+        ac_mlp_num_layers: int = 2, # Default: Number of layers in AC's internal MLP
+        ac_mlp_dim: int = 128,      # Default: Dimension of AC's internal MLP layers
+        ac_activation_function: str = "ReLU", # Default: Activation in AC's internal MLP
         # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
@@ -103,6 +106,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         dropout_rate: float = 0.1,
         gradient_clip_val_stage1: float = 1000.0,
         gradient_clip_val_stage2: float = 1000.0,
+        warmup_steps: int = 1000, # Added warmup_steps argument
         # General Estimator arguments
         use_lazyframe: bool = False,
         num_feat_dynamic_real: int = 0,
@@ -158,6 +162,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.input_encoding_normalization = input_encoding_normalization
         self.loss_normalization = loss_normalization
         self.encoder_type = encoder_type
+        # Store AC params (aligned with AttentionalCopula class)
+        self.ac_mlp_num_layers = ac_mlp_num_layers
+        self.ac_mlp_dim = ac_mlp_dim
         self.ac_activation_function = ac_activation_function
         # Training stage / optimizer params
         self.initial_stage = initial_stage
@@ -169,7 +176,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.dropout_rate = dropout_rate
         self.gradient_clip_val_stage1 = gradient_clip_val_stage1
         self.gradient_clip_val_stage2 = gradient_clip_val_stage2
-
+        self.warmup_steps = warmup_steps # Store warmup_steps
+ 
         # Common parameters
         self.input_size = input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -246,6 +254,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 1, 4),
             "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])), # Renamed from copula_ts_embedding_dim
             "ac_activation_function": trial.suggest_categorical("ac_activation_function", ["ReLU", "GeLU"]),
+
+            # --- Attentional Copula MLP (Aligned with AttentionalCopula class) ---
+            "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 1, 4), # Tune number of layers
+            "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])), # Tune layer dimension
+            "ac_activation_function": trial.suggest_categorical("ac_activation_function", dynamic_kwargs.get("ac_activation_function", ["ReLU", "GeLU", "leaky_relu"])), # Tune activation
 
             # --- Decoder ---
             "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
@@ -503,7 +516,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # Gather all configured parameters for the TACTiS2Model into a dictionary
         model_config = {
             # Data dimensions
-            "freq": self.freq,
+            # "freq": self.freq,  # DEBUG Temporarily commented out - will be included in future tuned models
             "num_series": self.input_size,
             "context_length": self.context_length,
             "prediction_length": self.prediction_length,
@@ -532,6 +545,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "encoder_type": self.encoder_type, # Pass encoder type
             "ac_activation_function": self.ac_activation_function,
             "dropout_rate": self.dropout_rate, # Pass dropout rate
+            # Attentional Copula specific MLP params (Aligned with AttentionalCopula class)
+            "ac_mlp_num_layers": self.ac_mlp_num_layers,
+            "ac_mlp_dim": self.ac_mlp_dim,
+            "ac_activation_function": self.ac_activation_function,
             # GluonTS compatability parameters
             "cardinality": self.cardinality,
             "num_feat_dynamic_real": self.num_feat_dynamic_real,
@@ -554,6 +571,5 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
-            gradient_clip_val_stage1=self.gradient_clip_val_stage1, # Pass stage 1 clipping
-            gradient_clip_val_stage2=self.gradient_clip_val_stage2, # Pass stage 2 clipping
+            warmup_steps=self.warmup_steps, # Pass warmup_steps
         )

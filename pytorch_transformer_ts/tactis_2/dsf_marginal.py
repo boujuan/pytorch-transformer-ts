@@ -41,22 +41,6 @@ class DSFMarginal(nn.Module):
 
     def forward_logdet(self, context: torch.Tensor, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Transform with derivative computation"""
-        # Check for NaNs in input
-        if torch.isnan(x).any():
-            logger.warning("NaN values detected in input x, replacing with zeros")
-            x = torch.nan_to_num(x, nan=0.0)
-            if torch.isnan(context).any():
-                logger.warning("NaN values detected in context tensor, replacing with zeros")
-            context = torch.nan_to_num(context, nan=0.0)
-        # Clamp x to a valid range to prevent numerical issues
-        # The flow expects values that can be reasonably transformed without producing extremes
-        x_min, x_max = x.min().item(), x.max().item()
-
-        # Only clamp if values are extreme
-        if x_min < -100 or x_max > 100:
-            logger.info("Clamping extreme values in x")
-            x = torch.clamp(x, min=-100.0, max=100.0)
-
         # Expect context shape [batch, N, dim], x shape [batch, N]
         # No internal reshaping needed for context
         batch_size = context.shape[0]
@@ -68,59 +52,20 @@ class DSFMarginal(nn.Module):
              logger.warning(f"Context dim {context.shape[-1]} != expected {self.expected_context_dim}. Check calling code.")
              # Attempt to proceed, conditioner might fail
 
-        # Check for NaNs after reshaping (now done in calling code)
-        if torch.isnan(context).any():
-            logger.warning("NaN values detected in context, replacing with zeros")
-            context = torch.nan_to_num(context, nan=0.0)
-
         # Apply conditioner directly to context
-        try:
-            marginal_params = self.marginal_conditioner(context) # Input [batch, N, dim], Output [batch, N, param_len]
+        marginal_params = self.marginal_conditioner(context) # Input [batch, N, dim], Output [batch, N, param_len]
 
-            # Check for NaNs in parameters
-            if torch.isnan(marginal_params).any():
-                logger.warning("NaN values in marginal parameters, replacing with zeros")
-                marginal_params = torch.nan_to_num(marginal_params, nan=0.0)
+        # No reshaping needed for marginal_params, should be [batch, N, param_len]
+        # No dimension matching needed, flow expects params [batch, N, ...] and x [batch, N]
 
-            # No reshaping needed for marginal_params, should be [batch, N, param_len]
-            # No dimension matching needed, flow expects params [batch, N, ...] and x [batch, N]
+        # Forward through the flow
+        transformed_x, logdet = self.marginal_flow.forward(marginal_params, x) # Pass [batch, N, param_len] and [batch, N]
 
-            # Forward through the flow
-            transformed_x, logdet = self.marginal_flow.forward(marginal_params, x) # Pass [batch, N, param_len] and [batch, N]
+        return transformed_x, logdet
 
-            # Check for NaNs in the output
-            if torch.isnan(transformed_x).any() or torch.isnan(logdet).any():
-                logger.warning("NaN values in DSFMarginal output, replacing with zeros")
-                transformed_x = torch.nan_to_num(transformed_x, nan=0.0)
-                logdet = torch.nan_to_num(logdet, nan=0.0)
-
-            return transformed_x, logdet
-
-        except Exception as e:
-            logger.error(f"Error in DSFMarginal forward_logdet: {e}")
-            # Return zeros as a fallback to avoid crashing
-            zeros_x = torch.zeros_like(x)
-            # Fallback logdet shape should be [batch, N] to match expected output of flow
-            zeros_logdet = torch.zeros_like(x) # Shape [batch, N]
-            return zeros_x, zeros_logdet
 
     def forward_no_logdet(self, context: torch.Tensor, x: torch.Tensor) -> torch.Tensor:
         """Transform without derivative computation"""
-        # Check for NaNs in input
-        if torch.isnan(x).any():
-            logger.warning("NaN values detected in input x for forward_no_logdet, replacing with zeros")
-            x = torch.nan_to_num(x, nan=0.0)
-
-        if torch.isnan(context).any():
-            logger.warning("NaN values detected in context tensor for forward_no_logdet, replacing with zeros")
-            context = torch.nan_to_num(context, nan=0.0)
-
-        # Clamp x to a valid range to prevent numerical issues
-        x_min, x_max = x.min().item(), x.max().item()
-        if x_min < -100 or x_max > 100:
-            logger.info("Clamping extreme values in x for forward_no_logdet")
-            x = torch.clamp(x, min=-100.0, max=100.0)
-
         # Expect context shape [batch, N, dim], x shape [batch, N]
         # No internal reshaping needed for context
         batch_size = context.shape[0]
@@ -130,38 +75,17 @@ class DSFMarginal(nn.Module):
         if context.shape[-1] != self.expected_context_dim:
              logger.warning(f"Context dim {context.shape[-1]} != expected {self.expected_context_dim}. Check calling code.")
 
-        # Check for NaNs after reshaping (now done in calling code)
-        if torch.isnan(context).any():
-            logger.warning("NaN values detected in context for forward_no_logdet, replacing with zeros")
-            context = torch.nan_to_num(context, nan=0.0)
+        # Apply conditioner directly to context
+        marginal_params = self.marginal_conditioner(context) # Input [batch, N, dim], Output [batch, N, param_len]
 
-        try:
-            # Apply conditioner directly to context
-            marginal_params = self.marginal_conditioner(context) # Input [batch, N, dim], Output [batch, N, param_len]
+        # Match original TACTiS: unsqueeze marginal_params if x has a sample dimension
+        if marginal_params.dim() == x.dim():
+            marginal_params = marginal_params[:, :, None, :]
 
-            # Check for NaNs in parameters
-            if torch.isnan(marginal_params).any():
-                logger.warning("NaN values in marginal parameters for forward_no_logdet, replacing with zeros")
-                marginal_params = torch.nan_to_num(marginal_params, nan=0.0)
+        # Forward through the flow
+        transformed_x = self.marginal_flow.forward_no_logdet(marginal_params, x) # Pass [batch, N, param_len] and [batch, N]
 
-            # Match original TACTiS: unsqueeze marginal_params if x has a sample dimension
-            if marginal_params.dim() == x.dim():
-                marginal_params = marginal_params[:, :, None, :]
-
-            # Forward through the flow
-            transformed_x = self.marginal_flow.forward_no_logdet(marginal_params, x) # Pass [batch, N, param_len] and [batch, N]
-
-            # Check for NaNs in the output
-            if torch.isnan(transformed_x).any():
-                logger.warning("NaN values in DSFMarginal forward_no_logdet output, replacing with zeros")
-                transformed_x = torch.nan_to_num(transformed_x, nan=0.0)
-
-            return transformed_x
-
-        except Exception as e:
-            logger.error(f"Error in DSFMarginal forward_no_logdet: {e}")
-            # Return zeros as a fallback to avoid crashing
-            return torch.zeros_like(x)
+        return transformed_x
 
     def inverse(self, context: torch.Tensor, u: torch.Tensor, max_iter: int = 100) -> torch.Tensor:
         """Compute inverse CDF using binary search"""
@@ -180,19 +104,19 @@ class DSFMarginal(nn.Module):
         # unsqueeze marginal_params if u has a sample dimension
         if marginal_params.dim() == u.dim():
             marginal_params = marginal_params[:, :, None, :]
+ 
+        # Adjust bounds for [-1, 1] normalized data scale
+        left = -2.0 * torch.ones_like(u)
+        right = 2.0 * torch.ones_like(u)
 
-        left = -1000.0 * torch.ones_like(u)
-        right = 1000.0 * torch.ones_like(u)
-
-        for _ in range(max_iter):
+        for iter_num in range(max_iter): # Add iter_num for logging
             mid = (left + right) / 2
-
-            # Evaluate CDF at midpoint
-            # Pass params [batch, N, param_len] and mid [batch, N] or [batch, N, samples]
             cdf_mid = self.marginal_flow.forward_no_logdet(marginal_params, mid)
 
             # Update bounds
             left = torch.where(cdf_mid < u, mid, left)
             right = torch.where(cdf_mid >= u, mid, right)
 
-        return (left + right) / 2
+        final_mid = (left + right) / 2
+
+        return final_mid # Return the final mid value

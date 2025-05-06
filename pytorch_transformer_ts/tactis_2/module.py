@@ -209,12 +209,12 @@ class TACTiS2Model(nn.Module):
                 "attention_heads": decoder_transformer_num_heads,
                 "attention_layers": decoder_transformer_num_layers,
                 "attention_dim": decoder_transformer_embedding_dim_per_head, # Dim per head
-                "mlp_layers": 2, # Keep default, could be tuned
-                "mlp_dim": decoder_transformer_d_model * 4, # Standard practice
+                "mlp_layers": 2, # Default value, will be overridden if provided
+                "mlp_dim": decoder_transformer_d_model * 4, # Default value, will be overridden if provided
                 "resolution": decoder_num_bins,
                 "dropout": dropout_rate, # Use configured dropout
-                "attention_mlp_class": "_easy_mlp", # Keep default
-                "activation_function": "relu", # Keep default
+                "attention_mlp_class": "_easy_mlp", # Default value
+                "activation_function": "relu", # Default value, will be overridden if provided
             },
             "dsf_marginal": {
                 "context_dim": marginal_d_model, # Use flow encoder output dim
@@ -228,14 +228,9 @@ class TACTiS2Model(nn.Module):
 
         # Apply AttentionalCopula custom parameters if provided
         if attentional_copula_kwargs is not None and isinstance(attentional_copula_kwargs, dict):
-            logger.info(f"Applying custom AttentionalCopula parameters from kwargs: {attentional_copula_kwargs}")
-            # Update the attentional_copula dictionary within copula_decoder_args
-            if "attentional_copula" in copula_decoder_args:
-                copula_decoder_args["attentional_copula"].update(attentional_copula_kwargs)
-            else:
-                # This case shouldn't happen if the structure is correct, but handle defensively
-                logger.warning("attentional_copula key missing in copula_decoder_args, creating it.")
-                copula_decoder_args["attentional_copula"] = attentional_copula_kwargs
+            logger.info(f"Applying custom AttentionalCopula parameters: {attentional_copula_kwargs}")
+            # Update the attentional_copula dictionary with custom parameters
+            copula_decoder_args["attentional_copula"].update(attentional_copula_kwargs)
 
         # Initialize the TACTiS model with constructed args
         self.tactis = TACTiS(

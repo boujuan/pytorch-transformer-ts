@@ -1,6 +1,16 @@
 import torch
 from torch import nn
 import math
+from typing import Dict, Type # Added for type hinting
+
+# Helper dictionary to map activation function names to nn modules
+_ACTIVATION_MAP: Dict[str, Type[nn.Module]] = {
+    "relu": nn.ReLU,
+    "gelu": nn.GELU,
+    "leakyrelu": nn.LeakyReLU,
+    # Add other activations as needed
+}
+
 
 class AttentionalCopula(nn.Module):
     """
@@ -17,9 +27,18 @@ class AttentionalCopula(nn.Module):
         resolution: int = 128,
         dropout: float = 0.1,
         attention_mlp_class: str = "_easy_mlp",
-        activation_function: str = "relu",
+        activation_function: str = "ReLU",
     ):
         super().__init__()
+
+        # Validate activation function
+        if activation_function.lower() not in _ACTIVATION_MAP:
+            raise ValueError(
+                f"Unsupported activation function: {activation_function}. "
+                f"Supported functions are: {list(_ACTIVATION_MAP.keys())}"
+            )
+        self.activation_cls = _ACTIVATION_MAP[activation_function.lower()]
+
         self.input_dim = input_dim
         self.attention_layers = attention_layers
         self.attention_heads = attention_heads
@@ -45,9 +64,10 @@ class AttentionalCopula(nn.Module):
         # Feed-forward layers
         feed_forwards = []
         for _ in range(attention_layers):
-            layers = [nn.Linear(attention_heads * attention_dim, mlp_dim), nn.ReLU()]
+            # Use the selected activation class
+            layers = [nn.Linear(attention_heads * attention_dim, mlp_dim), self.activation_cls()]
             for _ in range(1, mlp_layers):
-                layers += [nn.Linear(mlp_dim, mlp_dim), nn.ReLU()]
+                layers += [nn.Linear(mlp_dim, mlp_dim), self.activation_cls()]
             layers += [nn.Linear(mlp_dim, attention_heads * attention_dim), nn.Dropout(self.dropout)]
             feed_forwards.append(nn.Sequential(*layers))
         self.feed_forwards = nn.ModuleList(feed_forwards)
