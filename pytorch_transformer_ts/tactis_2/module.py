@@ -109,6 +109,8 @@ class TACTiS2Model(nn.Module):
             Sequence of lags to use as features.
         num_parallel_samples
             Number of samples to generate in parallel during inference.
+        attentional_copula_kwargs
+            Optional dictionary containing specific arguments for the AttentionalCopula.
         """
         super().__init__()
         

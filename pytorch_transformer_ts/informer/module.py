@@ -681,9 +681,9 @@ class InformerModel(nn.Module):
         sliced_params = params
         if trailing_n is not None:
             sliced_params = [p[:, -trailing_n:] for p in params]
-        return self.distr_output.distribution(sliced_params, loc=loc, scale=scale)
+        return self.distr_output.distribution(tuple(x.double() for x in sliced_params), loc=loc, scale=scale)
 
-    # for prediction 
+    # for prediction
     def forward(
         self,
         feat_static_cat: torch.Tensor,
@@ -701,7 +701,7 @@ class InformerModel(nn.Module):
         
         # assert past_time_feat.shape[1] == self.context_length
         # assert future_time_feat.shape[1] == self.prediction_length
-
+        
         encoder_inputs, loc, scale, static_feat = self.create_network_inputs(
             feat_static_cat,
             feat_static_real,
@@ -709,7 +709,7 @@ class InformerModel(nn.Module):
             past_target,
             past_observed_values,
         )
-
+        
         enc_out, _ = self.encoder(self.embed(encoder_inputs))
 
         repeated_loc = loc.repeat_interleave(repeats=num_parallel_samples, dim=0)
@@ -751,7 +751,7 @@ class InformerModel(nn.Module):
                 subsequences_length=1 + k,
                 shift=1,
             )
-
+            
             # shape [n_continuity_groups*n_parallel_samples, context_length, size of lagged repeated_past_target]
             lags_shape = lagged_sequence.shape
 
@@ -785,7 +785,7 @@ class InformerModel(nn.Module):
                 future_params.append(tuple(getattr(distr, output_distr_params[tgt_key])[::num_parallel_samples, :, :] 
                                            for tgt_key in distr_params))
             
-            next_sample = distr.sample()
+            next_sample = distr.sample().float()
             repeated_past_target = torch.cat(
                 (repeated_past_target, (next_sample - repeated_loc) / repeated_scale),
                 dim=1,
