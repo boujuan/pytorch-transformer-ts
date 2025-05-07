@@ -107,7 +107,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         dropout_rate: float = 0.1,
         gradient_clip_val_stage1: float = 1000.0,
         gradient_clip_val_stage2: float = 1000.0,
-        warmup_steps: int = 1000, # Added warmup_steps argument
+        warmup_steps_s1: int = 1000, # Warmup steps for stage 1
+        warmup_steps_s2: int = 500,  # Warmup steps for stage 2
         # General Estimator arguments
         use_lazyframe: bool = False,
         num_feat_dynamic_real: int = 0,
@@ -178,7 +179,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.dropout_rate = dropout_rate
         self.gradient_clip_val_stage1 = gradient_clip_val_stage1
         self.gradient_clip_val_stage2 = gradient_clip_val_stage2
-        self.warmup_steps = warmup_steps # Store warmup_steps
+        self.warmup_steps_s1 = warmup_steps_s1 # Store stage 1 warmup steps
+        self.warmup_steps_s2 = warmup_steps_s2 # Store stage 2 warmup steps
  
         # Common parameters
         self.input_size = input_size
@@ -572,7 +574,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
-            warmup_steps=self.warmup_steps, # Pass warmup_steps
+            warmup_steps_s1=self.warmup_steps_s1, # Pass stage 1 warmup steps
+            warmup_steps_s2=self.warmup_steps_s2, # Pass stage 2 warmup steps
             # Pass activation functions explicitly as keyword arguments
             stage1_activation_function=self.stage1_activation_function,
             stage2_activation_function=self.stage2_activation_function,
