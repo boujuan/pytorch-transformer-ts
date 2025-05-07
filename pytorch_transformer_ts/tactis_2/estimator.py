@@ -71,6 +71,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # --- Scheduler specific arguments ---
         eta_min_fraction_s1: float = 0.01,  # Fraction of initial LR for Stage 1 cosine decay eta_min
         eta_min_fraction_s2: float = 0.01,  # Fraction of initial LR for Stage 2 cosine decay eta_min
+        steps_to_decay_s1: Optional[int] = None,  # Optional manual T_max value for Stage 1 CosineAnnealingLR
+        steps_to_decay_s2: Optional[int] = None,  # Optional manual T_max value for Stage 2 CosineAnnealingLR
         # --- TACTiS2 specific arguments ---
         # Passed directly to TACTiS2Model/TACTiS
         flow_series_embedding_dim: int = 5,
@@ -186,6 +188,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.gradient_clip_val_stage2 = gradient_clip_val_stage2
         self.warmup_steps_s1 = warmup_steps_s1 # Store stage 1 warmup steps
         self.warmup_steps_s2 = warmup_steps_s2 # Store stage 2 warmup steps
+        self.steps_to_decay_s1 = steps_to_decay_s1 # Store manual T_max value for stage 1
+        self.steps_to_decay_s2 = steps_to_decay_s2 # Store manual T_max value for stage 2
  
         # Common parameters
         self.input_size = input_size
@@ -583,6 +587,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             stage2_start_epoch=self.stage2_start_epoch,
             warmup_steps_s1=self.warmup_steps_s1, # Pass stage 1 warmup steps
             warmup_steps_s2=self.warmup_steps_s2, # Pass stage 2 warmup steps
+            steps_to_decay_s1=self.steps_to_decay_s1, # Pass manual T_max value for stage 1
+            steps_to_decay_s2=self.steps_to_decay_s2, # Pass manual T_max value for stage 2
             # Pass activation functions explicitly as keyword arguments
             stage1_activation_function=self.stage1_activation_function,
             stage2_activation_function=self.stage2_activation_function,

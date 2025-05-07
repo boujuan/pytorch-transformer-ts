@@ -7,6 +7,7 @@ from gluonts.torch.util import weighted_average
 import sys
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR
 from .module import TACTiS2Model
+from typing import Optional
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -27,6 +28,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         stage2_start_epoch: int = 10,  # When to start stage 2
         warmup_steps_s1: int = 1000, # Number of warmup steps for Stage 1 LR
         warmup_steps_s2: int = 500,  # Number of warmup steps for Stage 2 LR
+        steps_to_decay_s1: Optional[int] = None,  # Optional manual T_max value for Stage 1 CosineAnnealingLR
+        steps_to_decay_s2: Optional[int] = None,  # Optional manual T_max value for Stage 2 CosineAnnealingLR
         stage1_activation_function: str = "ReLU", # Added direct parameter
         stage2_activation_function: str = "ReLU", # Added direct parameter
         eta_min_fraction_s1: float = 0.01, # Fraction of initial LR for eta_min in Stage 1 cosine decay
@@ -66,6 +69,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "weight_decay_stage1", "weight_decay_stage2",
                                    "stage", "stage2_start_epoch",
                                    "warmup_steps_s1", "warmup_steps_s2",
+                                   "steps_to_decay_s1", "steps_to_decay_s2",
                                    "stage1_activation_function", "stage2_activation_function",
                                    "eta_min_fraction_s1", "eta_min_fraction_s2", "num_batches_per_epoch")
 
@@ -193,8 +197,15 @@ class TACTiS2LightningModule(pl.LightningModule):
                  # Log diagnostic information
                  logger.info(f"Stage 2 scheduler setup - total_epochs: {total_epochs_in_run}, stage2_start_epoch: {self.hparams.stage2_start_epoch}, epochs_in_stage2: {epochs_in_stage2}")
                  
-                 T_max_s2 = steps_per_epoch * epochs_in_stage2
-                 logger.info(f"Stage 2 Cosine Annealing calculation: T_max_s2 = {steps_per_epoch} * {epochs_in_stage2} = {T_max_s2}")
+                 # Check if manual steps_to_decay_s2 is configured
+                 if self.hparams.steps_to_decay_s2 is not None and self.hparams.steps_to_decay_s2 > 0:
+                     T_max_s2 = self.hparams.steps_to_decay_s2
+                     logger.info(f"Using manually configured steps_to_decay_s2={T_max_s2} as T_max for Stage 2 CosineAnnealingLR.")
+                 else:
+                     # Calculate based on epochs and steps per epoch
+                     T_max_s2_calculated = steps_per_epoch * epochs_in_stage2
+                     T_max_s2 = T_max_s2_calculated
+                     logger.info(f"steps_to_decay_s2 not configured or invalid. Calculating T_max_s2 = {steps_per_epoch} * {epochs_in_stage2} = {T_max_s2}")
                  
                  # Ensure T_max is valid
                  if T_max_s2 <= 0:
@@ -230,8 +241,10 @@ class TACTiS2LightningModule(pl.LightningModule):
                  warmup_scheduler_s2 = LambdaLR(optimizer, lr_lambda=lr_lambda_func_s2)
                  
                  # Adjust T_max for cosine annealing to account for warmup steps
-                 T_max_s2 = T_max_s2 - self.hparams.warmup_steps_s2
-                 logger.info(f"Stage 2 Cosine Annealing adjusted for warmup: T_max_s2 = {T_max_s2} (after subtracting {self.hparams.warmup_steps_s2} warmup steps)")
+                 # Only adjust if we're using the calculated value, not the manual value
+                 if self.hparams.steps_to_decay_s2 is None or self.hparams.steps_to_decay_s2 <= 0:
+                     T_max_s2 = T_max_s2 - self.hparams.warmup_steps_s2
+                     logger.info(f"Stage 2 Cosine Annealing adjusted for warmup: T_max_s2 = {T_max_s2} (after subtracting {self.hparams.warmup_steps_s2} warmup steps)")
                  
                  if T_max_s2 <= 0:
                      logger.warning(f"Adjusted T_max_s2 after warmup is not positive ({T_max_s2}). Using warmup-only scheduler for Stage 2.")
@@ -449,10 +462,16 @@ class TACTiS2LightningModule(pl.LightningModule):
                 warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda_func)
                 
                 # Calculate T_max for cosine annealing in Stage 1
-                epochs_in_stage1 = self.hparams.stage2_start_epoch
-                T_max_s1 = (steps_per_epoch * epochs_in_stage1) - self.hparams.warmup_steps_s1
-                
-                logger.info(f"Stage 1 Cosine Annealing calculation: T_max_s1 = ({steps_per_epoch} * {epochs_in_stage1}) - {self.hparams.warmup_steps_s1} = {T_max_s1}")
+                # Check if manual steps_to_decay_s1 is configured
+                if self.hparams.steps_to_decay_s1 is not None and self.hparams.steps_to_decay_s1 > 0:
+                    T_max_s1 = self.hparams.steps_to_decay_s1
+                    logger.info(f"Using manually configured steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR.")
+                else:
+                    # Calculate based on epochs and steps per epoch
+                    epochs_in_stage1 = self.hparams.stage2_start_epoch
+                    T_max_s1_calculated = (steps_per_epoch * epochs_in_stage1) - self.hparams.warmup_steps_s1
+                    T_max_s1 = T_max_s1_calculated
+                    logger.info(f"steps_to_decay_s1 not configured or invalid. Calculating T_max_s1 = ({steps_per_epoch} * {epochs_in_stage1}) - {self.hparams.warmup_steps_s1} = {T_max_s1}")
                 
                 # Ensure T_max is valid
                 if T_max_s1 <= 0:
@@ -496,10 +515,15 @@ class TACTiS2LightningModule(pl.LightningModule):
                 }
             else:
                 # No warmup, just cosine annealing
-                epochs_in_stage1 = self.hparams.stage2_start_epoch
-                T_max_s1 = steps_per_epoch * epochs_in_stage1
-                
-                logger.info(f"Stage 1 Cosine Annealing calculation (no warmup): T_max_s1 = {steps_per_epoch} * {epochs_in_stage1} = {T_max_s1}")
+                # Check if manual steps_to_decay_s1 is configured
+                if self.hparams.steps_to_decay_s1 is not None and self.hparams.steps_to_decay_s1 > 0:
+                    T_max_s1 = self.hparams.steps_to_decay_s1
+                    logger.info(f"Using manually configured steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR (no warmup).")
+                else:
+                    # Calculate based on epochs and steps per epoch
+                    epochs_in_stage1 = self.hparams.stage2_start_epoch
+                    T_max_s1 = steps_per_epoch * epochs_in_stage1
+                    logger.info(f"steps_to_decay_s1 not configured or invalid. Calculating T_max_s1 = {steps_per_epoch} * {epochs_in_stage1} = {T_max_s1}")
                 
                 # Ensure T_max is valid
                 if T_max_s1 <= 0:
