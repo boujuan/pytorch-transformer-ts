@@ -66,6 +66,7 @@ class TACTiS2Model(nn.Module):
         lags_seq: Optional[List[int]] = None,
         num_parallel_samples: int = 100,
         stage: int = 1,  # Add stage parameter with default value 1
+        attentional_copula_kwargs: Optional[dict] = None,  # Parameters for AttentionalCopula component
     ) -> None:
         """
         Initialize the TACTiS2Model.
@@ -108,6 +109,8 @@ class TACTiS2Model(nn.Module):
             Sequence of lags to use as features.
         num_parallel_samples
             Number of samples to generate in parallel during inference.
+        attentional_copula_kwargs
+            Optional dictionary containing specific arguments for the AttentionalCopula.
         """
         super().__init__()
         
@@ -206,12 +209,12 @@ class TACTiS2Model(nn.Module):
                 "attention_heads": decoder_transformer_num_heads,
                 "attention_layers": decoder_transformer_num_layers,
                 "attention_dim": decoder_transformer_embedding_dim_per_head, # Dim per head
-                "mlp_layers": 2, # Keep default, could be tuned
-                "mlp_dim": decoder_transformer_d_model * 4, # Standard practice
+                "mlp_layers": 2, # Default value, will be overridden if provided
+                "mlp_dim": decoder_transformer_d_model * 4, # Default value, will be overridden if provided
                 "resolution": decoder_num_bins,
                 "dropout": dropout_rate, # Use configured dropout
-                "attention_mlp_class": "_easy_mlp", # Keep default
-                "activation_function": "relu", # Keep default
+                "attention_mlp_class": "_easy_mlp", # Default value
+                "activation_function": "relu", # Default value, will be overridden if provided
             },
             "dsf_marginal": {
                 "context_dim": marginal_d_model, # Use flow encoder output dim
@@ -222,6 +225,12 @@ class TACTiS2Model(nn.Module):
             },
             "skip_copula": False, # Will be controlled by LightningModule stage
         }
+
+        # Apply AttentionalCopula custom parameters if provided
+        if attentional_copula_kwargs is not None and isinstance(attentional_copula_kwargs, dict):
+            logger.info(f"Applying custom AttentionalCopula parameters: {attentional_copula_kwargs}")
+            # Update the attentional_copula dictionary with custom parameters
+            copula_decoder_args["attentional_copula"].update(attentional_copula_kwargs)
 
         # Initialize the TACTiS model with constructed args
         self.tactis = TACTiS(
