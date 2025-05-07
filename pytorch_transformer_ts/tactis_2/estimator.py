@@ -68,6 +68,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         freq: str,
         prediction_length: int,
         context_length: int,
+        # --- Scheduler specific arguments ---
+        eta_min_fraction_s1: float = 0.01,  # Fraction of initial LR for Stage 1 cosine decay eta_min
+        eta_min_fraction_s2: float = 0.01,  # Fraction of initial LR for Stage 2 cosine decay eta_min
         # --- TACTiS2 specific arguments ---
         # Passed directly to TACTiS2Model/TACTiS
         flow_series_embedding_dim: int = 5,
@@ -172,6 +175,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # Training stage / optimizer params
         self.initial_stage = initial_stage
         self.stage2_start_epoch = stage2_start_epoch
+        self.eta_min_fraction_s1 = eta_min_fraction_s1  # Store eta_min fractions
+        self.eta_min_fraction_s2 = eta_min_fraction_s2
         self.lr_stage1 = lr_stage1
         self.lr_stage2 = lr_stage2
         self.weight_decay_stage1 = weight_decay_stage1
@@ -275,10 +280,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [20, 50, 100, 200])), # Corresponds to AttentionalCopula resolution
 
             # --- Optimizer Params ---
-            "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 5e-5, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
-            "lr_stage2": trial.suggest_float("lr_stage2", 2e-6, 5e-5, log=True), # INFO @boujuan kept the same lr.
-            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-5, 1e-4])),
-            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 1e-6, 1e-5, 1e-4])),
+            "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
+            "lr_stage2": trial.suggest_float("lr_stage2", 2e-6, 1e-5, log=True), # INFO @boujuan kept the same lr.
+            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-4, 1e-5, 1e-6])),
+            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 1e-4, 1e-5, 1e-6])),
 
             # --- Dropout & Clipping ---
             "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.3),
@@ -568,6 +573,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             model_config=model_config, # Pass config dict
             # Pass stage-specific optimizer params
             lr_stage1=self.lr_stage1,
+            eta_min_fraction_s1=self.eta_min_fraction_s1,  # Pass eta_min fractions
+            eta_min_fraction_s2=self.eta_min_fraction_s2,
             lr_stage2=self.lr_stage2,
             weight_decay_stage1=self.weight_decay_stage1,
             weight_decay_stage2=self.weight_decay_stage2,
