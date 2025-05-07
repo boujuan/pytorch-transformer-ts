@@ -124,6 +124,11 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.warmup_steps_s1 = self.hparams.warmup_steps_s1 # Store Stage 1 warmup steps
         self.warmup_steps_s2 = self.hparams.warmup_steps_s2 # Store Stage 2 warmup steps
 
+        # Initialize scheduler reference attributes
+        self.warmup_scheduler_ref = None
+        self.cosine_scheduler_ref = None
+        self.sequential_scheduler_ref = None
+
         # Set the stage in the model
         if hasattr(self.model.tactis, "set_stage"):
             self.model.tactis.set_stage(self.stage)
@@ -210,17 +215,16 @@ class TACTiS2LightningModule(pl.LightningModule):
                  # Ensure T_max is valid
                  if T_max_s2 <= 0:
                      logger.warning(f"Stage 2 Cosine Annealing duration (T_max_s2) is not positive ({T_max_s2}). Using constant LR for Stage 2.")
-                     # Create constant LR scheduler
-                     identity_scheduler_s2 = LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
                      
-                     # Replace the scheduler in self.trainer.lr_schedulers
-                     if hasattr(self.trainer, 'lr_schedulers') and self.trainer.lr_schedulers:
-                         self.trainer.lr_schedulers[0]['scheduler'] = identity_scheduler_s2
-                         self.trainer.lr_schedulers[0]['name'] = "lr_scheduler_stage2_constant"
-                         logger.info(f"Stage 2 constant scheduler configured.")
+                     # Update the existing warmup scheduler to a constant LR if it exists
+                     if self.warmup_scheduler_ref is not None:
+                         # Define a constant lambda function
+                         constant_lambda = lambda _: 1.0
+                         self.warmup_scheduler_ref.lr_lambdas = [constant_lambda]
+                         logger.info(f"Updated warmup scheduler to constant LR for Stage 2.")
                          return
                      else:
-                         logger.error("LR scheduler list is empty, cannot replace scheduler for Stage 2.")
+                         logger.error("No scheduler reference available to update for Stage 2.")
                          return
                  
                  # Calculate eta_min for Stage 2
@@ -228,17 +232,18 @@ class TACTiS2LightningModule(pl.LightningModule):
                  eta_frac_s2 = self.hparams.eta_min_fraction_s2
                  eta_min_s2 = lr_s2 * eta_frac_s2
                  
-                 logger.info(f"Configuring Stage 2 CosineAnnealingLR: T_max={T_max_s2}. Inputs: lr_stage2={lr_s2}, eta_min_fraction_s2={eta_frac_s2}. Calculated eta_min={eta_min_s2}")
-                 
-                 # Create warmup scheduler for Stage 2
                  logger.info(f"Configuring Stage 2 LR scheduler: Linear warmup for {self.hparams.warmup_steps_s2} steps.")
                  
-                 def lr_lambda_func_s2(current_step: int):
-                     if current_step < self.hparams.warmup_steps_s2:
-                         return float(current_step) / float(max(1, self.hparams.warmup_steps_s2))
-                     return 1.0
-                 
-                 warmup_scheduler_s2 = LambdaLR(optimizer, lr_lambda=lr_lambda_func_s2)
+                 # Update Warmup Scheduler if it exists
+                 if self.warmup_scheduler_ref is not None:
+                     def lr_lambda_func_s2(current_step: int):
+                         if current_step < self.hparams.warmup_steps_s2:
+                             return float(current_step) / float(max(1, self.hparams.warmup_steps_s2))
+                         return 1.0
+                     
+                     # Update the lambda function
+                     self.warmup_scheduler_ref.lr_lambdas = [lr_lambda_func_s2]
+                     logger.info(f"Updated warmup scheduler with new warmup steps: {self.hparams.warmup_steps_s2}")
                  
                  # Adjust T_max for cosine annealing to account for warmup steps
                  # Only adjust if we're using the calculated value, not the manual value
@@ -248,35 +253,40 @@ class TACTiS2LightningModule(pl.LightningModule):
                  
                  if T_max_s2 <= 0:
                      logger.warning(f"Adjusted T_max_s2 after warmup is not positive ({T_max_s2}). Using warmup-only scheduler for Stage 2.")
-                     # Use only the warmup scheduler if T_max is not positive
-                     if hasattr(self.trainer, 'lr_schedulers') and self.trainer.lr_schedulers:
-                         self.trainer.lr_schedulers[0]['scheduler'] = warmup_scheduler_s2
-                         self.trainer.lr_schedulers[0]['name'] = "lr_scheduler_stage2_warmup_only"
-                         logger.info(f"Stage 2 warmup-only scheduler configured with {self.hparams.warmup_steps_s2} steps.")
-                         return
-                     else:
-                         logger.error("LR scheduler list is empty, cannot replace scheduler for Stage 2.")
-                         return
+                     # In this case, we'll let the warmup scheduler handle everything
+                     # and just set cosine to have minimal effect if it exists
+                     if self.cosine_scheduler_ref is not None:
+                         self.cosine_scheduler_ref.T_max = 1
+                         self.cosine_scheduler_ref.eta_min = lr_s2  # No decay
+                         self.cosine_scheduler_ref.last_epoch = -1  # Reset internal counter
+                         logger.info(f"Set cosine scheduler to constant LR (T_max=1, eta_min=lr_s2)")
+                     
+                     # Update sequential scheduler if it exists
+                     if self.sequential_scheduler_ref is not None:
+                         self.sequential_scheduler_ref.milestones = [self.hparams.warmup_steps_s2]
+                         self.sequential_scheduler_ref.last_epoch = -1  # Reset internal counter
+                         logger.info(f"Updated sequential scheduler milestone to {self.hparams.warmup_steps_s2}")
+                     return
                  
                  logger.info(f"Configuring CosineAnnealingLR for Stage 2: T_max={T_max_s2}, eta_min={eta_min_s2}")
                  
-                 # Create cosine annealing scheduler for Stage 2
-                 cosine_scheduler_s2 = CosineAnnealingLR(optimizer, T_max=T_max_s2, eta_min=eta_min_s2)
+                 # Update Cosine Scheduler if it exists
+                 if self.cosine_scheduler_ref is not None:
+                     # Update existing cosine scheduler parameters
+                     self.cosine_scheduler_ref.T_max = T_max_s2
+                     self.cosine_scheduler_ref.eta_min = eta_min_s2
+                     self.cosine_scheduler_ref.last_epoch = -1  # Reset internal epoch count
+                     logger.info(f"Updated cosine scheduler with T_max={T_max_s2}, eta_min={eta_min_s2}")
                  
-                 # Create sequential scheduler combining warmup and cosine annealing
-                 sequential_scheduler_s2 = SequentialLR(
-                     optimizer,
-                     schedulers=[warmup_scheduler_s2, cosine_scheduler_s2],
-                     milestones=[self.hparams.warmup_steps_s2]
-                 )
-                 
-                 # Replace the scheduler in self.trainer.lr_schedulers
-                 if hasattr(self.trainer, 'lr_schedulers') and self.trainer.lr_schedulers:
-                     self.trainer.lr_schedulers[0]['scheduler'] = sequential_scheduler_s2
-                     self.trainer.lr_schedulers[0]['name'] = "lr_scheduler_stage2"
-                     logger.info(f"Stage 2 scheduler configured with warmup={self.hparams.warmup_steps_s2} steps, T_max={T_max_s2}, eta_min={eta_min_s2}.")
+                 # Update Sequential Scheduler if it exists
+                 if self.sequential_scheduler_ref is not None:
+                     # Update the milestone
+                     self.sequential_scheduler_ref.milestones = [self.hparams.warmup_steps_s2]
+                     # Reset internal counter
+                     self.sequential_scheduler_ref.last_epoch = -1
+                     logger.info(f"Updated sequential scheduler with new milestone: {self.hparams.warmup_steps_s2}")
                  else:
-                     logger.error("LR scheduler list is empty, cannot replace scheduler for Stage 2.")
+                     logger.error("No sequential scheduler reference available to update.")
             else:
                  logger.warning(f"Epoch {current_epoch}: Tried to switch to Stage 2, but optimizer not found. Cannot update LR/WD.")
 
@@ -460,6 +470,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                     return 1.0
                 
                 warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda_func)
+                self.warmup_scheduler_ref = warmup_scheduler  # Store reference
                 
                 # Calculate T_max for cosine annealing in Stage 1
                 # Check if manual steps_to_decay_s1 is configured
@@ -496,6 +507,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                 
                 # Create cosine annealing scheduler for Stage 1
                 cosine_scheduler_s1 = CosineAnnealingLR(optimizer, T_max=T_max_s1, eta_min=eta_min_s1)
+                self.cosine_scheduler_ref = cosine_scheduler_s1  # Store reference
                 
                 # Create sequential scheduler that combines warmup and cosine annealing
                 sequential_scheduler_s1 = SequentialLR(
@@ -503,6 +515,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                     schedulers=[warmup_scheduler, cosine_scheduler_s1],
                     milestones=[self.hparams.warmup_steps_s1],
                 )
+                self.sequential_scheduler_ref = sequential_scheduler_s1  # Store reference
                 
                 return {
                     "optimizer": optimizer,
@@ -547,6 +560,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                 
                 # Create cosine annealing scheduler for Stage 1
                 cosine_scheduler_s1 = CosineAnnealingLR(optimizer, T_max=T_max_s1, eta_min=eta_min_s1)
+                self.cosine_scheduler_ref = cosine_scheduler_s1  # Store reference
                 
                 return {
                     "optimizer": optimizer,
