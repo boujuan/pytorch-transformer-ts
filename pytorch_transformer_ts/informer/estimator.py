@@ -288,6 +288,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         if self.num_batches_per_epoch is not None:
             data = Cyclic(data).stream() # will just repeat over same dataset if we only provide one
         
+        # self.train_instance_splitter = self._create_instance_splitter(module, "training")
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
