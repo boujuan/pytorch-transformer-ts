@@ -71,7 +71,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "warmup_steps_s1", "warmup_steps_s2",
                                    "steps_to_decay_s1", "steps_to_decay_s2",
                                    "stage1_activation_function", "stage2_activation_function",
-                                   "eta_min_fraction_s1", "eta_min_fraction_s2", "num_batches_per_epoch")
+                                   "eta_min_fraction_s1", "eta_min_fraction_s2")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -178,9 +178,10 @@ class TACTiS2LightningModule(pl.LightningModule):
                  optimizer = optimizer[0]
 
             if optimizer:
-                 # Update LR and WD for all parameter groups.
-                 # The requires_grad=False flags will prevent updates to frozen parameters.
+                 # Update LR, initial_lr, and weight_decay for all parameter groups
+                 # This is crucial for proper scheduler behavior in Stage 2
                  for param_group in optimizer.param_groups:
+                     param_group['initial_lr'] = self.lr_stage2  # Critical for LambdaLR reference point
                      param_group['lr'] = self.lr_stage2
                      param_group['weight_decay'] = self.weight_decay_stage2
                  self.log_dict({"stage": 2, "learning_rate": self.lr_stage2, "weight_decay": self.weight_decay_stage2})
@@ -236,14 +237,17 @@ class TACTiS2LightningModule(pl.LightningModule):
                  
                  # Update Warmup Scheduler if it exists
                  if self.warmup_scheduler_ref is not None:
+                     # Define new warmup function that starts from 0 and scales to 1.0
+                     final_warmup_steps_s2 = max(1, int(self.hparams.warmup_steps_s2))
                      def lr_lambda_func_s2(current_step: int):
-                         if current_step < self.hparams.warmup_steps_s2:
-                             return float(current_step) / float(max(1, self.hparams.warmup_steps_s2))
+                         if current_step < final_warmup_steps_s2:
+                             return float(current_step + 1) / float(final_warmup_steps_s2)  # current_step is 0-indexed
                          return 1.0
                      
-                     # Update the lambda function
+                     # Update the lambda function and reset scheduler
                      self.warmup_scheduler_ref.lr_lambdas = [lr_lambda_func_s2]
-                     logger.info(f"Updated warmup scheduler with new warmup steps: {self.hparams.warmup_steps_s2}")
+                     self.warmup_scheduler_ref.last_epoch = -1  # Reset for fresh warmup start
+                     logger.info(f"Updated warmup scheduler with new warmup steps: {final_warmup_steps_s2} and reset epoch counter")
                  
                  # Adjust T_max for cosine annealing to account for warmup steps
                  # Only adjust if we're using the calculated value, not the manual value
@@ -273,9 +277,11 @@ class TACTiS2LightningModule(pl.LightningModule):
                  # Update Cosine Scheduler if it exists
                  if self.cosine_scheduler_ref is not None:
                      # Update existing cosine scheduler parameters
+                     # Update cosine scheduler parameters for Stage 2
+                     self.cosine_scheduler_ref.base_lrs = [self.hparams.lr_stage2]  # Set correct base LR
                      self.cosine_scheduler_ref.T_max = T_max_s2
                      self.cosine_scheduler_ref.eta_min = eta_min_s2
-                     self.cosine_scheduler_ref.last_epoch = -1  # Reset internal epoch count
+                     self.cosine_scheduler_ref.last_epoch = -1  # Reset internal counter
                      logger.info(f"Updated cosine scheduler with T_max={T_max_s2}, eta_min={eta_min_s2}")
                  
                  # Update Sequential Scheduler if it exists
