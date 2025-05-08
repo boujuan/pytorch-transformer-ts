@@ -294,6 +294,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 5.0, 10.0])), # INFO @boujuan changed from 0.0,1000.0,10000.0
             "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 5.0, 10.0])), # INFO @boujuan changed from 0.0,1000.0,10000.0
 
+            # --- LR Scheduler Params ---
+            "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-4, 0.1, log=True), # Tune eta_min fraction for Stage 1
+            "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-4, 0.1, log=True), # Tune eta_min fraction for Stage 2
+
         }
         return params
     

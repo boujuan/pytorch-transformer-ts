@@ -71,7 +71,8 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "warmup_steps_s1", "warmup_steps_s2",
                                    "steps_to_decay_s1", "steps_to_decay_s2",
                                    "stage1_activation_function", "stage2_activation_function",
-                                   "eta_min_fraction_s1", "eta_min_fraction_s2")
+                                   "eta_min_fraction_s1", "eta_min_fraction_s2",
+                                   "num_batches_per_epoch")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
