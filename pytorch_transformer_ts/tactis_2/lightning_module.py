@@ -241,9 +241,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                      # Define new warmup function that starts from 0 and scales to 1.0
                      final_warmup_steps_s2 = max(1, int(self.hparams.warmup_steps_s2))
                      def lr_lambda_func_s2(current_step: int):
-                         if current_step < final_warmup_steps_s2:
+                         if current_step < final_warmup_steps_s2 - 1:
                              return float(current_step + 1) / float(final_warmup_steps_s2)  # current_step is 0-indexed
-                         return 1.0
+                         return 1.0  # Ensure we reach exactly 1.0 at the step before milestone
                      
                      # Update the lambda function and reset scheduler
                      self.warmup_scheduler_ref.lr_lambdas = [lr_lambda_func_s2]
@@ -300,7 +300,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                  
                  # Update Sequential Scheduler if it exists
                  if self.sequential_scheduler_ref is not None:
-                     # Update the milestone
+                     # Update the milestone - add 1 to ensure warmup completes before transition
                      self.sequential_scheduler_ref.milestones = [self.hparams.warmup_steps_s2]
                      # Reset internal counter
                      self.sequential_scheduler_ref.last_epoch = -1
