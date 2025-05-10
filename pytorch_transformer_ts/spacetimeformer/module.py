@@ -16,6 +16,7 @@ from gluonts.time_feature import get_lags_for_frequency
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.modules.feature import FeatureEmbedder
 from gluonts.torch.scaler import MeanScaler, NOPScaler, StdScaler
+import wandb
 
 def FoldForPred(inp: torch.Tensor, length:int, d_params: torch.Tensor) -> torch.Tensor:
     # out = rearrange(inp, "batch (dy len) dim -> dim batch len dy", dy=dy)
@@ -1769,6 +1770,42 @@ class SpacetimeformerModel(nn.Module):
             if future_target is not None
             else (past_target - loc) / scale
         )
+        
+        # Calculate statistics for scaled inputs
+        inputs_min = inputs.min()
+        inputs_max = inputs.max()
+        inputs_mean = inputs.mean()
+        inputs_std = inputs.std()
+        
+        # Print statistics to console
+        print(f"Scaled Inputs Stats - Min: {inputs_min.item()}, Max: {inputs_max.item()}, Mean: {inputs_mean.item()}, Std: {inputs_std.item()}")
+        
+        # Log to WandB if a run is active
+        if wandb.run is not None:
+            wandb.log({
+                "scaled_inputs_min": inputs_min.item(),
+                "scaled_inputs_max": inputs_max.item(),
+                "scaled_inputs_mean": inputs_mean.item(),
+                "scaled_inputs_std": inputs_std.item()
+            })
+        
+        # Calculate statistics for scaled inputs
+        inputs_min = inputs.min()
+        inputs_max = inputs.max()
+        inputs_mean = inputs.mean()
+        inputs_std = inputs.std()
+        
+        # Print statistics to console
+        print(f"Scaled Inputs Stats - Min: {inputs_min.item()}, Max: {inputs_max.item()}, Mean: {inputs_mean.item()}, Std: {inputs_std.item()}")
+        
+        # Log to WandB if a run is active
+        if wandb.run is not None:
+            wandb.log({
+                "scaled_inputs_min": inputs_min.item(),
+                "scaled_inputs_max": inputs_max.item(),
+                "scaled_inputs_mean": inputs_mean.item(),
+                "scaled_inputs_std": inputs_std.item()
+            })
 
         inputs_length = (
             self._past_length + self.prediction_length
