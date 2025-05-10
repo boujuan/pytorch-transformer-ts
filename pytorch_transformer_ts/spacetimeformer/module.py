@@ -1760,10 +1760,62 @@ class SpacetimeformerModel(nn.Module):
             else past_time_feat[:, self._past_length - self.context_length :, ...]
         )
 
-        # target 
+        # target
         context = past_target[:, -self.context_length :]
         observed_context = past_observed_values[:, -self.context_length :]
+        
+        # Log unscaled context stats
+        context_stats = {
+            "unscaled_context_min": context.min().item(),
+            "unscaled_context_max": context.max().item(),
+            "unscaled_context_mean": context.mean().item(),
+            "unscaled_context_std": context.std().item()
+        }
+        print(f"Unscaled Context - Min: {context_stats['unscaled_context_min']}, "
+              f"Max: {context_stats['unscaled_context_max']}, "
+              f"Mean: {context_stats['unscaled_context_mean']}, "
+              f"Std: {context_stats['unscaled_context_std']}")
+
+        observed_context_stats = {
+            "unscaled_observed_context_min": observed_context.min().item(),
+            "unscaled_observed_context_max": observed_context.max().item(),
+            "unscaled_observed_context_mean": observed_context.mean().item(),
+            "unscaled_observed_context_std": observed_context.std().item()
+        }
+        print(f"Unscaled Observed Context - Min: {observed_context_stats['unscaled_observed_context_min']}, "
+              f"Max: {observed_context_stats['unscaled_observed_context_max']}, "
+              f"Mean: {observed_context_stats['unscaled_observed_context_mean']}, "
+              f"Std: {observed_context_stats['unscaled_observed_context_std']}")
+
         _, loc, scale = self.scaler(context, observed_context)
+
+        # Log scaler output stats
+        scale_stats = {
+            "scaler_scale_min": scale.min().item(),
+            "scaler_scale_max": scale.max().item(),
+            "scaler_scale_mean": scale.mean().item(),
+            "scaler_scale_std": scale.std().item(),
+            "scaler_scale_num_small_1e-5": (scale < 1e-5).sum().item(),
+            "scaler_scale_num_small_1e-8": (scale < 1e-8).sum().item()
+        }
+        
+        loc_stats = {
+            "scaler_loc_min": loc.min().item(),
+            "scaler_loc_max": loc.max().item(),
+            "scaler_loc_mean": loc.mean().item(),
+            "scaler_loc_std": loc.std().item()
+        }
+        
+        print(f"Scaler Output - Loc Min: {loc_stats['scaler_loc_min']}, "
+              f"Loc Max: {loc_stats['scaler_loc_max']}, "
+              f"Loc Mean: {loc_stats['scaler_loc_mean']}, "
+              f"Loc Std: {loc_stats['scaler_loc_std']}, "
+              f"Scale Min: {scale_stats['scaler_scale_min']}, "
+              f"Scale Max: {scale_stats['scaler_scale_max']}, "
+              f"Scale Mean: {scale_stats['scaler_scale_mean']}, "
+              f"Scale Std: {scale_stats['scaler_scale_std']}, "
+              f"Num Small Scales (<1e-5): {scale_stats['scaler_scale_num_small_1e-5']}, "
+              f"Num Small Scales (<1e-8): {scale_stats['scaler_scale_num_small_1e-8']}")
 
         inputs = (
             (torch.cat((past_target, future_target), dim=1) - loc) / scale
@@ -1772,39 +1824,27 @@ class SpacetimeformerModel(nn.Module):
         )
         
         # Calculate statistics for scaled inputs
-        inputs_min = inputs.min()
-        inputs_max = inputs.max()
-        inputs_mean = inputs.mean()
-        inputs_std = inputs.std()
+        inputs_stats = {
+            "scaled_inputs_min": inputs.min().item(),
+            "scaled_inputs_max": inputs.max().item(),
+            "scaled_inputs_mean": inputs.mean().item(),
+            "scaled_inputs_std": inputs.std().item()
+        }
         
         # Print statistics to console
-        print(f"Scaled Inputs Stats - Min: {inputs_min.item()}, Max: {inputs_max.item()}, Mean: {inputs_mean.item()}, Std: {inputs_std.item()}")
+        print(f"Scaled Inputs - Min: {inputs_stats['scaled_inputs_min']}, "
+              f"Max: {inputs_stats['scaled_inputs_max']}, "
+              f"Mean: {inputs_stats['scaled_inputs_mean']}, "
+              f"Std: {inputs_stats['scaled_inputs_std']}")
         
-        # Log to WandB if a run is active
+        # Log all stats to WandB if a run is active
         if wandb.run is not None:
             wandb.log({
-                "scaled_inputs_min": inputs_min.item(),
-                "scaled_inputs_max": inputs_max.item(),
-                "scaled_inputs_mean": inputs_mean.item(),
-                "scaled_inputs_std": inputs_std.item()
-            })
-        
-        # Calculate statistics for scaled inputs
-        inputs_min = inputs.min()
-        inputs_max = inputs.max()
-        inputs_mean = inputs.mean()
-        inputs_std = inputs.std()
-        
-        # Print statistics to console
-        print(f"Scaled Inputs Stats - Min: {inputs_min.item()}, Max: {inputs_max.item()}, Mean: {inputs_mean.item()}, Std: {inputs_std.item()}")
-        
-        # Log to WandB if a run is active
-        if wandb.run is not None:
-            wandb.log({
-                "scaled_inputs_min": inputs_min.item(),
-                "scaled_inputs_max": inputs_max.item(),
-                "scaled_inputs_mean": inputs_mean.item(),
-                "scaled_inputs_std": inputs_std.item()
+                **context_stats,
+                **observed_context_stats,
+                **loc_stats,
+                **scale_stats,
+                **inputs_stats
             })
 
         inputs_length = (

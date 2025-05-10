@@ -26,28 +26,6 @@ class SpacetimeformerLightningModule(pl.LightningModule):
         """Execute training step"""
         train_loss = self(batch)
         
-        # Log gradient statistics for each parameter
-        for idx, (name, p) in enumerate(self.model.named_parameters()):
-            if p.grad is not None:
-                grad_norm = p.grad.data.norm(2)
-                grad_min = p.grad.data.min()
-                grad_max = p.grad.data.max()
-                grad_mean = p.grad.data.mean()
-                grad_std = p.grad.data.std()
-                
-                # Log to WandB
-                self.log(f"grad_norm/{name}", grad_norm, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-                self.log(f"grad_min/{name}", grad_min, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-                self.log(f"grad_max/{name}", grad_max, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-                self.log(f"grad_mean/{name}", grad_mean, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-                self.log(f"grad_std/{name}", grad_std, on_step=True, on_epoch=True, prog_bar=False, logger=True)
-                
-                # Print to console
-                print(f"Epoch {self.current_epoch}, Step {self.global_step}, Param: {name}, "
-                      f"Grad Norm: {grad_norm.item()}, Min: {grad_min.item()}, "
-                      f"Max: {grad_max.item()}, Mean: {grad_mean.item()}, "
-                      f"Std: {grad_std.item()}")
-
         # Calculate and log total gradient norm
         total_grad_norm = torch.tensor(0.0, device=self.device)
         for p in self.model.parameters():
