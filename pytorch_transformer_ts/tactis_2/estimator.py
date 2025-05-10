@@ -126,6 +126,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
         batch_size: int = 32,
+        base_batch_size_for_scheduler_steps: int = 2048,
         num_batches_per_epoch: Optional[int] = 50,
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
@@ -190,6 +191,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.warmup_steps_s2 = warmup_steps_s2 # Store stage 2 warmup steps
         self.steps_to_decay_s1 = steps_to_decay_s1 # Store manual T_max value for stage 1
         self.steps_to_decay_s2 = steps_to_decay_s2 # Store manual T_max value for stage 2
+        self.base_batch_size_for_scheduler_steps = base_batch_size_for_scheduler_steps
  
         # Common parameters
         self.input_size = input_size
@@ -254,6 +256,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
             "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu"])), # Tune activation for Stage 2 components
             "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
+            "batch_size": trial.suggest_categorical("batch_size", [128, 256, 512, 1024, 2048]),
 
             # --- Marginal CDF Encoder ---
             "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
@@ -596,4 +599,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Pass activation functions explicitly as keyword arguments
             stage1_activation_function=self.stage1_activation_function,
             stage2_activation_function=self.stage2_activation_function,
+            # Pass batch size parameters for scheduler step scaling
+            batch_size=self.batch_size,
+            base_batch_size_for_scheduler_steps=self.base_batch_size_for_scheduler_steps,
         )

@@ -35,6 +35,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         eta_min_fraction_s1: float = 0.01, # Fraction of initial LR for eta_min in Stage 1 cosine decay
         eta_min_fraction_s2: float = 0.01, # Fraction of initial LR for eta_min in Stage 2 cosine decay
         num_batches_per_epoch: int = None, # Number of batches per epoch for scheduler calculations
+        batch_size: int = 2048, # Current trial's batch size
+        base_batch_size_for_scheduler_steps: int = 2048, # Base batch size for scheduler step calculations
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -72,7 +74,8 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "steps_to_decay_s1", "steps_to_decay_s2",
                                    "stage1_activation_function", "stage2_activation_function",
                                    "eta_min_fraction_s1", "eta_min_fraction_s2",
-                                   "num_batches_per_epoch")
+                                   "num_batches_per_epoch", "batch_size",
+                                   "base_batch_size_for_scheduler_steps")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -122,8 +125,31 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.weight_decay_stage2 = self.hparams.weight_decay_stage2
         self.stage = self.hparams.stage
         self.stage2_start_epoch = self.hparams.stage2_start_epoch
-        self.warmup_steps_s1 = self.hparams.warmup_steps_s1 # Store Stage 1 warmup steps
-        self.warmup_steps_s2 = self.hparams.warmup_steps_s2 # Store Stage 2 warmup steps
+        
+        # Calculate scaling factor for scheduler steps based on batch size
+        scaling_factor = 1.0
+        if self.hparams.batch_size > 0:  # Avoid division by zero
+            scaling_factor = self.hparams.base_batch_size_for_scheduler_steps / self.hparams.batch_size
+        else:
+            logger.warning("Batch size is zero or negative. Using default scaling factor of 1.0.")
+            
+        # Scale scheduler step parameters
+        self.scaled_warmup_steps_s1 = round(self.hparams.warmup_steps_s1 * scaling_factor)
+        self.scaled_warmup_steps_s2 = round(self.hparams.warmup_steps_s2 * scaling_factor)
+        self.scaled_steps_to_decay_s1 = round(self.hparams.steps_to_decay_s1 * scaling_factor) if self.hparams.steps_to_decay_s1 is not None else None
+        self.scaled_steps_to_decay_s2 = round(self.hparams.steps_to_decay_s2 * scaling_factor) if self.hparams.steps_to_decay_s2 is not None else None
+        
+        # Log the scaled values
+        logger.info(f"Batch size scaling: base_batch_size={self.hparams.base_batch_size_for_scheduler_steps}, "
+                   f"current_batch_size={self.hparams.batch_size}, scaling_factor={scaling_factor}")
+        logger.info(f"Original scheduler steps: warmup_s1={self.hparams.warmup_steps_s1}, "
+                   f"warmup_s2={self.hparams.warmup_steps_s2}, "
+                   f"decay_s1={self.hparams.steps_to_decay_s1}, "
+                   f"decay_s2={self.hparams.steps_to_decay_s2}")
+        logger.info(f"Scaled scheduler steps: warmup_s1={self.scaled_warmup_steps_s1}, "
+                   f"warmup_s2={self.scaled_warmup_steps_s2}, "
+                   f"decay_s1={self.scaled_steps_to_decay_s1}, "
+                   f"decay_s2={self.scaled_steps_to_decay_s2}")
 
         # Initialize scheduler reference attributes
         self.warmup_scheduler_ref = None
@@ -205,9 +231,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                  logger.info(f"Stage 2 scheduler setup - total_epochs: {total_epochs_in_run}, stage2_start_epoch: {self.hparams.stage2_start_epoch}, epochs_in_stage2: {epochs_in_stage2}")
                  
                  # Check if manual steps_to_decay_s2 is configured
-                 if self.hparams.steps_to_decay_s2 is not None and self.hparams.steps_to_decay_s2 > 0:
-                     T_max_s2 = self.hparams.steps_to_decay_s2
-                     logger.info(f"Using manually configured steps_to_decay_s2={T_max_s2} as T_max for Stage 2 CosineAnnealingLR.")
+                 if self.scaled_steps_to_decay_s2 is not None and self.scaled_steps_to_decay_s2 > 0:
+                     T_max_s2 = self.scaled_steps_to_decay_s2
+                     logger.info(f"Using scaled steps_to_decay_s2={T_max_s2} as T_max for Stage 2 CosineAnnealingLR.")
                  else:
                      # Calculate based on epochs and steps per epoch
                      T_max_s2_calculated = steps_per_epoch * epochs_in_stage2
@@ -234,12 +260,12 @@ class TACTiS2LightningModule(pl.LightningModule):
                  eta_frac_s2 = self.hparams.eta_min_fraction_s2
                  eta_min_s2 = lr_s2 * eta_frac_s2
                  
-                 logger.info(f"Configuring Stage 2 LR scheduler: Linear warmup for {self.hparams.warmup_steps_s2} steps.")
+                 logger.info(f"Configuring Stage 2 LR scheduler: Linear warmup for {self.scaled_warmup_steps_s2} steps.")
                  
                  # Update Warmup Scheduler if it exists
                  if self.warmup_scheduler_ref is not None:
                      # Define new warmup function that starts from 0 and scales to 1.0
-                     final_warmup_steps_s2 = max(1, int(self.hparams.warmup_steps_s2))
+                     final_warmup_steps_s2 = max(1, int(self.scaled_warmup_steps_s2))
                      def lr_lambda_func_s2(current_step: int):
                          if current_step < final_warmup_steps_s2 - 1:
                              return float(current_step + 1) / float(final_warmup_steps_s2)  # current_step is 0-indexed
@@ -265,9 +291,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                  
                  # Adjust T_max for cosine annealing to account for warmup steps
                  # Only adjust if we're using the calculated value, not the manual value
-                 if self.hparams.steps_to_decay_s2 is None or self.hparams.steps_to_decay_s2 <= 0:
-                     T_max_s2 = T_max_s2 - self.hparams.warmup_steps_s2
-                     logger.info(f"Stage 2 Cosine Annealing adjusted for warmup: T_max_s2 = {T_max_s2} (after subtracting {self.hparams.warmup_steps_s2} warmup steps)")
+                 if self.scaled_steps_to_decay_s2 is None or self.scaled_steps_to_decay_s2 <= 0:
+                     T_max_s2 = T_max_s2 - self.scaled_warmup_steps_s2
+                     logger.info(f"Stage 2 Cosine Annealing adjusted for warmup: T_max_s2 = {T_max_s2} (after subtracting {self.scaled_warmup_steps_s2} warmup steps)")
                  
                  if T_max_s2 <= 0:
                      logger.warning(f"Adjusted T_max_s2 after warmup is not positive ({T_max_s2}). Using warmup-only scheduler for Stage 2.")
@@ -281,9 +307,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                      
                      # Update sequential scheduler if it exists
                      if self.sequential_scheduler_ref is not None:
-                         self.sequential_scheduler_ref.milestones = [self.hparams.warmup_steps_s2]
+                         self.sequential_scheduler_ref.milestones = [self.scaled_warmup_steps_s2]
                          self.sequential_scheduler_ref.last_epoch = -1  # Reset internal counter
-                         logger.info(f"Updated sequential scheduler milestone to {self.hparams.warmup_steps_s2}")
+                         logger.info(f"Updated sequential scheduler milestone to {self.scaled_warmup_steps_s2}")
                      return
                  
                  logger.info(f"Configuring CosineAnnealingLR for Stage 2: T_max={T_max_s2}, eta_min={eta_min_s2}")
@@ -301,10 +327,10 @@ class TACTiS2LightningModule(pl.LightningModule):
                  # Update Sequential Scheduler if it exists
                  if self.sequential_scheduler_ref is not None:
                      # Update the milestone - add 1 to ensure warmup completes before transition
-                     self.sequential_scheduler_ref.milestones = [self.hparams.warmup_steps_s2]
+                     self.sequential_scheduler_ref.milestones = [self.scaled_warmup_steps_s2]
                      # Reset internal counter
                      self.sequential_scheduler_ref.last_epoch = -1
-                     logger.info(f"Updated sequential scheduler with new milestone: {self.hparams.warmup_steps_s2}")
+                     logger.info(f"Updated sequential scheduler with new milestone: {self.scaled_warmup_steps_s2}")
                  else:
                      logger.error("No sequential scheduler reference available to update.")
             else:
@@ -480,13 +506,13 @@ class TACTiS2LightningModule(pl.LightningModule):
         # For Stage 1, implement warmup + cosine annealing
         if self.stage == 1:
             # Create warmup scheduler
-            if self.hparams.warmup_steps_s1 > 0:
-                logger.info(f"Configuring LR scheduler: Linear warmup for {self.hparams.warmup_steps_s1} steps.")
+            if self.scaled_warmup_steps_s1 > 0:
+                logger.info(f"Configuring LR scheduler: Linear warmup for {self.scaled_warmup_steps_s1} steps.")
                 
                 # Define linear warmup function
                 def lr_lambda_func(current_step: int):
-                    if current_step < self.hparams.warmup_steps_s1:
-                        return float(current_step) / float(max(1, self.hparams.warmup_steps_s1))
+                    if current_step < self.scaled_warmup_steps_s1:
+                        return float(current_step) / float(max(1, self.scaled_warmup_steps_s1))
                     return 1.0
                 
                 warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda_func)
@@ -494,15 +520,15 @@ class TACTiS2LightningModule(pl.LightningModule):
                 
                 # Calculate T_max for cosine annealing in Stage 1
                 # Check if manual steps_to_decay_s1 is configured
-                if self.hparams.steps_to_decay_s1 is not None and self.hparams.steps_to_decay_s1 > 0:
-                    T_max_s1 = self.hparams.steps_to_decay_s1
-                    logger.info(f"Using manually configured steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR.")
+                if self.scaled_steps_to_decay_s1 is not None and self.scaled_steps_to_decay_s1 > 0:
+                    T_max_s1 = self.scaled_steps_to_decay_s1
+                    logger.info(f"Using scaled steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR.")
                 else:
                     # Calculate based on epochs and steps per epoch
                     epochs_in_stage1 = self.hparams.stage2_start_epoch
-                    T_max_s1_calculated = (steps_per_epoch * epochs_in_stage1) - self.hparams.warmup_steps_s1
+                    T_max_s1_calculated = (steps_per_epoch * epochs_in_stage1) - self.scaled_warmup_steps_s1
                     T_max_s1 = T_max_s1_calculated
-                    logger.info(f"steps_to_decay_s1 not configured or invalid. Calculating T_max_s1 = ({steps_per_epoch} * {epochs_in_stage1}) - {self.hparams.warmup_steps_s1} = {T_max_s1}")
+                    logger.info(f"steps_to_decay_s1 not configured or invalid. Calculating T_max_s1 = ({steps_per_epoch} * {epochs_in_stage1}) - {self.scaled_warmup_steps_s1} = {T_max_s1}")
                 
                 # Ensure T_max is valid
                 if T_max_s1 <= 0:
@@ -533,7 +559,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                 sequential_scheduler_s1 = SequentialLR(
                     optimizer,
                     schedulers=[warmup_scheduler, cosine_scheduler_s1],
-                    milestones=[self.hparams.warmup_steps_s1],
+                    milestones=[self.scaled_warmup_steps_s1],
                 )
                 self.sequential_scheduler_ref = sequential_scheduler_s1  # Store reference
                 
@@ -549,9 +575,9 @@ class TACTiS2LightningModule(pl.LightningModule):
             else:
                 # No warmup, just cosine annealing
                 # Check if manual steps_to_decay_s1 is configured
-                if self.hparams.steps_to_decay_s1 is not None and self.hparams.steps_to_decay_s1 > 0:
-                    T_max_s1 = self.hparams.steps_to_decay_s1
-                    logger.info(f"Using manually configured steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR (no warmup).")
+                if self.scaled_steps_to_decay_s1 is not None and self.scaled_steps_to_decay_s1 > 0:
+                    T_max_s1 = self.scaled_steps_to_decay_s1
+                    logger.info(f"Using scaled steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR (no warmup).")
                 else:
                     # Calculate based on epochs and steps per epoch
                     epochs_in_stage1 = self.hparams.stage2_start_epoch
