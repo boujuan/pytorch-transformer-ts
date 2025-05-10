@@ -248,6 +248,19 @@ class TACTiS2LightningModule(pl.LightningModule):
                      # Update the lambda function and reset scheduler
                      self.warmup_scheduler_ref.lr_lambdas = [lr_lambda_func_s2]
                      self.warmup_scheduler_ref.last_epoch = -1  # Reset for fresh warmup start
+                     
+                     # Update the base_lrs of the LambdaLR to the new lr_stage2
+                     # Fetch the optimizer again as it might be a new list/object after reconfigure
+                     current_optimizer = self.optimizers()
+                     if isinstance(current_optimizer, list):
+                         current_optimizer = current_optimizer[0]
+                     
+                     if current_optimizer:
+                         self.warmup_scheduler_ref.base_lrs = [pg['initial_lr'] for pg in current_optimizer.param_groups]
+                         logger.info(f"Updated warmup_scheduler_ref.base_lrs to: {[pg['initial_lr'] for pg in current_optimizer.param_groups]} for Stage 2.")
+                     else:
+                         logger.error("Failed to retrieve optimizer to update warmup_scheduler_ref.base_lrs for Stage 2.")
+                     
                      logger.info(f"Updated warmup scheduler with new warmup steps: {final_warmup_steps_s2} and reset epoch counter")
                  
                  # Adjust T_max for cosine annealing to account for warmup steps
