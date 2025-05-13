@@ -262,7 +262,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [16, 32, 64, 128, 256, 512])),
             "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
             "marginal_num_layers": trial.suggest_int("marginal_num_layers", 2, 5),
-            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 4, 6), # INFO @boujuan reduced range to 4-6 (best performers in flasc and lower risk of num-instability)
+            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 4, 6),
             "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", dynamic_kwargs.get("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256])), # Renamed from marginal_ts_embedding_dim
 
             # --- Attentional Copula Encoder ---
@@ -287,15 +287,15 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [50, 100, 200, 300])), # Corresponds to AttentionalCopula resolution
 
             # --- Optimizer Params ---
-            "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True), # INFO @boujuan reduced upper bound from 5e-3 to focus on convergence region.
-            "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True), # INFO @boujuan kept the same lr.
+            "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
+            "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
             "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
             "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
 
             # --- Dropout & Clipping ---
             "dropout_rate": trial.suggest_float("dropout_rate", 0.0, 0.05),
-            "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 5.0, 10.0])), # INFO @boujuan changed from 0.0,1000.0,10000.0
-            "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 5.0, 10.0])), # INFO @boujuan changed from 0.0,1000.0,10000.0
+            "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 5.0, 10.0])),
+            "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 5.0, 10.0])),
 
             # --- LR Scheduler Params ---
             "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.05, log=True), # Tune eta_min fraction for Stage 1
