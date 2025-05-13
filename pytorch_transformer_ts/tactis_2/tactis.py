@@ -213,12 +213,19 @@ class TACTiS(nn.Module):
         elif not self.skip_copula and self.copula_temporal_encoder_args:
              copula_input_dim_init = self.copula_temporal_encoder_args["d_model"]
 
+        # Extract attentional_copula specific args, including the new GC flag
+        attentional_copula_specific_args = self.copula_decoder_args.get("attentional_copula")
+        if attentional_copula_specific_args is None: # Ensure it's a dict if it was None
+            attentional_copula_specific_args = {}
+
+        # The use_gradient_checkpointing_copula flag is expected to be inside attentional_copula_specific_args
+        # as set by TACTiS2Model. If not present, it defaults to False in AttentionalCopula itself.
 
         self.decoder = CopulaDecoder(
              flow_input_dim=flow_d_model,
              copula_input_dim=copula_input_dim_init, # Pass initial dim or None
              dsf_marginal=self.copula_decoder_args["dsf_marginal"],
-             attentional_copula=self.copula_decoder_args.get("attentional_copula"), # Pass None if not present
+             attentional_copula=attentional_copula_specific_args, # Pass potentially updated dict
              min_u=self.copula_decoder_args.get("min_u", 0.0),
              max_u=self.copula_decoder_args.get("max_u", 1.0),
              skip_sampling_marginal=self.copula_decoder_args.get("skip_sampling_marginal", False),

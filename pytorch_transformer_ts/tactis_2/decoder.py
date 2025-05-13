@@ -103,11 +103,19 @@ class CopulaDecoder(nn.Module):
              return
 
         # Ensure input_dim matches copula_input_dim
-        if self.attentional_copula_args.get("input_dim") != self.copula_input_dim:
-             logger.warning(f"Attentional Copula input_dim ({self.attentional_copula_args.get('input_dim')}) != copula_input_dim ({self.copula_input_dim}). Using copula_input_dim.")
-             self.attentional_copula_args["input_dim"] = self.copula_input_dim
+        # Make a copy to avoid modifying the original dict if it's shared
+        final_ac_args = self.attentional_copula_args.copy()
 
-        self.copula = AttentionalCopula(**self.attentional_copula_args)
+        if final_ac_args.get("input_dim") != self.copula_input_dim:
+             logger.warning(f"Attentional Copula input_dim ({final_ac_args.get('input_dim')}) != copula_input_dim ({self.copula_input_dim}). Using copula_input_dim.")
+             final_ac_args["input_dim"] = self.copula_input_dim
+        
+        # The use_gradient_checkpointing flag is expected to be in final_ac_args by now,
+        # passed down from TACTiS2Model -> TACTiS -> CopulaDecoder (self.attentional_copula_args)
+        # If it's not there, AttentionalCopula will use its default (False).
+        logger.info(f"Initializing AttentionalCopula with args: {final_ac_args}")
+        self.copula = AttentionalCopula(**final_ac_args)
+        
         # Get device from marginal parameters and move copula to the same device
         device = next(self.marginal.parameters()).device
         logger.info(f"Moving AttentionalCopula to device: {device}")

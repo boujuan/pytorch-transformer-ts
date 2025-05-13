@@ -132,6 +132,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
+        use_gradient_checkpointing_copula: bool = False, # New parameter for GC in AttentionalCopula
         **kwargs,
     ) -> None:
         trainer_kwargs = {
@@ -192,6 +193,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.steps_to_decay_s1 = steps_to_decay_s1 # Store manual T_max value for stage 1
         self.steps_to_decay_s2 = steps_to_decay_s2 # Store manual T_max value for stage 2
         self.base_batch_size_for_scheduler_steps = base_batch_size_for_scheduler_steps
+        self.use_gradient_checkpointing_copula = use_gradient_checkpointing_copula # Store GC flag
  
         # Common parameters
         self.input_size = input_size
@@ -578,6 +580,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "scaling": self.scaling,
             "lags_seq": self.lags_seq,
             "num_parallel_samples": self.num_parallel_samples,
+            # Pass the GC flag for AttentionalCopula into model_config
+            # It will be picked up by TACTiSModel -> TACTiS -> CopulaDecoder -> AttentionalCopula
+            "use_gradient_checkpointing_copula": self.use_gradient_checkpointing_copula,
         }
         
         return TACTiS2LightningModule(

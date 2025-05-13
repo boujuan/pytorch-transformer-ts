@@ -2,6 +2,7 @@ import torch
 from torch import nn
 import math
 from typing import Dict, Type # Added for type hinting
+import torch.utils.checkpoint # For gradient checkpointing
 
 # Helper dictionary to map activation function names to nn modules
 _ACTIVATION_MAP: Dict[str, Type[nn.Module]] = {
@@ -28,8 +29,10 @@ class AttentionalCopula(nn.Module):
         dropout: float = 0.1,
         attention_mlp_class: str = "_easy_mlp",
         activation_function: str = "ReLU",
+        use_gradient_checkpointing: bool = False, # New parameter
     ):
         super().__init__()
+        self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # Validate activation function
         if activation_function.lower() not in _ACTIVATION_MAP:
@@ -88,6 +91,42 @@ class AttentionalCopula(nn.Module):
         # Distribution output layer
         self.dist_extractors = nn.Linear(attention_heads * attention_dim, resolution)
 
+    def _attention_block(self, att_value: torch.Tensor, layer_idx: int, keys_current_layer: torch.Tensor, values_current_layer: torch.Tensor, product_mask: torch.Tensor) -> torch.Tensor:
+        """Helper function for one attention block, to be checkpointed if enabled."""
+        # Split the hidden layer into its various heads (Query)
+        # Shape: [bsz, num_variables, num_attention_heads, attention_dim]
+        att_value_heads = att_value.reshape(
+            att_value.shape[0],
+            att_value.shape[1],
+            self.attention_heads,
+            self.attention_dim,
+        )
+
+        # Perform Attention
+        # product_base shape: [bsz, num_attention_heads, num_variables, num_history+num_variables]
+        product_base = torch.einsum("bvhi,bhwi->bhvw", att_value_heads, keys_current_layer)
+        product = product_base - product_mask
+        product = self.attention_dim ** (-0.5) * product
+        weights = nn.functional.softmax(product, dim=-1)
+
+        # att shape: [bsz, num_variables, num_attention_heads, attention_dim]
+        att = torch.einsum("bhvw,bhwj->bvhj", weights, values_current_layer)
+
+        # Merge heads: [bsz, num_variables, num_attention_heads * attention_dim]
+        att_merged_heads = att.reshape(att.shape[0], att.shape[1], att.shape[2] * att.shape[3])
+        
+        # Dropout, Residual, LayerNorm
+        att_merged_heads = self.attention_dropouts[layer_idx](att_merged_heads)
+        att_value = att_value + att_merged_heads
+        att_value = self.attention_layer_norms[layer_idx](att_value)
+
+        # Feed-forward, Residual, LayerNorm
+        att_feed_forward = self.feed_forwards[layer_idx](att_value)
+        att_value = att_value + att_feed_forward
+        att_value = self.feed_forward_layer_norms[layer_idx](att_value)
+        
+        return att_value
+
     def loss(
         self,
         hist_encoded: torch.Tensor,
@@ -103,22 +142,13 @@ class AttentionalCopula(nn.Module):
         Parameters:
         -----------
         hist_encoded: Tensor [batch, series * time steps, embedding dimension]
-            A tensor containing an embedding for each series and time step that does not have to be forecasted.
-            The series and time steps dimensions are merged.
         hist_true_u: Tensor [batch, series * time steps]
-            A tensor containing the true value for the values that do not have to be forecasted, transformed by the marginal distribution into U(0,1) values.
-            The series and time steps dimensions are merged.
         pred_encoded: Tensor [batch, series * time steps, embedding dimension]
-            A tensor containing an embedding for each variable and time step that does have to be forecasted.
-            The series and time steps dimensions are merged.
         pred_true_u: Tensor [batch, series * time steps]
-            A tensor containing the true value for the values to be forecasted, transformed by the marginal distribution into U(0,1) values.
-            The series and time steps dimensions are merged.
 
         Returns:
         --------
         loss: torch.Tensor [batch]
-            The loss function, equal to the negative log likelihood of the copula.
         """
         num_batches = pred_encoded.shape[0]
         num_variables = pred_encoded.shape[1]
@@ -126,78 +156,48 @@ class AttentionalCopula(nn.Module):
         device = pred_encoded.device
 
         assert num_variables == num_series * num_timesteps, (
-            "num_variables:"
-            + str(num_variables)
-            + " but num_series:"
-            + str(num_series)
-            + " and num_timesteps:"
-            + str(num_timesteps)
+            f"num_variables: {num_variables} but num_series: {num_series} and num_timesteps: {num_timesteps}"
         )
 
-        permutation = torch.arange(0, num_variables).long()
+        permutation = torch.arange(0, num_variables, device=device).long() # Ensure permutation is on the same device
 
-        # Permute the variables according the random permutation
         pred_encoded = pred_encoded[:, permutation, :]
         pred_true_u = pred_true_u[:, permutation]
 
-        # At the beginning of the attention, we start with the input embedding.
-        # Since it does not necessarily have the same dimensions as the hidden layers, apply a linear layer to scale it up.
         att_value = self.dimension_shifting_layer(pred_encoded)
 
-        # # The MLP which generates the keys and values used the encoded embedding + transformed true values.
-        # key_value_input_hist = torch.cat([hist_encoded, hist_true_u[:, :, None]], axis=2)
-        # key_value_input_pred = torch.cat([pred_encoded, pred_true_u[:, :, None]], axis=2)
-        # # key_value_input shape: [bsz, num_history+num_variables, embedding dimension+1]
-        # key_value_input = torch.cat([key_value_input_hist, key_value_input_pred], axis=1)
+        # Precompute all keys and values outside the loop
+        all_keys = []
+        all_values = []
+        for layer_idx_for_kv in range(self.attention_layers):
+            key_input_hist_kv = torch.cat([hist_encoded, hist_true_u[:, :, None]], dim=2)
+            key_input_pred_kv = torch.cat([pred_encoded, pred_true_u[:, :, None]], dim=2)
+            key_input_kv = torch.cat([key_input_hist_kv, key_input_pred_kv], dim=1)
 
-        keys = []
-        values = []
-        for layer in range(self.attention_layers):
-            key_input_hist = torch.cat([hist_encoded, hist_true_u[:, :, None]], axis=2)
-            key_input_pred = torch.cat([pred_encoded, pred_true_u[:, :, None]], axis=2)
-            key_input = torch.cat([key_input_hist, key_input_pred], axis=1)
-
-            value_input_hist = torch.cat([hist_encoded, hist_true_u[:, :, None]], axis=2)
-            value_input_pred = torch.cat([pred_encoded, pred_true_u[:, :, None]], axis=2)
-            value_input = torch.cat([value_input_hist, value_input_pred], axis=1)
-
-            # Keys shape in every layer: [bsz, num_attention_heads, num_history+num_variables, attention_dim]
-            keys.append(
-                torch.cat(
-                    [mlp(key_input)[:, None, :, :] for mlp in self.key_creators[layer]],
-                    axis=1,
+            value_input_hist_kv = torch.cat([hist_encoded, hist_true_u[:, :, None]], dim=2)
+            value_input_pred_kv = torch.cat([pred_encoded, pred_true_u[:, :, None]], dim=2)
+            value_input_kv = torch.cat([value_input_hist_kv, value_input_pred_kv], dim=1)
+            
+            # Ensure mlp output is correctly shaped before cat for heads
+            # mlp(key_input_kv) should be [bsz, num_hist+num_vars, attention_dim]
+            # Then unsqueeze for head dim before cat
+            all_keys.append(
+                torch.stack( # stack creates new head dimension
+                    [mlp(key_input_kv) for mlp in self.key_creators[layer_idx_for_kv]],
+                    dim=1, # New dimension for heads: [bsz, num_heads, num_hist+num_vars, attention_dim]
                 )
             )
-            # Values shape in every layer: [bsz, num_attention_heads, num_history+num_variables, attention_dim]
-            values.append(
-                torch.cat(
-                    [mlp(value_input)[:, None, :, :] for mlp in self.value_creators[layer]],
-                    axis=1,
+            all_values.append(
+                torch.stack(
+                    [mlp(value_input_kv) for mlp in self.value_creators[layer_idx_for_kv]],
+                    dim=1, # New dimension for heads: [bsz, num_heads, num_hist+num_vars, attention_dim]
                 )
             )
+        
+        for layer_idx in range(self.attention_layers):
+            keys_current_layer = all_keys[layer_idx]
+            values_current_layer = all_values[layer_idx]
 
-        for layer in range(self.attention_layers):
-            # Split the hidden layer into its various heads
-            # Basically the Query in the attention
-            # Shape: [bsz, num_variables, num_attention_heads, attention_dim]
-            att_value_heads = att_value.reshape(
-                att_value.shape[0],
-                att_value.shape[1],
-                self.attention_heads,
-                self.attention_dim,
-            )
-
-            # Attention layer, for each batch and head:
-            # A_vi' = sum_w(softmax_w(sum_i(Q_vi * K_wi) / sqrt(d)) * V_wi')
-
-            # During attention, we will add -float("inf") to pairs of indices where the variable to be forecasted (query)
-            # is after the variable that gives information (key), after the random permutation.
-            # Doing this prevent information from flowing from later in the permutation to before in the permutation,
-            # which cannot happen during inference.
-            # tril fill the diagonal and values that are below it, flip rotates it by 180 degrees,
-            # leaving only the pairs of indices which represent not yet sampled values.
-            # Note float("inf") * 0 is unsafe, so do the multiplication inside the torch.tril()
-            # pred/hist_encoded dimensions: number of batches, number of variables, size of embedding per variable
             product_mask = torch.ones(
                 num_batches,
                 self.attention_heads,
@@ -207,51 +207,16 @@ class AttentionalCopula(nn.Module):
             )
             product_mask = torch.tril(float("inf") * product_mask).flip((2, 3))
 
-            # Perform Attention
-            # Einstein sum indices:
-            # b: batch number
-            # h: attention head number (Note the change in order for att_value_heads)
-            # v: variable we want to predict
-            # w: variable we want to get information from (history or prediction)
-            # i: embedding dimension of the keys and queries (self.attention_dim)
-            # Output shape: [bsz, num_attention_heads, num_variables, num_history+num_variables]
-            product_base = torch.einsum("bvhi,bhwi->bhvw", att_value_heads, keys[layer])
+            if self.use_gradient_checkpointing and self.training:
+                # Ensure all non-tensor arguments are passed correctly after tensor arguments
+                att_value = torch.utils.checkpoint.checkpoint(
+                    self._attention_block, att_value, layer_idx, keys_current_layer, values_current_layer, product_mask,
+                    use_reentrant=False # Recommended for newer PyTorch versions
+                )
+            else:
+                att_value = self._attention_block(att_value, layer_idx, keys_current_layer, values_current_layer, product_mask)
 
-            # Adding -inf shunts the attention to zero, for any variable that has not "yet" been predicted,
-            # aka: are in the future according to the permutation.
-            product = product_base - product_mask
-            product = self.attention_dim ** (-0.5) * product
-            weights = nn.functional.softmax(product, dim=-1)
-
-            # Einstein sum indices:
-            # b: batch number
-            # h: attention head number (Note the change in order for the result)
-            # v: variable we want to predict
-            # w: variable we want to get information from (history or prediction)
-            # j: embedding dimension of the values (self.attention_dim)
-            # Output shape: [bsz, num_variables, num_attention_heads, attention_dim]
-            att = torch.einsum("bhvw,bhwj->bvhj", weights, values[layer])
-
-            # Merge back the various heads to allow the feed forwards module to share information between heads
-            # Shape: [b, v, h*j]
-            att_merged_heads = att.reshape(att.shape[0], att.shape[1], att.shape[2] * att.shape[3])
-            # print("Q:", att_value_heads.shape, "K:", keys[layer].shape, "V:", values[layer].shape, "Mask:", product_mask.shape)
-            # print("Attn:", att_merged_heads.shape, "Attn Scores", weights.shape)
-
-            # Compute and add dropout
-            att_merged_heads = self.attention_dropouts[layer](att_merged_heads)
-
-            # att_value = att_value + att_merged_heads
-            # Layernorm
-            att_value = att_value + att_merged_heads
-            att_value = self.attention_layer_norms[layer](att_value)
-
-            # Add the contribution of the feed-forward layer, mixing up the heads
-            att_feed_forward = self.feed_forwards[layer](att_value)
-            att_value = att_value + att_feed_forward
-            att_value = self.feed_forward_layer_norms[layer](att_value)
-
-        # Assign each observed U(0,1) value to a bin. The clip is to avoid issues with numerical inaccuracies.
+        # Assign each observed U(0,1) value to a bin.
         # shape: [b, variables*timesteps - 1]
         target = torch.clip(
             torch.floor(pred_true_u[:, 1:] * self.resolution).long(),

@@ -70,6 +70,7 @@ class TACTiS2Model(nn.Module):
         num_parallel_samples: int = 100,
         stage: int = 1,  # Add stage parameter with default value 1
         attentional_copula_kwargs: Optional[dict] = None,  # Parameters for AttentionalCopula component
+        use_gradient_checkpointing_copula: bool = False, # New GC parameter
     ) -> None:
         """
         Initialize the TACTiS2Model.
@@ -124,6 +125,7 @@ class TACTiS2Model(nn.Module):
         # Store activation function parameters
         self.stage1_activation_function = stage1_activation_function
         self.stage2_activation_function = stage2_activation_function
+        self.use_gradient_checkpointing_copula = use_gradient_checkpointing_copula # Store GC flag
         
         # GluonTS compatibility parameters
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -244,6 +246,14 @@ class TACTiS2Model(nn.Module):
             else:
                 logger.warning("attentional_copula key missing in copula_decoder_args, creating it.")
                 copula_decoder_args["attentional_copula"] = attentional_copula_kwargs
+        
+        # Pass the gradient checkpointing flag to TACTiS constructor via copula_decoder_args or directly
+        # For now, let's assume TACTiS will extract it from copula_decoder_args['attentional_copula']
+        if "attentional_copula" in copula_decoder_args and copula_decoder_args["attentional_copula"] is not None:
+            copula_decoder_args["attentional_copula"]["use_gradient_checkpointing"] = self.use_gradient_checkpointing_copula
+        elif self.use_gradient_checkpointing_copula: # If AC args were None but GC is true, create dict
+             copula_decoder_args["attentional_copula"] = {"use_gradient_checkpointing": self.use_gradient_checkpointing_copula}
+
 
         # Initialize the TACTiS model with constructed args
         self.tactis = TACTiS(
@@ -260,9 +270,10 @@ class TACTiS2Model(nn.Module):
             copula_encoder=copula_encoder_args,
             flow_temporal_encoder=flow_temporal_encoder_args, # Using flow_encoder args for now
             copula_temporal_encoder=copula_temporal_encoder_args, # Using copula_encoder args for now
-            copula_decoder=copula_decoder_args,
+            copula_decoder=copula_decoder_args, # This now contains the GC flag for AttentionalCopula
             encoder_type=encoder_type,
             stage=stage,  # Pass the stage parameter to TACTiS
+            # No direct GC flag to TACTiS.__init__, it's nested in copula_decoder_args
         )
     
     @property
