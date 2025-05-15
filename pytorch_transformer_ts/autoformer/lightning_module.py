@@ -85,7 +85,7 @@ class AutoformerLightningModule(pl.LightningModule):
             future_target,
         )
         params = self.model.output_params(autoformer_inputs, dynamic_features)
-        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale)
+        loss_values = self.model.output_loss(params, future_target, loc=loc, scale=scale) # TODO HIGH is this averaged across batches or summed?
 
         # loss_values = self.loss(distr, future_target)
 

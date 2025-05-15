@@ -1439,7 +1439,6 @@ class SpacetimeformerModel(nn.Module):
         intermediate_downsample_convs: int = 0,
         null_value: float = None,
         pad_value: float = None,
-        out_dim: int = None,
         use_val: bool = True,
         use_time: bool = True,
         use_space: bool = True,

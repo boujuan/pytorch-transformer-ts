@@ -97,7 +97,6 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         intermediate_downsample_convs: int = 0,
         null_value: float = None,
         pad_value: float = None,
-        out_dim: int = None,
         use_val: bool = True,
         use_time: bool = True,
         use_space: bool = True,
@@ -171,7 +170,6 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         self.intermediate_downsample_convs = intermediate_downsample_convs
         self.null_value = null_value
         self.pad_value = pad_value
-        self.out_dim = out_dim
         self.use_val = use_val
         self.use_time = use_time
         self.use_space = use_space
@@ -218,16 +216,59 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             dynamic_kwargs = {}
         d_qkv = trial.suggest_categorical("d_qkv", [20, 30, 40])
         return {
+            
+            # --- Input Params ---
             "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
-            # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
             "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [32, 64, 128])),
+            
+            # --- Architecture Params ---
             "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [3, 5, 6])),
             "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", dynamic_kwargs.get("num_decoder_layers", [3, 5, 6])),
             "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [100, 150, 200])),
             "d_queries_keys": d_qkv,
             "d_values": d_qkv,
-            "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8]))
-            # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
+            "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8])),
+            "attn_factor": trial.suggest_categorical("attn_factor", dynamic_kwargs.get("attn_factor", [1, 3, 5])),
+            
+            # start_token_len: int = 0,
+            # time_emb_dim: int = 6,
+            # activation: str = "gelu",
+            # pos_emb_type: str = "abs",
+            # global_self_attn: str = "performer",
+            # local_self_attn: str = "performer",
+            # global_cross_attn: str = "performer",
+            # local_cross_attn: str = "performer",
+            # performer_attn_kernel: str = "relu",
+            # performer_redraw_interval: int = 100,
+            # attn_time_windows: int = 1,
+            # use_shifted_time_windows: bool = False,
+            # embed_method: str = "spatio-temporal",
+            # norm: str = "batch",
+            # use_final_norm: bool = True,
+            # initial_downsample_convs: int = 0,
+            # intermediate_downsample_convs: int = 0,
+            # null_value: float = None,
+            # pad_value: float = None,
+            # use_val: bool = True,
+            # use_time: bool = True,
+            # use_space: bool = True,
+            # use_given: bool = True,
+            # recon_mask_skip_all: float = 1.0,
+            # recon_mask_max_seq_len: int = 5,
+            # recon_mask_drop_seq: float = 0.2,
+            # recon_mask_drop_standard: float = 0.1,
+            # recon_mask_drop_full: float = 0.05,
+            
+            # --- Optimizer Params ---
+            "lr": trial.suggest_float("lr", 1e-6, 5e-5, log=True),
+            "weight_decay": trial.suggest_categorical("weight_decay", dynamic_kwargs.get("weight_decay", [0.0, 1e-6, 1e-5, 1e-4])),
+            
+            # --- Dropout & Clipping ---  
+            "dropout_qkv": trial.suggest_float("dropout_qkv", 0.0, 0.3),
+            "dropout_ff": trial.suggest_float("dropout_ff", 0.0, 0.3),
+            "dropout_attn_out": trial.suggest_float("dropout_attn_out", 0.0, 0.3),
+            "dropout_attn_matrix": trial.suggest_float("dropout_attn_matrix", 0.0, 0.3),
+            "dropout_emb": trial.suggest_float("dropout_emb", 0.0, 0.3)
         }
         
     def create_transformation(self, use_lazyframe=True) -> Transformation:
@@ -445,7 +486,6 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             intermediate_downsample_convs=self.intermediate_downsample_convs,
             null_value=self.null_value,
             pad_value=self.pad_value,
-            out_dim=self.out_dim,
             use_val=self.use_val,
             use_time=self.use_time,
             use_space=self.use_space,
