@@ -154,15 +154,27 @@ class InformerEstimator(PyTorchLightningEstimator):
             dynamic_kwargs = {}
         if tuning_phase == 1:
             return {
+                # --- Input Params ---
                 "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
-                # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
                 "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [32, 64, 128])),
+                
+                # --- Architecture Params ---
                 "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [2, 3, 4])),
                 "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", dynamic_kwargs.get("num_decoder_layers", [1, 2, 3])),
                 # "dim_feedforward": trial.suggest_categorical("dim_feedforward", [512, 1024, 2048]),
                 "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [128, 256, 512])),
-                "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8]))
-                # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
+                "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8])),
+                "factor": trial.suggest_categorical("factor", dynamic_kwargs.get("factor", [1, 3, 5])),
+                
+                # activation: str = "gelu",
+                # attn: str = "prob",
+                
+                # --- Optimizer Params ---
+                "lr": trial.suggest_float("lr", 1e-6, 5e-5, log=True),
+                "weight_decay": trial.suggest_categorical("weight_decay", dynamic_kwargs.get("weight_decay", [0.0, 1e-6, 1e-5, 1e-4])),
+            
+                # --- Dropout & Clipping ---  
+                "dropout": trial.suggest_float("dropout", 0.0, 0.3),
             }
         else:
             return {
@@ -288,6 +300,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         if self.num_batches_per_epoch is not None:
             data = Cyclic(data).stream() # will just repeat over same dataset if we only provide one
         
+        # self.train_instance_splitter = self._create_instance_splitter(module, "training")
         instances = self._create_instance_splitter(module, "training").apply(
             data, is_train=True
         )
