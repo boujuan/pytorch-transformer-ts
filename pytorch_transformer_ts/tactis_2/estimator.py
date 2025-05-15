@@ -134,10 +134,32 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         input_size: int = 1, # Number of target series
         **kwargs,
     ) -> None:
+        # Prepare base trainer kwargs
         trainer_kwargs = {
             "max_epochs": 100,
             **trainer_kwargs,
         }
+
+        # Conditionally set DDP strategy for multi-GPU training
+        accelerator = trainer_kwargs.get("accelerator", "auto")
+        devices = trainer_kwargs.get("devices", "auto")
+        
+        if accelerator in ("gpu", "cuda", "auto"):
+            # Determine if we're using multiple GPUs
+            multi_gpu = False
+            if isinstance(devices, int):
+                multi_gpu = devices > 1
+            elif devices == -1:  # Use all available GPUs
+                multi_gpu = torch.cuda.device_count() > 1
+            elif isinstance(devices, (list, tuple)):
+                multi_gpu = len(devices) > 1
+            
+            # Only set DDP strategy if:
+            # 1. Using multiple GPUs
+            # 2. No strategy is already specified
+            if multi_gpu and "strategy" not in trainer_kwargs:
+                trainer_kwargs["strategy"] = "ddp"
+                logger.info(f"Detected multi-GPU setup (devices={devices}), setting strategy='ddp'")
         super().__init__(trainer_kwargs=trainer_kwargs)
         
         self.freq = freq
