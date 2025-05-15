@@ -174,7 +174,7 @@ class InformerEstimator(PyTorchLightningEstimator):
                 "weight_decay": trial.suggest_categorical("weight_decay", dynamic_kwargs.get("weight_decay", [0.0, 1e-6, 1e-5, 1e-4])),
             
                 # --- Dropout & Clipping ---  
-                "dropout": trial.suggest_float("dropout_rate", 0.0, 0.3),
+                "dropout": trial.suggest_float("dropout", 0.0, 0.3),
             }
         else:
             return {
