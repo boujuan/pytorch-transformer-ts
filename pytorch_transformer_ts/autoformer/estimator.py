@@ -162,7 +162,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             # activation: str = "gelu",
             
             # --- Optimizer Params ---
-            "lr": trial.suggest_float("lr", 1e-6, 5e-5, log=True),
+            "lr": trial.suggest_float("lr", 1e-6, 1e-4, log=False),
             "weight_decay": trial.suggest_categorical("weight_decay", dynamic_kwargs.get("weight_decay", [0.0, 1e-6, 1e-5, 1e-4])),
         
             # --- Dropout & Clipping ---  
