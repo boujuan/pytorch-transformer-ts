@@ -228,7 +228,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             "d_queries_keys": d_qkv,
             "d_values": d_qkv,
             "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8])),
-            "attn_factor": trial.suggest_categorical("attn_factor", dynamic_kwargs.get("attn_factor", [1, 3, 5])),
+            # "attn_factor": trial.suggest_categorical("attn_factor", dynamic_kwargs.get("attn_factor", [1, 3, 5])),
             
             # start_token_len: int = 0,
             # time_emb_dim: int = 6,
@@ -261,7 +261,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             
             # --- Optimizer Params ---
             "lr": trial.suggest_float("lr", 1e-6, 1e-4, log=False),
-            "weight_decay": trial.suggest_categorical("weight_decay", dynamic_kwargs.get("weight_decay", [0.0, 1e-6, 1e-5, 1e-4])),
+            "weight_decay": trial.suggest_categorical("weight_decay", dynamic_kwargs.get("weight_decay", [0.0, 1e-8, 1e-6, 1e-4])),
             
             # --- Dropout & Clipping ---  
             "dropout_qkv": trial.suggest_float("dropout_qkv", 0.0, 0.3),
