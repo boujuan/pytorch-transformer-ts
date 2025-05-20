@@ -156,7 +156,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             # "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [128, 256, 512])),
             "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8])),
             "factor": trial.suggest_categorical("factor", dynamic_kwargs.get("factor", [1, 3, 5])),
-            "moving_avg": trial.suggest_categorical("moving_avg", dynamic_kwargs.get("moving_avg", [10, 15, 20])), # TODO this should vary with context length?
+            "moving_avg": trial.suggest_categorical("moving_avg", dynamic_kwargs.get("moving_avg", [9, 15, 25])), # TODO this should vary with context length?
             # "num_batches_per_epoch":trial.suggest_int("num_batches_per_epoch", 100, 200, 100),   
             
             # activation: str = "gelu",
