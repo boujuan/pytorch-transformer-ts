@@ -1,6 +1,6 @@
 import math
 from typing import List, Optional
-
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -161,6 +161,7 @@ class moving_avg(nn.Module):
         # padding on the both ends of time series
         front = x[:, 0:1, :].repeat(1, (self.kernel_size - 1) // 2, 1)
         end = x[:, -1:, :].repeat(1, (self.kernel_size - 1) // 2, 1)
+            
         x = torch.cat([front, x, end], dim=1)
         x = self.avg(x.permute(0, 2, 1))
         x = x.permute(0, 2, 1)
@@ -601,6 +602,7 @@ class AutoformerModel(nn.Module):
         self.label_length = context_length // 2
 
         # Input decomposition
+        assert moving_avg % 2 == 1, "moving_avg should be odd"
         self.decomp = series_decomp(kernel_size=moving_avg)
 
         # output projection

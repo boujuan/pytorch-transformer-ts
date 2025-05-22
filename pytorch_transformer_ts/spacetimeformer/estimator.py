@@ -267,7 +267,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             "dropout_qkv": trial.suggest_float("dropout_qkv", 0.0, 0.3),
             "dropout_ff": trial.suggest_float("dropout_ff", 0.0, 0.3),
             "dropout_attn_out": trial.suggest_float("dropout_attn_out", 0.0, 0.3),
-            "dropout_attn_matrix": trial.suggest_float("dropout_attn_matrix", 0.0, 0.3),
+            # "dropout_attn_matrix": trial.suggest_float("dropout_attn_matrix", 0.0, 0.3), # only needed for Prob/Full attention
             "dropout_emb": trial.suggest_float("dropout_emb", 0.0, 0.3)
         }
         
