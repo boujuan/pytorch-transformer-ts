@@ -37,6 +37,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         num_batches_per_epoch: int = None, # Number of batches per epoch for scheduler calculations
         batch_size: int = 2048, # Current trial's batch size
         base_batch_size_for_scheduler_steps: int = 2048, # Base batch size for scheduler step calculations
+        base_limit_train_batches: int = None, # Base limit train batches - if set, disables batch size scaling
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -75,7 +76,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "stage1_activation_function", "stage2_activation_function",
                                    "eta_min_fraction_s1", "eta_min_fraction_s2",
                                    "num_batches_per_epoch", "batch_size",
-                                   "base_batch_size_for_scheduler_steps")
+                                   "base_batch_size_for_scheduler_steps", "base_limit_train_batches")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -126,30 +127,46 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.stage = self.hparams.stage
         self.stage2_start_epoch = self.hparams.stage2_start_epoch
         
-        # Calculate scaling factor for scheduler steps based on batch size
-        scaling_factor = 1.0
-        if self.hparams.batch_size > 0:  # Avoid division by zero
-            scaling_factor = self.hparams.base_batch_size_for_scheduler_steps / self.hparams.batch_size
-        else:
-            logger.warning("Batch size is zero or negative. Using default scaling factor of 1.0.")
+        # Check if batch size scaling should be disabled
+        if self.hparams.base_limit_train_batches is not None:
+            # When base_limit_train_batches is set, disable batch size scaling
+            # Use the values from YAML directly
+            scaling_factor = 1.0
+            self.scaled_warmup_steps_s1 = self.hparams.warmup_steps_s1
+            self.scaled_warmup_steps_s2 = self.hparams.warmup_steps_s2
+            self.scaled_steps_to_decay_s1 = self.hparams.steps_to_decay_s1
+            self.scaled_steps_to_decay_s2 = self.hparams.steps_to_decay_s2
             
-        # Scale scheduler step parameters
-        self.scaled_warmup_steps_s1 = round(self.hparams.warmup_steps_s1 * scaling_factor)
-        self.scaled_warmup_steps_s2 = round(self.hparams.warmup_steps_s2 * scaling_factor)
-        self.scaled_steps_to_decay_s1 = round(self.hparams.steps_to_decay_s1 * scaling_factor) if self.hparams.steps_to_decay_s1 is not None else None
-        self.scaled_steps_to_decay_s2 = round(self.hparams.steps_to_decay_s2 * scaling_factor) if self.hparams.steps_to_decay_s2 is not None else None
-        
-        # Log the scaled values
-        logger.info(f"Batch size scaling: base_batch_size={self.hparams.base_batch_size_for_scheduler_steps}, "
-                   f"current_batch_size={self.hparams.batch_size}, scaling_factor={scaling_factor}")
-        logger.info(f"Original scheduler steps: warmup_s1={self.hparams.warmup_steps_s1}, "
-                   f"warmup_s2={self.hparams.warmup_steps_s2}, "
-                   f"decay_s1={self.hparams.steps_to_decay_s1}, "
-                   f"decay_s2={self.hparams.steps_to_decay_s2}")
-        logger.info(f"Scaled scheduler steps: warmup_s1={self.scaled_warmup_steps_s1}, "
-                   f"warmup_s2={self.scaled_warmup_steps_s2}, "
-                   f"decay_s1={self.scaled_steps_to_decay_s1}, "
-                   f"decay_s2={self.scaled_steps_to_decay_s2}")
+            logger.info(f"Batch size scaling DISABLED due to base_limit_train_batches={self.hparams.base_limit_train_batches}")
+            logger.info(f"Using scheduler steps directly from YAML: warmup_s1={self.scaled_warmup_steps_s1}, "
+                       f"warmup_s2={self.scaled_warmup_steps_s2}, "
+                       f"decay_s1={self.scaled_steps_to_decay_s1}, "
+                       f"decay_s2={self.scaled_steps_to_decay_s2}")
+        else:
+            # Calculate scaling factor for scheduler steps based on batch size
+            scaling_factor = 1.0
+            if self.hparams.batch_size > 0:  # Avoid division by zero
+                scaling_factor = self.hparams.base_batch_size_for_scheduler_steps / self.hparams.batch_size
+            else:
+                logger.warning("Batch size is zero or negative. Using default scaling factor of 1.0.")
+                
+            # Scale scheduler step parameters
+            self.scaled_warmup_steps_s1 = round(self.hparams.warmup_steps_s1 * scaling_factor)
+            self.scaled_warmup_steps_s2 = round(self.hparams.warmup_steps_s2 * scaling_factor)
+            self.scaled_steps_to_decay_s1 = round(self.hparams.steps_to_decay_s1 * scaling_factor) if self.hparams.steps_to_decay_s1 is not None else None
+            self.scaled_steps_to_decay_s2 = round(self.hparams.steps_to_decay_s2 * scaling_factor) if self.hparams.steps_to_decay_s2 is not None else None
+            
+            # Log the scaled values
+            logger.info(f"Batch size scaling ENABLED: base_batch_size={self.hparams.base_batch_size_for_scheduler_steps}, "
+                       f"current_batch_size={self.hparams.batch_size}, scaling_factor={scaling_factor}")
+            logger.info(f"Original scheduler steps: warmup_s1={self.hparams.warmup_steps_s1}, "
+                       f"warmup_s2={self.hparams.warmup_steps_s2}, "
+                       f"decay_s1={self.hparams.steps_to_decay_s1}, "
+                       f"decay_s2={self.hparams.steps_to_decay_s2}")
+            logger.info(f"Scaled scheduler steps: warmup_s1={self.scaled_warmup_steps_s1}, "
+                       f"warmup_s2={self.scaled_warmup_steps_s2}, "
+                       f"decay_s1={self.scaled_steps_to_decay_s1}, "
+                       f"decay_s2={self.scaled_steps_to_decay_s2}")
 
         # Initialize scheduler reference attributes
         self.warmup_scheduler_ref = None
