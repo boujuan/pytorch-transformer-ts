@@ -35,6 +35,8 @@ class TACTiS(nn.Module):
         skip_copula: bool = True,
         encoder_type: str = "standard",
         stage: int = 1,
+        stage1_activation_function: str = "ReLU",
+        stage2_activation_function: str = "ReLU",
     ):
         """
         Initialize TACTiS model components.
@@ -73,6 +75,10 @@ class TACTiS(nn.Module):
             Whether to skip copula component (use only flow for first stage)
         encoder_type: str
             Type of encoder to use ("standard" or "temporal").
+        stage1_activation_function: str
+            Activation function to use in stage 1 (flow component) encoder (default: "ReLU")
+        stage2_activation_function: str
+            Activation function to use in stage 2 (copula component) encoder (default: "ReLU")
         """
         super().__init__()
 
@@ -87,6 +93,8 @@ class TACTiS(nn.Module):
         self.skip_copula = skip_copula
         self.bagging_size = bagging_size
         self.encoder_type = encoder_type
+        self.stage1_activation_function = stage1_activation_function
+        self.stage2_activation_function = stage2_activation_function
 
         # Stage tracks whether to use flow only (1) or flow+copula (2)
         self.stage = stage
@@ -124,10 +132,15 @@ class TACTiS(nn.Module):
         # The output dim should match the flow_encoder's d_model
         flow_d_model = self.flow_encoder_args["d_model"]
         flow_input_dim = self.flow_series_embedding_dim + 2 # value + mask + embedding
-        flow_encoder_layers = [nn.Linear(flow_input_dim, flow_d_model), nn.ReLU()] # First layer
+        
+        # Get activation class based on the stage1_activation_function
+        activation_cls = self._get_activation_class(self.stage1_activation_function)
+        logger.debug(f"Using activation function {self.stage1_activation_function} (mapped to {activation_cls.__name__})")
+        
+        flow_encoder_layers = [nn.Linear(flow_input_dim, flow_d_model), activation_cls()] # First layer
         for _ in range(1, self.flow_input_encoder_layers):
              # Intermediate layers could have different dims, but let's keep it simple
-             flow_encoder_layers += [nn.Linear(flow_d_model, flow_d_model), nn.ReLU()]
+             flow_encoder_layers += [nn.Linear(flow_d_model, flow_d_model), activation_cls()]
         # Last layer ensures output matches d_model without ReLU
         if self.flow_input_encoder_layers > 1:
              flow_encoder_layers[-2] = nn.Linear(flow_d_model, flow_d_model) # Replace last Linear
@@ -154,14 +167,16 @@ class TACTiS(nn.Module):
 
         if self.encoder_type == "standard":
             logger.debug(f"Initializing standard flow_encoder (Transformer) with {self.flow_encoder_args['num_encoder_layers']} layers, d_model={flow_d_model}, nhead={self.flow_encoder_args['nhead']}")
+            # Use the activation_cls from stage1_activation_function
             self.flow_encoder = nn.TransformerEncoder(
                 encoder_layer=nn.TransformerEncoderLayer(
                     d_model=flow_d_model, # Use consistent d_model
-                nhead=self.flow_encoder_args["nhead"],
-                dim_feedforward=self.flow_encoder_args.get("dim_feedforward", flow_d_model * 4), # Default if missing
-                dropout=self.flow_encoder_args.get("dropout", 0.1),
-                batch_first=True
-            ),
+                    nhead=self.flow_encoder_args["nhead"],
+                    dim_feedforward=self.flow_encoder_args.get("dim_feedforward", flow_d_model * 4), # Default if missing
+                    dropout=self.flow_encoder_args.get("dropout", 0.1),
+                    activation=activation_cls(), # Use the configured activation function
+                    batch_first=True
+                ),
                 num_layers=self.flow_encoder_args["num_encoder_layers"]
             )
         elif self.encoder_type == "temporal":
@@ -173,6 +188,7 @@ class TACTiS(nn.Module):
                 num_encoder_layers=self.flow_temporal_encoder_args["num_encoder_layers"],
                 dim_feedforward=self.flow_temporal_encoder_args.get("dim_feedforward", flow_d_model * 4),
                 dropout=self.flow_temporal_encoder_args.get("dropout", 0.1),
+                activation=activation_cls, # Pass the activation class (not instance) to TemporalEncoder
             )
         else:
             raise ValueError(f"Unknown encoder_type for flow: {self.encoder_type}")
@@ -261,26 +277,34 @@ class TACTiS(nn.Module):
               logger.warning(f"copula_encoder_args d_model mismatch. Using calculated: {copula_d_model}")
 
         if self.encoder_type == "standard":
-            logger.debug(f"Initializing standard copula_encoder (Transformer)")
+            # Get activation class based on the stage2_activation_function
+            activation_cls = self._get_activation_class(self.stage2_activation_function)
+            logger.debug(f"Initializing standard copula_encoder (Transformer) with activation {activation_cls.__name__}")
+            
             copula_encoder_instance = nn.TransformerEncoder(
                 encoder_layer=nn.TransformerEncoderLayer(
                     d_model=copula_d_model,
                     nhead=self.copula_encoder_args["nhead"],
                     dim_feedforward=self.copula_encoder_args.get("dim_feedforward", copula_d_model * 4),
                     dropout=self.copula_encoder_args.get("dropout", 0.1),
+                    activation=activation_cls(), # Use the configured activation function
                     batch_first=True
                 ),
                 num_layers=self.copula_encoder_args["num_encoder_layers"]
             )
             self.copula_encoder = copula_encoder_instance.to(device)
         elif self.encoder_type == "temporal":
-            logger.debug(f"Initializing temporal copula_encoder")
+            # Get activation class based on the stage2_activation_function
+            activation_cls = self._get_activation_class(self.stage2_activation_function)
+            logger.debug(f"Initializing temporal copula_encoder with activation {activation_cls.__name__}")
+            
             copula_encoder_instance = TemporalEncoder(
                 d_model=copula_d_model,
                 nhead=self.copula_temporal_encoder_args["nhead"],
                 num_encoder_layers=self.copula_temporal_encoder_args["num_encoder_layers"],
                 dim_feedforward=self.copula_temporal_encoder_args.get("dim_feedforward", copula_d_model * 4),
                 dropout=self.copula_temporal_encoder_args.get("dropout", 0.1),
+                activation=activation_cls, # Pass the activation class (not instance)
             )
             self.copula_encoder = copula_encoder_instance.to(device)
         else:
@@ -707,6 +731,25 @@ class TACTiS(nn.Module):
 
         return encoded.contiguous()
 
+    def _get_activation_class(self, activation_name: str):
+        """
+        Helper method to map activation function name to the appropriate PyTorch activation class.
+        """
+        _ACTIVATION_MAP = {
+            "relu": nn.ReLU,
+            "gelu": nn.GELU,
+            "leakyrelu": nn.LeakyReLU,
+            "tanh": nn.Tanh,
+            "sigmoid": nn.Sigmoid,
+            "elu": nn.ELU,
+            "selu": nn.SELU,
+        }
+        
+        activation_cls = _ACTIVATION_MAP.get(activation_name.lower(), nn.ReLU)
+        logger.debug(f"Using activation function {activation_name} (mapped to {activation_cls.__name__})")
+        
+        return activation_cls
+        
     def set_stage(self, stage: int):
         """Set the training stage."""
         assert stage in [1, 2], "Stage must be 1 or 2"
