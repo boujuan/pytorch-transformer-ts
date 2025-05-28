@@ -134,8 +134,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
-        **kwargs,
-        
+        **kwargs,        
     ) -> None:
         # Prepare base trainer kwargs
         trainer_kwargs = {
