@@ -351,7 +351,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         #     },
         # }
         
-        return optimizer
+        # return optimizer
     
     def forward(
         self,
