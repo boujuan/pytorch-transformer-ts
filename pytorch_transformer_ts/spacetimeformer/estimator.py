@@ -116,6 +116,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
+        lr: float = 1e-4,
+        weight_decay: float = 1e-8,
     ) -> None:
         trainer_kwargs = {
             "max_epochs": 100,
@@ -199,6 +201,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         self.num_parallel_samples = num_parallel_samples
         self.batch_size = batch_size
         self.num_batches_per_epoch = num_batches_per_epoch
+        self.lr = lr
+        self.weight_decay = weight_decay
 
         self.train_sampler = train_sampler or ExpectedNumInstanceSampler(
             num_instances=1.0, min_future=prediction_length
@@ -506,4 +510,8 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
 
         # return SpacetimeformerLightningModule(model=model, loss=self.loss)
         # return SpacetimeformerLightningModule(model=model)
-        return SpacetimeformerLightningModule(model_config=model_params)
+        return SpacetimeformerLightningModule(
+            model_config=model_params,
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )

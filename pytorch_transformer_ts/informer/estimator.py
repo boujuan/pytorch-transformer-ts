@@ -89,6 +89,8 @@ class InformerEstimator(PyTorchLightningEstimator):
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
+        lr: float = 1e-4,
+        weight_decay: float = 1e-8,
     ) -> None:
         trainer_kwargs = {
             "max_epochs": 100,
@@ -135,6 +137,8 @@ class InformerEstimator(PyTorchLightningEstimator):
         self.num_parallel_samples = num_parallel_samples
         self.batch_size = batch_size
         self.num_batches_per_epoch = num_batches_per_epoch
+        self.lr = lr
+        self.weight_decay = weight_decay
         
         # TODO if idx = 0 is returned from sampler then full entry[ts_field] is returned (from slice [...,:idx])
         self.train_sampler = train_sampler or ExpectedNumInstanceSampler(
@@ -383,4 +387,8 @@ class InformerEstimator(PyTorchLightningEstimator):
         )
 
         # return InformerLightningModule(model=model, loss=self.loss) CHANGE
-        return InformerLightningModule(model_config=model_params)
+        return InformerLightningModule(
+            model_config=model_params,
+            lr=self.lr,
+            weight_decay=self.weight_decay
+        )
