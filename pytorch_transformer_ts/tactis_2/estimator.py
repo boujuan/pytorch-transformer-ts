@@ -614,6 +614,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             lr_stage2=self.lr_stage2,
             weight_decay_stage1=self.weight_decay_stage1,
             weight_decay_stage2=self.weight_decay_stage2,
+            # Pass gradient clipping values
+            gradient_clip_val_stage1=self.gradient_clip_val_stage1,
+            gradient_clip_val_stage2=self.gradient_clip_val_stage2,
             # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,

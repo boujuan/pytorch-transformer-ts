@@ -24,6 +24,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         lr_stage2: float = 7.0e-4,
         weight_decay_stage1: float = 0.0,
         weight_decay_stage2: float = 0.0,
+        gradient_clip_val_stage1: float = 1000.0,  # Gradient clipping for stage 1
+        gradient_clip_val_stage2: float = 1000.0,  # Gradient clipping for stage 2
         stage: int = 1,  # Start with stage 1 (flow-only)
         stage2_start_epoch: int = 10,  # When to start stage 2
         warmup_steps_s1: int = 1000, # Number of warmup steps for Stage 1 LR
@@ -70,6 +72,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         # Save hyperparameters first, so self.hparams is populated
         self.save_hyperparameters("model_config", "lr_stage1", "lr_stage2",
                                    "weight_decay_stage1", "weight_decay_stage2",
+                                   "gradient_clip_val_stage1", "gradient_clip_val_stage2",
                                    "stage", "stage2_start_epoch",
                                    "warmup_steps_s1", "warmup_steps_s2",
                                    "steps_to_decay_s1", "steps_to_decay_s2",
@@ -651,6 +654,21 @@ class TACTiS2LightningModule(pl.LightningModule):
             # For Stage 2, the scheduler will be set in on_train_epoch_start
             logger.info(f"Stage 2 scheduler will be configured during on_train_epoch_start.")
             return optimizer
+    
+    def configure_gradient_clipping(self, optimizer, gradient_clip_val, gradient_clip_algorithm=None):
+        """
+        Configure gradient clipping based on the current training stage.
+        This method is called by PyTorch Lightning during training.
+        """
+        # Use stage-specific gradient clipping
+        if self.current_stage == 1:
+            clip_val = self.hparams.gradient_clip_val_stage1
+        else:
+            clip_val = self.hparams.gradient_clip_val_stage2
+        
+        # Only clip if value is greater than 0
+        if clip_val > 0:
+            self.clip_gradients(optimizer, gradient_clip_val=clip_val, gradient_clip_algorithm=gradient_clip_algorithm)
     
     def forward(
         self,
