@@ -661,7 +661,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         This method is called by PyTorch Lightning during training.
         """
         # Use stage-specific gradient clipping
-        if self.current_stage == 1:
+        if self.stage == 1:
             clip_val = self.hparams.gradient_clip_val_stage1
         else:
             clip_val = self.hparams.gradient_clip_val_stage2
