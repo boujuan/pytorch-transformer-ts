@@ -613,11 +613,26 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         epochs_stage1 = self.stage2_start_epoch
         epochs_stage2 = max_epochs - self.stage2_start_epoch
         
-        # CRITICAL: Adjust num_batches_per_epoch for distributed training BEFORE fractional calculations
+        # CRITICAL: Calculate effective batches per epoch considering both distributed training AND limit_train_batches
         # This ensures fractional scheduler steps are calculated correctly for the actual training workload
         effective_batches_per_epoch = self.num_batches_per_epoch
-        if self.num_batches_per_epoch:
-            # Check if we're in a distributed training environment (same logic as GluonTS loader)
+        
+        # First, check for trainer limit_train_batches setting
+        limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
+        if limit_train_batches is not None and limit_train_batches != "null":
+            # If limit_train_batches is set, that becomes our effective batch count
+            try:
+                limit_value = int(limit_train_batches)
+                if limit_value > 0:
+                    original_batches = effective_batches_per_epoch
+                    effective_batches_per_epoch = min(effective_batches_per_epoch or limit_value, limit_value)
+                    logger.info(f"limit_train_batches detected: {original_batches} -> {effective_batches_per_epoch}")
+            except (ValueError, TypeError):
+                # If it's not a valid number, ignore it
+                pass
+        
+        if effective_batches_per_epoch:
+            # Then, check if we're in a distributed training environment (same logic as GluonTS loader)
             try:
                 import torch.distributed as dist
                 if dist.is_available() and dist.is_initialized():
