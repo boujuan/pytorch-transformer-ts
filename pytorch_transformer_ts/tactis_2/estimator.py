@@ -72,8 +72,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # --- Scheduler specific arguments ---
         eta_min_fraction_s1: float = 0.01,  # Fraction of initial LR for Stage 1 cosine decay eta_min
         eta_min_fraction_s2: float = 0.01,  # Fraction of initial LR for Stage 2 cosine decay eta_min
-        steps_to_decay_s1: Optional[int] = None,  # Optional manual T_max value for Stage 1 CosineAnnealingLR
-        steps_to_decay_s2: Optional[int] = None,  # Optional manual T_max value for Stage 2 CosineAnnealingLR
+        steps_to_decay_s1 = None,  # T_max for Stage 1 (int=absolute, float=fraction of stage)
+        steps_to_decay_s2 = None,  # T_max for Stage 2 (int=absolute, float=fraction of stage)
         # --- TACTiS2 specific arguments ---
         # Passed directly to TACTiS2Model/TACTiS
         flow_series_embedding_dim: int = 5,
@@ -113,8 +113,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         dropout_rate: float = 0.1,
         gradient_clip_val_stage1: float = 1000.0,
         gradient_clip_val_stage2: float = 1000.0,
-        warmup_steps_s1: int = 1000, # Warmup steps for stage 1
-        warmup_steps_s2: int = 500,  # Warmup steps for stage 2
+        warmup_steps_s1 = 1000, # Warmup steps for stage 1 (int=absolute, float=fraction of stage)
+        warmup_steps_s2 = 500,  # Warmup steps for stage 2 (int=absolute, float=fraction of stage)
         # General Estimator arguments
         use_lazyframe: bool = False,
         num_feat_dynamic_real: int = 0,
@@ -605,6 +605,65 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "num_parallel_samples": self.num_parallel_samples,
         }
         
+        # Calculate absolute steps from fractional values if needed
+        # This allows setting warmup/decay as fractions of each training stage
+        max_epochs = self.trainer_kwargs.get("max_epochs", 100)  # Default to 100 if not specified
+        
+        # Calculate epochs per stage
+        epochs_stage1 = self.stage2_start_epoch
+        epochs_stage2 = max_epochs - self.stage2_start_epoch
+        
+        # CRITICAL: Adjust num_batches_per_epoch for distributed training BEFORE fractional calculations
+        # This ensures fractional scheduler steps are calculated correctly for the actual training workload
+        effective_batches_per_epoch = self.num_batches_per_epoch
+        if self.num_batches_per_epoch:
+            # Check if we're in a distributed training environment (same logic as GluonTS loader)
+            try:
+                import torch.distributed as dist
+                if dist.is_available() and dist.is_initialized():
+                    world_size = dist.get_world_size()
+                    rank = dist.get_rank()
+                    if world_size > 1:
+                        original_batches = effective_batches_per_epoch
+                        effective_batches_per_epoch = effective_batches_per_epoch // world_size
+                        logger.info(f"Distributed training detected for fractional calculations:")
+                        logger.info(f"  Rank {rank}/{world_size}: Adjusted batches per epoch {original_batches} -> {effective_batches_per_epoch}")
+            except ImportError:
+                pass  # PyTorch not available or not distributed
+        
+        # Calculate total steps per stage using the correctly adjusted batch count
+        steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
+        steps_stage2 = epochs_stage2 * effective_batches_per_epoch if effective_batches_per_epoch else 0
+        
+        logger.info(f"Training schedule calculation:")
+        logger.info(f"  Max epochs: {max_epochs}")
+        logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
+        logger.info(f"  Stage 2: epochs {self.stage2_start_epoch}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
+        logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
+        
+        # Convert fractional warmup/decay steps to absolute values
+        def resolve_steps(value, total_steps, param_name):
+            if value is None:
+                return None
+            elif isinstance(value, (int, float)) and 0.0 <= value <= 1.0:
+                # Treat as fraction of the stage (including 1.0 = 100%)
+                absolute_value = int(value * total_steps)
+                logger.info(f"  {param_name}: {value} (fraction) → {absolute_value:,} steps")
+                return absolute_value
+            elif isinstance(value, (int, float)) and value > 1.0:
+                # Treat as absolute value (> 1.0)
+                absolute_value = int(value)
+                logger.info(f"  {param_name}: {absolute_value:,} steps (absolute)")
+                return absolute_value
+            else:
+                logger.warning(f"  {param_name}: Invalid value {value}, using None")
+                return None
+        
+        resolved_warmup_s1 = resolve_steps(self.warmup_steps_s1, steps_stage1, "warmup_steps_s1")
+        resolved_warmup_s2 = resolve_steps(self.warmup_steps_s2, steps_stage2, "warmup_steps_s2")
+        resolved_decay_s1 = resolve_steps(self.steps_to_decay_s1, steps_stage1, "steps_to_decay_s1")
+        resolved_decay_s2 = resolve_steps(self.steps_to_decay_s2, steps_stage2, "steps_to_decay_s2")
+        
         return TACTiS2LightningModule(
             model_config=model_config, # Pass config dict
             # Pass stage-specific optimizer params
@@ -620,10 +679,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
-            warmup_steps_s1=self.warmup_steps_s1, # Pass stage 1 warmup steps
-            warmup_steps_s2=self.warmup_steps_s2, # Pass stage 2 warmup steps
-            steps_to_decay_s1=self.steps_to_decay_s1, # Pass manual T_max value for stage 1
-            steps_to_decay_s2=self.steps_to_decay_s2, # Pass manual T_max value for stage 2
+            warmup_steps_s1=resolved_warmup_s1, # Pass resolved warmup steps for stage 1
+            warmup_steps_s2=resolved_warmup_s2, # Pass resolved warmup steps for stage 2
+            steps_to_decay_s1=resolved_decay_s1, # Pass resolved T_max value for stage 1
+            steps_to_decay_s2=resolved_decay_s2, # Pass resolved T_max value for stage 2
             # Pass activation functions explicitly as keyword arguments
             stage1_activation_function=self.stage1_activation_function,
             stage2_activation_function=self.stage2_activation_function,
