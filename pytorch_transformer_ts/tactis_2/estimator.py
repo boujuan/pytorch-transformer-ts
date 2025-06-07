@@ -530,6 +530,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             context_length=self.context_length,
             prediction_length=self.prediction_length,
             time_features=self.time_features,
+            sampler=self.train_sampler,  # Pass the GluonTS sampler
         )
         
         # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
