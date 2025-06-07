@@ -226,6 +226,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         else:
             self.time_features = time_features
         
+        # Store runtime configuration for distributed training
+        self._runtime_config = kwargs.pop('_runtime_config', {})
+        
         # Log any remaining kwargs
         if kwargs:
             logger.warning(f"TACTiS2Estimator received unused kwargs: {kwargs}")
@@ -677,4 +680,177 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             base_limit_train_batches=self.base_limit_train_batches,
             # Pass num_batches_per_epoch for scheduler calculations
             num_batches_per_epoch=self.num_batches_per_epoch,
+        )
+
+    def train_model(
+        self,
+        training_data,
+        validation_data=None,
+        from_predictor=None,
+        shuffle_buffer_length=None,
+        cache_data=False,
+        ckpt_path=None,
+        **kwargs,
+    ):
+        """
+        Override train_model to conditionally use distributed DataModule.
+        
+        This method checks if distributed optimizations are enabled in the runtime
+        configuration and uses Lightning DataModule for proper distributed training
+        when available, falling back to the original GluonTS data loaders otherwise.
+        """
+        # Check if we should use distributed optimizations
+        use_distributed_optimizations = self._runtime_config.get('use_distributed_optimizations', False)
+        
+        if use_distributed_optimizations:
+            logger.info("Using Lightning DataModule for distributed training")
+            return self._train_with_lightning_datamodule(
+                training_data=training_data,
+                validation_data=validation_data,
+                from_predictor=from_predictor,
+                cache_data=cache_data,
+                ckpt_path=ckpt_path,
+                **kwargs
+            )
+        else:
+            logger.info("Using traditional GluonTS data loaders")
+            # Fall back to the parent implementation
+            return super().train_model(
+                training_data=training_data,
+                validation_data=validation_data,
+                from_predictor=from_predictor,
+                shuffle_buffer_length=shuffle_buffer_length,
+                cache_data=cache_data,
+                ckpt_path=ckpt_path,
+                **kwargs
+            )
+
+    def _train_with_lightning_datamodule(
+        self,
+        training_data,
+        validation_data=None,
+        from_predictor=None,
+        cache_data=False,
+        ckpt_path=None,
+        **kwargs,
+    ):
+        """
+        Training implementation using Lightning DataModule for distributed training.
+        
+        This mirrors the parent's train_model logic but uses DataModule instead
+        of individual data loaders for proper distributed training.
+        """
+        # Import here to avoid circular imports
+        import lightning.pytorch as pl
+        from wind_forecasting.utils.distributed_datamodule import create_distributed_datamodule
+        from wind_forecasting.utils.distributed_utils import calculate_optimal_batch_configuration
+        from gluonts.env import env
+        from gluonts.itertools import Cached
+        from gluonts.torch.model.estimator import TrainOutput
+        
+        # Get runtime configuration
+        training_env = self._runtime_config.get('training_environment', {})
+        full_config = self._runtime_config.get('full_config', {})
+        
+        # Calculate distributed batch configuration
+        world_size = training_env.get('world_size', 1)
+        original_batch_size = self._runtime_config.get('original_batch_size', self.batch_size)
+        
+        per_gpu_batch_size, accumulate_grad_batches = calculate_optimal_batch_configuration(
+            tuned_batch_size=original_batch_size,
+            world_size=world_size,
+            min_batch_per_gpu=16  # Minimum for training stability
+        )
+        
+        logger.info(f"Distributed batch config: {per_gpu_batch_size} per GPU, {accumulate_grad_batches} accumulation")
+        
+        # Create transformation (same as parent)
+        transformation = self.create_transformation()
+        
+        # Apply transformations to datasets (same logic as parent)
+        with env._let(max_idle_transforms=max(len(training_data), 100)):
+            transformed_training_data = transformation.apply(training_data, is_train=True)
+            if cache_data:
+                transformed_training_data = Cached(transformed_training_data)
+        
+        transformed_validation_data = None
+        if validation_data is not None:
+            with env._let(max_idle_transforms=max(len(validation_data), 100)):
+                transformed_validation_data = transformation.apply(validation_data, is_train=True)
+                if cache_data:
+                    transformed_validation_data = Cached(transformed_validation_data)
+        
+        # Create Lightning module (same as parent)
+        training_network = self.create_lightning_module()
+        
+        # Load from predictor if specified (same as parent)
+        if from_predictor is not None:
+            training_network.load_state_dict(from_predictor.network.state_dict())
+        
+        # Create distributed DataModule (new approach)
+        datamodule = create_distributed_datamodule(
+            estimator=self,
+            train_dataset=transformed_training_data,
+            val_dataset=transformed_validation_data,
+            per_gpu_batch_size=per_gpu_batch_size,
+            config=full_config,
+        )
+        
+        # Set up trainer configuration (similar to parent but with DataModule support)
+        trainer_kwargs = self.trainer_kwargs.copy()
+        
+        # Add gradient accumulation if needed
+        if accumulate_grad_batches > 1:
+            trainer_kwargs['accumulate_grad_batches'] = accumulate_grad_batches
+            logger.info(f"Enabled gradient accumulation: {accumulate_grad_batches} batches")
+        
+        # Adjust limit_train_batches for distributed training
+        if hasattr(self, 'num_batches_per_epoch') and self.num_batches_per_epoch:
+            # Each GPU sees fewer batches in distributed training
+            adjusted_num_batches = max(1, self.num_batches_per_epoch // world_size)
+            trainer_kwargs['limit_train_batches'] = adjusted_num_batches
+            logger.info(f"Adjusted limit_train_batches for distributed: {self.num_batches_per_epoch} -> {adjusted_num_batches}")
+        
+        # Set up callbacks (same logic as parent)
+        monitor = "train_loss" if validation_data is None else "val_loss"
+        checkpoint = pl.callbacks.ModelCheckpoint(monitor=monitor, mode="min", verbose=True)
+        
+        custom_callbacks = trainer_kwargs.pop("callbacks", [])
+        has_custom_checkpoint = any(isinstance(cb, pl.callbacks.ModelCheckpoint) for cb in custom_callbacks)
+        final_callbacks = custom_callbacks if has_custom_checkpoint else [checkpoint] + custom_callbacks
+        
+        if has_custom_checkpoint:
+            checkpoint = [cb for cb in custom_callbacks if cb.__class__.__name__ == "ModelCheckpoint"][0]
+        
+        # Create trainer (same as parent)
+        trainer = pl.Trainer(
+            **{
+                "callbacks": final_callbacks,
+                **trainer_kwargs,
+            }
+        )
+        
+        # Train using DataModule (different from parent - uses datamodule instead of individual loaders)
+        trainer.fit(
+            model=training_network,
+            datamodule=datamodule,  # This is the key difference!
+            ckpt_path=ckpt_path,
+        )
+        
+        # Load best model (same as parent)
+        if checkpoint.best_model_path != "":
+            logger.info(f"Loading best model from {checkpoint.best_model_path}")
+            best_model = training_network.__class__.load_from_checkpoint(
+                checkpoint.best_model_path,
+                strict=False
+            )
+        else:
+            best_model = training_network
+        
+        # Return TrainOutput (same as parent)
+        return TrainOutput(
+            transformation=transformation,
+            trained_net=best_model,
+            trainer=trainer,
+            predictor=self.create_predictor(transformation, best_model, **kwargs),
         )
