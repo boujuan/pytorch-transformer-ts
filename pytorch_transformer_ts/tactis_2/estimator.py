@@ -714,6 +714,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             )
         else:
             logger.info("Using traditional GluonTS data loaders")
+            # Filter out our custom parameters before calling parent method
+            filtered_kwargs = {k: v for k, v in kwargs.items() 
+                             if k not in ['_runtime_config']}
             # Fall back to the parent implementation
             return super().train_model(
                 training_data=training_data,
@@ -722,7 +725,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 shuffle_buffer_length=shuffle_buffer_length,
                 cache_data=cache_data,
                 ckpt_path=ckpt_path,
-                **kwargs
+                **filtered_kwargs
             )
 
     def _train_with_lightning_datamodule(
