@@ -616,10 +616,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Note: Distributed batch adjustment is handled automatically by GluonTS loader
             # No need to duplicate the adjustment logic here
         
-        # Calculate total steps per stage using the correctly adjusted batch count
-        steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
-        steps_stage2 = epochs_stage2 * effective_batches_per_epoch if effective_batches_per_epoch else 0
-        
+            # Calculate total steps per stage using the correctly adjusted batch count
+            steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
+            steps_stage2 = epochs_stage2 * effective_batches_per_epoch if effective_batches_per_epoch else 0
+            
         logger.info(f"Training schedule calculation:")
         logger.info(f"  Max epochs: {max_epochs}")
         logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
