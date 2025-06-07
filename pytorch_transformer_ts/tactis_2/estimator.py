@@ -142,26 +142,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             **trainer_kwargs,
         }
 
-        # Conditionally set DDP strategy for multi-GPU training
-        accelerator = trainer_kwargs.get("accelerator", "auto")
-        devices = trainer_kwargs.get("devices", "auto")
-        
-        if accelerator in ("gpu", "cuda", "auto"):
-            # Determine if we're using multiple GPUs
-            multi_gpu = False
-            if isinstance(devices, int):
-                multi_gpu = devices > 1
-            elif devices == -1:  # Use all available GPUs
-                multi_gpu = torch.cuda.device_count() > 1
-            elif isinstance(devices, (list, tuple)):
-                multi_gpu = len(devices) > 1
-            
-            # Only set DDP strategy if:
-            # 1. Using multiple GPUs
-            # 2. No strategy is already specified
-            if multi_gpu and "strategy" not in trainer_kwargs:
-                trainer_kwargs["strategy"] = "ddp"
-                logger.info(f"Detected multi-GPU setup (devices={devices}), setting strategy='ddp'")
+        # Note: DDP strategy configuration is handled by run_model.py
         super().__init__(trainer_kwargs=trainer_kwargs)
         
         self.freq = freq
@@ -613,8 +594,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         epochs_stage1 = self.stage2_start_epoch
         epochs_stage2 = max_epochs - self.stage2_start_epoch
         
-        # CRITICAL: Calculate effective batches per epoch considering both distributed training AND limit_train_batches
-        # This ensures fractional scheduler steps are calculated correctly for the actual training workload
+        # Calculate effective batches per epoch considering limit_train_batches
+        # Note: GluonTS loader handles distributed batch adjustment automatically
         effective_batches_per_epoch = self.num_batches_per_epoch
         
         # First, check for trainer limit_train_batches setting
@@ -632,19 +613,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 pass
         
         if effective_batches_per_epoch:
-            # Then, check if we're in a distributed training environment (same logic as GluonTS loader)
-            try:
-                import torch.distributed as dist
-                if dist.is_available() and dist.is_initialized():
-                    world_size = dist.get_world_size()
-                    rank = dist.get_rank()
-                    if world_size > 1:
-                        original_batches = effective_batches_per_epoch
-                        effective_batches_per_epoch = effective_batches_per_epoch // world_size
-                        logger.info(f"Distributed training detected for fractional calculations:")
-                        logger.info(f"  Rank {rank}/{world_size}: Adjusted batches per epoch {original_batches} -> {effective_batches_per_epoch}")
-            except ImportError:
-                pass  # PyTorch not available or not distributed
+            # Note: Distributed batch adjustment is handled automatically by GluonTS loader
+            # No need to duplicate the adjustment logic here
         
         # Calculate total steps per stage using the correctly adjusted batch count
         steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
