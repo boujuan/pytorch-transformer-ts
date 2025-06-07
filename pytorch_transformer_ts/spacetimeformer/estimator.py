@@ -218,7 +218,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         # batch_size=128
         if dynamic_kwargs is None:
             dynamic_kwargs = {}
-        d_qkv = trial.suggest_categorical("d_qkv", [20, 30, 40])
+        d_qkv = trial.suggest_categorical("d_qkv", [16, 32, 64, 128])
         return {
             
             # --- Input Params ---
@@ -226,9 +226,9 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [64, 128, 256, 512, 1024])),
             
             # --- Architecture Params ---
-            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [3, 5, 6])),
-            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", dynamic_kwargs.get("num_decoder_layers", [3, 5, 6])),
-            "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [100, 150, 200])),
+            "num_encoder_layers": trial.suggest_categorical("num_encoder_layers", dynamic_kwargs.get("num_encoder_layers", [2, 3, 4, 5])),
+            "num_decoder_layers": trial.suggest_categorical("num_decoder_layers", dynamic_kwargs.get("num_decoder_layers", [2, 3, 4, 5])),
+            "d_model": trial.suggest_categorical("d_model", dynamic_kwargs.get("d_model", [128, 256, 512])),
             "d_queries_keys": d_qkv,
             "d_values": d_qkv,
             "n_heads": trial.suggest_categorical("n_heads", dynamic_kwargs.get("n_heads", [4, 6, 8])),
@@ -264,7 +264,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             # recon_mask_drop_full: float = 0.05,
             
             # --- Optimizer Params ---
-            "lr": trial.suggest_float("lr", 1e-6, 1e-4, log=False),
+            "lr": trial.suggest_float("lr", 1e-6, 1e-3, log=False),
             "weight_decay": trial.suggest_categorical("weight_decay", dynamic_kwargs.get("weight_decay", [0.0, 1e-8, 1e-6, 1e-4])),
             
             # --- Dropout & Clipping ---  
