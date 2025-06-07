@@ -134,6 +134,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
+        use_pytorch_dataloader: bool = False,
         **kwargs,        
     ) -> None:
         # Prepare base trainer kwargs
@@ -225,6 +226,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             self.time_features = time_features_from_frequency_str(self.freq)
         else:
             self.time_features = time_features
+            
+        self.use_pytorch_dataloader = use_pytorch_dataloader
         
         # Log any remaining kwargs
         if kwargs:
