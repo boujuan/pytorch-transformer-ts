@@ -751,15 +751,17 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # Get runtime configuration
         training_env = self._runtime_config.get('training_environment', {})
         full_config = self._runtime_config.get('full_config', {})
+        gpu_capabilities = self._runtime_config.get('gpu_capabilities', {})
         
-        # Calculate distributed batch configuration
+        # Calculate distributed batch configuration with GPU optimizations
         world_size = training_env.get('world_size', 1)
         original_batch_size = self._runtime_config.get('original_batch_size', self.batch_size)
         
         per_gpu_batch_size, accumulate_grad_batches = calculate_optimal_batch_configuration(
             tuned_batch_size=original_batch_size,
             world_size=world_size,
-            min_batch_per_gpu=16  # Minimum for training stability
+            min_batch_per_gpu=16,  # Minimum for training stability
+            gpu_capabilities=gpu_capabilities  # Pass GPU capabilities for optimization
         )
         
         logger.info(f"Distributed batch config: {per_gpu_batch_size} per GPU, {accumulate_grad_batches} accumulation")
