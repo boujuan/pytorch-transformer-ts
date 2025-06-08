@@ -680,9 +680,27 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         epochs_stage1 = self.stage2_start_epoch
         epochs_stage2 = max_epochs - self.stage2_start_epoch
         
-        # Calculate effective batches per epoch considering limit_train_batches
-        # Note: GluonTS loader handles distributed batch adjustment automatically
+        # Calculate effective batches per epoch considering limit_train_batches and DDP
         effective_batches_per_epoch = self.num_batches_per_epoch
+        
+        # Adjust for distributed training (DDP) - data is split across GPUs
+        strategy = self.trainer_kwargs.get("strategy")
+        devices = self.trainer_kwargs.get("devices", 1)
+        
+        # Check if using DDP strategy (handles both string and object forms)
+        is_ddp = False
+        if strategy == "ddp":
+            is_ddp = True
+        elif hasattr(strategy, "__class__") and "DDP" in strategy.__class__.__name__:
+            is_ddp = True
+        
+        if is_ddp and devices > 1:
+            # In DDP, each GPU processes 1/devices of the data per epoch
+            original_batches = effective_batches_per_epoch
+            effective_batches_per_epoch = effective_batches_per_epoch // devices
+            logger.info(f"DDP detected ({devices} GPUs): adjusting steps per epoch {original_batches:,} -> {effective_batches_per_epoch:,}")
+        elif devices > 1:
+            logger.info(f"Multi-GPU detected ({devices} devices) but strategy={strategy} - no step adjustment applied")
         
         # First, check for trainer limit_train_batches setting
         limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
@@ -699,9 +717,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 pass
         
         if effective_batches_per_epoch:
-            # Note: Distributed batch adjustment is handled automatically by GluonTS loader
-            # No need to duplicate the adjustment logic here
-        
             # Calculate total steps per stage using the correctly adjusted batch count
             steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
             steps_stage2 = epochs_stage2 * effective_batches_per_epoch if effective_batches_per_epoch else 0
