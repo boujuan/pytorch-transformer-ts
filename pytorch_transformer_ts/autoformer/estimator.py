@@ -456,7 +456,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             freq=self.freq,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
-            num_feat_dynamic_real=1
+            num_feat_dynamic_real=(0 if self.use_pytorch_dataloader else 1) # 1 is for age
             + self.num_feat_dynamic_real
             + len(self.time_features),
             num_feat_static_real=max(1, self.num_feat_static_real),

@@ -232,12 +232,12 @@ class InformerEstimator(PyTorchLightningEstimator):
             [RemoveFields(field_names=remove_field_names)]
             + (
                 [SetField(output_field=FieldName.FEAT_STATIC_CAT, value=[0])]
-                if not self.num_feat_static_cat > 0
+                if self.num_feat_static_cat == 0
                 else []
             )
             + (
                 [SetField(output_field=FieldName.FEAT_STATIC_REAL, value=[0.0])]
-                if not self.num_feat_static_real > 0
+                if self.num_feat_static_real == 0
                 else []
             )
             + [
@@ -471,7 +471,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             freq=self.freq,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
-            num_feat_dynamic_real=1 # 1 is for age 
+            num_feat_dynamic_real=(0 if self.use_pytorch_dataloader else 1) # 1 is for age
             + self.num_feat_dynamic_real
             + len(self.time_features),
             num_feat_static_real=max(1, self.num_feat_static_real),
