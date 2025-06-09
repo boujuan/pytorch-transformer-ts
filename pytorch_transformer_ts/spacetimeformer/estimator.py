@@ -453,6 +453,89 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             output_type=torch.tensor
         )
 
+    def create_pytorch_training_data_loader(
+        self,
+        data_path: str,
+        module: SpacetimeformerLightningModule,
+        **kwargs,
+        ) -> torch.utils.data.DataLoader:
+        """
+        Create a PyTorch DataLoader for training.
+        
+        Parameters
+        ----------
+        data_path
+            Path to the pickle file containing training data.
+        module
+            The Spacetimeformer lightning module.
+        
+        Returns
+        -------
+        A PyTorch DataLoader for training.
+        """
+        # Import here to avoid circular imports
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
+        
+        dataset = WindForecastingDataset(
+            data_path=data_path,
+            context_length=self.context_length,
+            prediction_length=self.prediction_length,
+            time_features=self.time_features,
+            sampler=self.train_sampler,  # Pass the GluonTS sampler
+        )
+        
+        # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=True,  # Will be overridden by DistributedSampler in DDP
+            num_workers=kwargs.get('num_workers', 4),
+            pin_memory=kwargs.get('pin_memory', True),
+            persistent_workers=kwargs.get('persistent_workers', True),
+            drop_last=True,  # Important for DDP to avoid uneven batch sizes
+        )
+    
+    def create_pytorch_validation_data_loader(
+        self,
+        data_path: str,
+        module: SpacetimeformerLightningModule,
+        **kwargs,
+    ) -> torch.utils.data.DataLoader:
+        """
+        Create a PyTorch DataLoader for validation.
+        
+        Parameters
+        ----------
+        data_path
+            Path to the pickle file containing validation data.
+        module
+            The Spacetimeformer lightning module.
+        
+        Returns
+        -------
+        A PyTorch DataLoader for validation.
+        """
+        # Import here to avoid circular imports
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingInferenceDataset
+        
+        dataset = WindForecastingInferenceDataset(
+            data_path=data_path,
+            context_length=self.context_length,
+            prediction_length=self.prediction_length,
+            time_features=self.time_features,
+        )
+        
+        # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=False,  # Never shuffle validation data
+            num_workers=kwargs.get('num_workers', 4),
+            pin_memory=kwargs.get('pin_memory', True),
+            persistent_workers=kwargs.get('persistent_workers', True),
+            drop_last=False,  # Keep all validation samples
+        )
+
     def create_predictor(
         self,
         transformation: Transformation,
