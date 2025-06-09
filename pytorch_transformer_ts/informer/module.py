@@ -766,10 +766,10 @@ class InformerModel(nn.Module):
             # shape [n_continuity_groups*n_parallel_samples, 1, d_model]
             output = self.decoder(self.embed(decoder_input), repeated_enc_out) # shape = (num_parallel_samples, 1, d_model)
             
-            # shapes [n_continuity_groups*n_parallel_samples, 1, input_size], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
+            # shapes [n_continuity_groups*n_parallel_samples, 1, input_sizecd], [n_continuity_groups*n_parallel_samples, 1, input_size, rank], [n_continuity_groups*n_parallel_samples, 1, input_size]
             params = self.param_proj(output[:, -1:])
             # adds scaled mean, variance, stddev params
-            # TODO why cov_diag always the same??
+            
             distr = self.output_distribution( # params batch of num_parallel_samples passed to distribution...all identical, so mean and stdev values output are all identical too
                 params, scale=repeated_scale, loc=repeated_loc
             )
