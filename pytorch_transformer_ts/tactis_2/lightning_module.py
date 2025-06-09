@@ -2,9 +2,6 @@
 import logging
 import lightning.pytorch as pl
 import torch
-from gluonts.torch.util import weighted_average
-# from gluonts.dataset.field_names import FieldName
-import sys
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR
 from .module import TACTiS2Model
 from typing import Optional
@@ -401,9 +398,6 @@ class TACTiS2LightningModule(pl.LightningModule):
         feat_static_cat = batch.get("feat_static_cat", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.long))
         feat_static_real = batch.get("feat_static_real", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.float32))
         
-        # Get dynamic features if available
-        feat_dynamic_real = batch.get("feat_dynamic_real", None)
-        
         # Process with model
         model_output = self.model(
             feat_static_cat=feat_static_cat,
@@ -465,9 +459,6 @@ class TACTiS2LightningModule(pl.LightningModule):
         # Get static features if available
         feat_static_cat = batch.get("feat_static_cat", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.long))
         feat_static_real = batch.get("feat_static_real", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.float32))
-        
-        # Get dynamic features if available
-        feat_dynamic_real = batch.get("feat_dynamic_real", None)
         
         # Process with model - no gradients needed for validation
         with torch.no_grad():

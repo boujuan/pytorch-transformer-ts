@@ -85,12 +85,19 @@ class InformerEstimator(PyTorchLightningEstimator):
         time_features: Optional[List[TimeFeature]] = None,
         num_parallel_samples: int = 100,
         batch_size: int = 32,
+        base_batch_size_for_scheduler_steps: int = 2048,
+        base_limit_train_batches: Optional[int] = None,
         num_batches_per_epoch: Optional[int] = 50,
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         lr: float = 1e-4,
         weight_decay: float = 1e-8,
+        gradient_clip_val: float = 1000.0,
+        warmup_steps: int = 1000, # Warmup steps
+        # --- Scheduler specific arguments ---
+        eta_min_fraction: float = 0.01,  # Fraction of initial LR for cosine decay eta_min
+        steps_to_decay: Optional[int] = None,  # Optional manual T_max value for CosineAnnealingLR
     ) -> None:
         trainer_kwargs = {
             "max_epochs": 100,
@@ -139,6 +146,12 @@ class InformerEstimator(PyTorchLightningEstimator):
         self.num_batches_per_epoch = num_batches_per_epoch
         self.lr = lr
         self.weight_decay = weight_decay
+        self.eta_min_fraction = eta_min_fraction
+        self.gradient_clip_val = gradient_clip_val
+        self.warmup_steps = warmup_steps # Store warmup steps
+        self.steps_to_decay = steps_to_decay # Store manual T_max value
+        self.base_batch_size_for_scheduler_steps = base_batch_size_for_scheduler_steps
+        self.base_limit_train_batches = base_limit_train_batches
         
         # TODO if idx = 0 is returned from sampler then full entry[ts_field] is returned (from slice [...,:idx])
         self.train_sampler = train_sampler or ExpectedNumInstanceSampler(
@@ -174,11 +187,15 @@ class InformerEstimator(PyTorchLightningEstimator):
                 # attn: str = "prob",
                 
                 # --- Optimizer Params ---
-                "lr": trial.suggest_float("lr", 1e-6, 1e-4, log=False),
+                "lr": trial.suggest_float("lr", 1e-6, 1e-3, log=False),
                 "weight_decay": trial.suggest_categorical("weight_decay", dynamic_kwargs.get("weight_decay", [0.0, 1e-8, 1e-6, 1e-4])),
             
                 # --- Dropout & Clipping ---  
                 "dropout": trial.suggest_float("dropout", 0.0, 0.3),
+                "gradient_clip_val": trial.suggest_categorical("gradient_clip_val", dynamic_kwargs.get("gradient_clip_val", [0, 1.0, 3.0, 5.0, 10.0])),
+
+                # --- LR Scheduler Params ---
+                "eta_min_fraction": trial.suggest_float("eta_min_fraction", 1e-5, 0.05, log=True), # Tune eta_min fraction
             }
         else:
             return {
@@ -390,5 +407,17 @@ class InformerEstimator(PyTorchLightningEstimator):
         return InformerLightningModule(
             model_config=model_params,
             lr=self.lr,
-            weight_decay=self.weight_decay
+            weight_decay=self.weight_decay,
+            eta_min_fraction=self.eta_min_fraction,  # Pass eta_min fraction
+            # Pass gradient clipping val
+            gradient_clip_val=self.gradient_clip_val,
+            # Pass training stage params
+            warmup_steps=self.warmup_steps, # Pass warmup steps
+            steps_to_decay=self.steps_to_decay, # Pass manual T_max value
+            # Pass batch size parameters for scheduler step scaling
+            batch_size=self.batch_size,
+            base_batch_size_for_scheduler_steps=self.base_batch_size_for_scheduler_steps,
+            base_limit_train_batches=self.base_limit_train_batches,
+            # Pass num_batches_per_epoch for scheduler calculations
+            num_batches_per_epoch=self.num_batches_per_epoch
         )
