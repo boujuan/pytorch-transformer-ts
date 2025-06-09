@@ -1,5 +1,5 @@
 from typing import Any, Dict, Iterable, List, Optional
-
+import logging
 import polars as pl
 import numpy as np
 
@@ -37,6 +37,9 @@ from gluonts.transform.sampler import InstanceSampler
 # CHANGE
 from pytorch_transformer_ts.informer.lightning_module import InformerLightningModule
 from pytorch_transformer_ts.informer.module import InformerModel
+
+# Set up logging
+logger = logging.getLogger(__name__)
 
 PREDICTION_INPUT_NAMES = [
     "feat_static_cat",
@@ -98,6 +101,8 @@ class InformerEstimator(PyTorchLightningEstimator):
         # --- Scheduler specific arguments ---
         eta_min_fraction: float = 0.01,  # Fraction of initial LR for cosine decay eta_min
         steps_to_decay: Optional[int] = None,  # Optional manual T_max value for CosineAnnealingLR
+        use_pytorch_dataloader: bool = False,
+        **kwargs,
     ) -> None:
         trainer_kwargs = {
             "max_epochs": 100,
@@ -160,6 +165,12 @@ class InformerEstimator(PyTorchLightningEstimator):
         self.validation_sampler = validation_sampler or ValidationSplitSampler(
             min_future=prediction_length,
         )
+        
+        self.use_pytorch_dataloader = use_pytorch_dataloader
+        
+        # Log any remaining kwargs
+        if kwargs:
+            logger.warning(f"InformerEstimator received unused kwargs: {kwargs}")
     
     @staticmethod
     def get_params(trial, tuning_phase=1, dynamic_kwargs=None):
