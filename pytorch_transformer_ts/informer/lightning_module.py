@@ -4,9 +4,9 @@ import torch
 # from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.torch.util import weighted_average
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR
+from typing import Optional
 # CHANGE
 from pytorch_transformer_ts.informer.module import InformerModel
-from typing import Optional
 
 import logging
 logger = logging.getLogger(__name__)
