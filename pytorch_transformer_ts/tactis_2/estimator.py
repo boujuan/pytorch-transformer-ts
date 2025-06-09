@@ -72,8 +72,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # --- Scheduler specific arguments ---
         eta_min_fraction_s1: float = 0.01,  # Fraction of initial LR for Stage 1 cosine decay eta_min
         eta_min_fraction_s2: float = 0.01,  # Fraction of initial LR for Stage 2 cosine decay eta_min
-        steps_to_decay_s1: Optional[int] = None,  # Optional manual T_max value for Stage 1 CosineAnnealingLR
-        steps_to_decay_s2: Optional[int] = None,  # Optional manual T_max value for Stage 2 CosineAnnealingLR
+        steps_to_decay_s1 = None,  # T_max for Stage 1 (int=absolute, float=fraction of stage)
+        steps_to_decay_s2 = None,  # T_max for Stage 2 (int=absolute, float=fraction of stage)
         # --- TACTiS2 specific arguments ---
         # Passed directly to TACTiS2Model/TACTiS
         flow_series_embedding_dim: int = 5,
@@ -113,8 +113,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         dropout_rate: float = 0.1,
         gradient_clip_val_stage1: float = 1000.0,
         gradient_clip_val_stage2: float = 1000.0,
-        warmup_steps_s1: int = 1000, # Warmup steps for stage 1
-        warmup_steps_s2: int = 500,  # Warmup steps for stage 2
+        warmup_steps_s1 = 1000, # Warmup steps for stage 1 (int=absolute, float=fraction of stage)
+        warmup_steps_s2 = 500,  # Warmup steps for stage 2 (int=absolute, float=fraction of stage)
         # General Estimator arguments
         use_lazyframe: bool = False,
         num_feat_dynamic_real: int = 0,
@@ -134,6 +134,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
+        use_pytorch_dataloader: bool = False,
         **kwargs,        
     ) -> None:
         # Prepare base trainer kwargs
@@ -142,26 +143,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             **trainer_kwargs,
         }
 
-        # Conditionally set DDP strategy for multi-GPU training
-        accelerator = trainer_kwargs.get("accelerator", "auto")
-        devices = trainer_kwargs.get("devices", "auto")
-        
-        if accelerator in ("gpu", "cuda", "auto"):
-            # Determine if we're using multiple GPUs
-            multi_gpu = False
-            if isinstance(devices, int):
-                multi_gpu = devices > 1
-            elif devices == -1:  # Use all available GPUs
-                multi_gpu = torch.cuda.device_count() > 1
-            elif isinstance(devices, (list, tuple)):
-                multi_gpu = len(devices) > 1
-            
-            # Only set DDP strategy if:
-            # 1. Using multiple GPUs
-            # 2. No strategy is already specified
-            if multi_gpu and "strategy" not in trainer_kwargs:
-                trainer_kwargs["strategy"] = "ddp"
-                logger.info(f"Detected multi-GPU setup (devices={devices}), setting strategy='ddp'")
+        # Note: DDP strategy configuration is handled by run_model.py
         super().__init__(trainer_kwargs=trainer_kwargs)
         
         self.freq = freq
@@ -244,6 +226,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             self.time_features = time_features_from_frequency_str(self.freq)
         else:
             self.time_features = time_features
+            
+        self.use_pytorch_dataloader = use_pytorch_dataloader
         
         # Log any remaining kwargs
         if kwargs:
@@ -518,6 +502,89 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             output_type=torch.tensor,
         )
     
+    def create_pytorch_training_data_loader(
+        self,
+        data_path: str,
+        module: TACTiS2LightningModule,
+        **kwargs,
+    ) -> torch.utils.data.DataLoader:
+        """
+        Create a PyTorch DataLoader for training.
+        
+        Parameters
+        ----------
+        data_path
+            Path to the pickle file containing training data.
+        module
+            The TACTiS2 lightning module.
+        
+        Returns
+        -------
+        A PyTorch DataLoader for training.
+        """
+        # Import here to avoid circular imports
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
+        
+        dataset = WindForecastingDataset(
+            data_path=data_path,
+            context_length=self.context_length,
+            prediction_length=self.prediction_length,
+            time_features=self.time_features,
+            sampler=self.train_sampler,  # Pass the GluonTS sampler
+        )
+        
+        # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=True,  # Will be overridden by DistributedSampler in DDP
+            num_workers=kwargs.get('num_workers', 4),
+            pin_memory=kwargs.get('pin_memory', True),
+            persistent_workers=kwargs.get('persistent_workers', True),
+            drop_last=True,  # Important for DDP to avoid uneven batch sizes
+        )
+    
+    def create_pytorch_validation_data_loader(
+        self,
+        data_path: str,
+        module: TACTiS2LightningModule,
+        **kwargs,
+    ) -> torch.utils.data.DataLoader:
+        """
+        Create a PyTorch DataLoader for validation.
+        
+        Parameters
+        ----------
+        data_path
+            Path to the pickle file containing validation data.
+        module
+            The TACTiS2 lightning module.
+        
+        Returns
+        -------
+        A PyTorch DataLoader for validation.
+        """
+        # Import here to avoid circular imports
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingInferenceDataset
+        
+        dataset = WindForecastingInferenceDataset(
+            data_path=data_path,
+            context_length=self.context_length,
+            prediction_length=self.prediction_length,
+            time_features=self.time_features,
+        )
+        
+        # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
+        return torch.utils.data.DataLoader(
+            dataset,
+            batch_size=self.batch_size,
+            shuffle=False,  # Never shuffle validation data
+            num_workers=kwargs.get('num_workers', 4),
+            pin_memory=kwargs.get('pin_memory', True),
+            persistent_workers=kwargs.get('persistent_workers', True),
+            drop_last=False,  # Keep all validation samples
+        )
+    
     def create_predictor(
         self,
         transformation: Transformation,
@@ -605,6 +672,84 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "num_parallel_samples": self.num_parallel_samples,
         }
         
+        # Calculate absolute steps from fractional values if needed
+        # This allows setting warmup/decay as fractions of each training stage
+        max_epochs = self.trainer_kwargs.get("max_epochs", 100)  # Default to 100 if not specified
+        
+        # Calculate epochs per stage
+        epochs_stage1 = self.stage2_start_epoch
+        epochs_stage2 = max_epochs - self.stage2_start_epoch
+        
+        # Calculate effective batches per epoch considering limit_train_batches and DDP
+        effective_batches_per_epoch = self.num_batches_per_epoch
+        
+        # Adjust for distributed training (DDP) - data is split across GPUs
+        strategy = self.trainer_kwargs.get("strategy")
+        devices = self.trainer_kwargs.get("devices", 1)
+        
+        # Check if using DDP strategy (handles both string and object forms)
+        is_ddp = False
+        if strategy == "ddp":
+            is_ddp = True
+        elif hasattr(strategy, "__class__") and "DDP" in strategy.__class__.__name__:
+            is_ddp = True
+        
+        if is_ddp and devices > 1:
+            # In DDP, each GPU processes 1/devices of the data per epoch
+            original_batches = effective_batches_per_epoch
+            effective_batches_per_epoch = effective_batches_per_epoch // devices
+            logger.info(f"DDP detected ({devices} GPUs): adjusting steps per epoch {original_batches:,} -> {effective_batches_per_epoch:,}")
+        elif devices > 1:
+            logger.info(f"Multi-GPU detected ({devices} devices) but strategy={strategy} - no step adjustment applied")
+        
+        # First, check for trainer limit_train_batches setting
+        limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
+        if limit_train_batches is not None and limit_train_batches != "null":
+            # If limit_train_batches is set, that becomes our effective batch count
+            try:
+                limit_value = int(limit_train_batches)
+                if limit_value > 0:
+                    original_batches = effective_batches_per_epoch
+                    effective_batches_per_epoch = min(effective_batches_per_epoch or limit_value, limit_value)
+                    logger.info(f"limit_train_batches detected: {original_batches} -> {effective_batches_per_epoch}")
+            except (ValueError, TypeError):
+                # If it's not a valid number, ignore it
+                pass
+        
+        if effective_batches_per_epoch:
+            # Calculate total steps per stage using the correctly adjusted batch count
+            steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
+            steps_stage2 = epochs_stage2 * effective_batches_per_epoch if effective_batches_per_epoch else 0
+            
+        logger.info(f"Training schedule calculation:")
+        logger.info(f"  Max epochs: {max_epochs}")
+        logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
+        logger.info(f"  Stage 2: epochs {self.stage2_start_epoch}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
+        logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
+        
+        # Convert fractional warmup/decay steps to absolute values
+        def resolve_steps(value, total_steps, param_name):
+            if value is None:
+                return None
+            elif isinstance(value, (int, float)) and 0.0 <= value <= 1.0:
+                # Treat as fraction of the stage (including 1.0 = 100%)
+                absolute_value = int(value * total_steps)
+                logger.info(f"  {param_name}: {value} (fraction) → {absolute_value:,} steps")
+                return absolute_value
+            elif isinstance(value, (int, float)) and value > 1.0:
+                # Treat as absolute value (> 1.0)
+                absolute_value = int(value)
+                logger.info(f"  {param_name}: {absolute_value:,} steps (absolute)")
+                return absolute_value
+            else:
+                logger.warning(f"  {param_name}: Invalid value {value}, using None")
+                return None
+        
+        resolved_warmup_s1 = resolve_steps(self.warmup_steps_s1, steps_stage1, "warmup_steps_s1")
+        resolved_warmup_s2 = resolve_steps(self.warmup_steps_s2, steps_stage2, "warmup_steps_s2")
+        resolved_decay_s1 = resolve_steps(self.steps_to_decay_s1, steps_stage1, "steps_to_decay_s1")
+        resolved_decay_s2 = resolve_steps(self.steps_to_decay_s2, steps_stage2, "steps_to_decay_s2")
+        
         return TACTiS2LightningModule(
             model_config=model_config, # Pass config dict
             # Pass stage-specific optimizer params
@@ -620,10 +765,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Pass training stage params
             stage=self.initial_stage,
             stage2_start_epoch=self.stage2_start_epoch,
-            warmup_steps_s1=self.warmup_steps_s1, # Pass stage 1 warmup steps
-            warmup_steps_s2=self.warmup_steps_s2, # Pass stage 2 warmup steps
-            steps_to_decay_s1=self.steps_to_decay_s1, # Pass manual T_max value for stage 1
-            steps_to_decay_s2=self.steps_to_decay_s2, # Pass manual T_max value for stage 2
+            warmup_steps_s1=resolved_warmup_s1, # Pass resolved warmup steps for stage 1
+            warmup_steps_s2=resolved_warmup_s2, # Pass resolved warmup steps for stage 2
+            steps_to_decay_s1=resolved_decay_s1, # Pass resolved T_max value for stage 1
+            steps_to_decay_s2=resolved_decay_s2, # Pass resolved T_max value for stage 2
             # Pass activation functions explicitly as keyword arguments
             stage1_activation_function=self.stage1_activation_function,
             stage2_activation_function=self.stage2_activation_function,
