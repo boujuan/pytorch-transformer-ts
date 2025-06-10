@@ -14,6 +14,7 @@ from gluonts.time_feature import TimeFeature, time_features_from_frequency_str
 from gluonts.torch.distributions import DistributionOutput, StudentTOutput
 from gluonts.torch.model.estimator import PyTorchLightningEstimator
 from gluonts.torch.model.predictor import PyTorchPredictor
+
 # from gluonts.torch.modules.loss import DistributionLoss, NegativeLogLikelihood
 from gluonts.transform import (
     AddAgeFeature,
@@ -364,6 +365,32 @@ class InformerEstimator(PyTorchLightningEstimator):
             # num_batches_per_epoch=self.num_batches_per_epoch,
         )
 
+    # @staticmethod
+    # def _worker_init_fn(worker_id):
+    #     worker_info = torch.utils.data.get_worker_info()
+    #     dataset = worker_info.dataset  # the dataset copy in this worker process
+        
+    #     # configure the dataset to only process the split workload
+    #     if dist.is_initialized():
+    #         rank = dist.get_rank()
+    #         world_size = dist.get_world_size()
+    #         logger.info(f"rank={rank}, world_size={world_size}")
+    #     else:
+    #         rank = 0
+    #         world_size = 1
+        
+    #     logger.info(f"worker_id={worker_id}, num_workers={worker_info.num_workers}")
+        
+    #     global_worker_id = (rank * worker_info.num_workers) + worker_id
+    #     global_num_workers = world_size * worker_info.num_workers
+        
+    #     logger.info(f"global_worker_id={global_worker_id}, global_num_workers={global_num_workers}")
+        
+    #     # dataset = islice(dataset, global_worker_id, None, global_num_workers) 
+    #     dataset.worker_shard_start = global_worker_id
+    #     dataset.worker_shard_step = global_num_workers
+        
+    
     def create_pytorch_training_data_loader(
         self,
         data_path: str,
@@ -387,23 +414,25 @@ class InformerEstimator(PyTorchLightningEstimator):
         # Import here to avoid circular imports
         from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
         
-        dataset = WindForecastingDataset(
+        data = WindForecastingDataset(
             data_path=data_path,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
             time_features=self.time_features,
             sampler=self.train_sampler,  # Pass the GluonTS sampler
+            repeat=self.num_batches_per_epoch is not None # will just repeat over same dataset if we only provide one
         )
         
         # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
         return torch.utils.data.DataLoader(
-            dataset,
+            data,
             batch_size=self.batch_size,
-            shuffle=True,  # Will be overridden by DistributedSampler in DDP
+            shuffle=False,  # Will be overridden by DistributedSampler in DDP
+            # worker_init_fn=self.__class__._worker_init_fn,
             num_workers=kwargs.get('num_workers', 4),
             pin_memory=kwargs.get('pin_memory', True),
             persistent_workers=kwargs.get('persistent_workers', True),
-            drop_last=True,  # Important for DDP to avoid uneven batch sizes
+            # drop_last=True,  # Important for DDP to avoid uneven batch sizes
         )
     
     def create_pytorch_validation_data_loader(
@@ -434,6 +463,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             context_length=self.context_length,
             prediction_length=self.prediction_length,
             time_features=self.time_features,
+            repeat=False
         )
         
         # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
@@ -441,10 +471,11 @@ class InformerEstimator(PyTorchLightningEstimator):
             dataset,
             batch_size=self.batch_size,
             shuffle=False,  # Never shuffle validation data
+            # worker_init_fn=self.__class__._worker_init_fn,
             num_workers=kwargs.get('num_workers', 4),
             pin_memory=kwargs.get('pin_memory', True),
             persistent_workers=kwargs.get('persistent_workers', True),
-            drop_last=False,  # Keep all validation samples
+            # drop_last=False,  # Keep all validation samples
         )
     
     

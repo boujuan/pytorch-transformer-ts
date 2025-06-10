@@ -525,25 +525,27 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # Import here to avoid circular imports
         from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
         
-        dataset = WindForecastingDataset(
+        data = WindForecastingDataset(
             data_path=data_path,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
             time_features=self.time_features,
             sampler=self.train_sampler,  # Pass the GluonTS sampler
+            repeat=self.num_batches_per_epoch is not None # will just repeat over same dataset if we only provide one
         )
         
         # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
         return torch.utils.data.DataLoader(
-            dataset,
+            data,
             batch_size=self.batch_size,
-            shuffle=True,  # Will be overridden by DistributedSampler in DDP
+            shuffle=False,  # Will be overridden by DistributedSampler in DDP
+            # worker_init_fn=self.__class__._worker_init_fn,
             num_workers=kwargs.get('num_workers', 4),
             pin_memory=kwargs.get('pin_memory', True),
             persistent_workers=kwargs.get('persistent_workers', True),
-            drop_last=True,  # Important for DDP to avoid uneven batch sizes
+            # drop_last=True,  # Important for DDP to avoid uneven batch sizes
         )
-    
+        
     def create_pytorch_validation_data_loader(
         self,
         data_path: str,
@@ -572,6 +574,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             context_length=self.context_length,
             prediction_length=self.prediction_length,
             time_features=self.time_features,
+            repeat=False
         )
         
         # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
@@ -579,10 +582,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             dataset,
             batch_size=self.batch_size,
             shuffle=False,  # Never shuffle validation data
+            # worker_init_fn=self.__class__._worker_init_fn,
             num_workers=kwargs.get('num_workers', 4),
             pin_memory=kwargs.get('pin_memory', True),
             persistent_workers=kwargs.get('persistent_workers', True),
-            drop_last=False,  # Keep all validation samples
+            # drop_last=False,  # Keep all validation samples
         )
     
     def create_predictor(
