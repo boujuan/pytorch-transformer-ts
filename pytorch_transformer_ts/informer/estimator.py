@@ -35,9 +35,6 @@ from gluonts.transform import (
 )
 from gluonts.transform.sampler import InstanceSampler
 
-from itertools import islice, cycle
-import torch.distributed as dist
-
 # CHANGE
 from pytorch_transformer_ts.informer.lightning_module import InformerLightningModule
 from pytorch_transformer_ts.informer.module import InformerModel
