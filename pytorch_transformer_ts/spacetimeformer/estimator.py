@@ -478,8 +478,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
             val_repeat=False,
             batch_size=self.batch_size,
             num_workers=kwargs.get('num_workers', 4), 
-            pin_memory=kwargs.get('pin_memory', True), 
-            persistent_workers=kwargs.get('persistent_workers', True),
+            pin_memory=kwargs.get('pin_memory', True)
             )
 
     # def create_pytorch_training_data_loader(
