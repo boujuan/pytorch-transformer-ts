@@ -2,7 +2,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import logging
 import polars as pl
 import numpy as np
-
+import lightning
 import torch
 from gluonts.core.component import validated
 from gluonts.dataset.common import Dataset
@@ -33,7 +33,6 @@ from gluonts.transform import (
 from gluonts.transform.sampler import InstanceSampler
 
 from pytorch_transformer_ts.autoformer.lightning_module import AutoformerLightningModule
-from pytorch_transformer_ts.autoformer.module import AutoformerModel
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -350,94 +349,121 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             # num_batches_per_epoch=self.num_batches_per_epoch, #CHANGE
         )
 
-    def create_pytorch_training_data_loader(
-        self,
-        data_path: str,
-        module: AutoformerLightningModule,
-        **kwargs,
-        ) -> torch.utils.data.DataLoader:
-        """
-        Create a PyTorch DataLoader for training.
+    def create_pytorch_data_module(self,
+        train_data_path: str,
+        val_data_path: str,
+        **kwargs
+        ) -> lightning.pytorch.LightningDataModule:
         
-        Parameters
-        ----------
-        data_path
-            Path to the pickle file containing training data.
-        module
-            The Autoformer lightning module.
+        # Parameters
+        #     ----------
+        #     data_path
+        #         Path to the pickle file containing training data.
         
-        Returns
-        -------
-        A PyTorch DataLoader for training.
-        """
-        # Import here to avoid circular imports
-        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
-        
-        data = WindForecastingDataset(
-            data_path=data_path,
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
+        return WindForecastingDatamodule(
+            train_data_path=train_data_path, 
+            val_data_path=val_data_path, 
+            train_sampler=self.train_sampler, 
             context_length=self.context_length,
             prediction_length=self.prediction_length,
             time_features=self.time_features,
-            sampler=self.train_sampler,  # Pass the GluonTS sampler
-            repeat=self.num_batches_per_epoch is not None # will just repeat over same dataset if we only provide one
-        )
-        
-        # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
-        return torch.utils.data.DataLoader(
-            data,
+            val_sampler=None, 
+            train_repeat=self.num_batches_per_epoch is not None,
+            val_repeat=False,
             batch_size=self.batch_size,
-            shuffle=False,  # Will be overridden by DistributedSampler in DDP
-            # worker_init_fn=self.__class__._worker_init_fn,
-            num_workers=kwargs.get('num_workers', 4),
-            pin_memory=kwargs.get('pin_memory', True),
+            num_workers=kwargs.get('num_workers', 4), 
+            pin_memory=kwargs.get('pin_memory', True), 
             persistent_workers=kwargs.get('persistent_workers', True),
-            # drop_last=True,  # Important for DDP to avoid uneven batch sizes
-        )
+            )
+    # def create_pytorch_training_data_loader(
+    #     self,
+    #     data_path: str,
+    #     module: AutoformerLightningModule,
+    #     **kwargs,
+    #     ) -> torch.utils.data.DataLoader:
+    #     """
+    #     Create a PyTorch DataLoader for training.
+        
+    #     Parameters
+    #     ----------
+    #     data_path
+    #         Path to the pickle file containing training data.
+    #     module
+    #         The Autoformer lightning module.
+        
+    #     Returns
+    #     -------
+    #     A PyTorch DataLoader for training.
+    #     """
+    #     # Import here to avoid circular imports
+    #     from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
+        
+    #     data = WindForecastingDataset(
+    #         data_path=data_path,
+    #         context_length=self.context_length,
+    #         prediction_length=self.prediction_length,
+    #         time_features=self.time_features,
+    #         sampler=self.train_sampler,  # Pass the GluonTS sampler
+    #         repeat=self.num_batches_per_epoch is not None # will just repeat over same dataset if we only provide one
+    #     )
+        
+    #     # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
+    #     return torch.utils.data.DataLoader(
+    #         data,
+    #         batch_size=self.batch_size,
+    #         shuffle=False,  # Will be overridden by DistributedSampler in DDP
+    #         # worker_init_fn=self.__class__._worker_init_fn,
+    #         num_workers=kwargs.get('num_workers', 4),
+    #         pin_memory=kwargs.get('pin_memory', True),
+    #         persistent_workers=kwargs.get('persistent_workers', True),
+    #         # drop_last=True,  # Important for DDP to avoid uneven batch sizes
+    #     )
     
     
-    def create_pytorch_validation_data_loader(
-        self,
-        data_path: str,
-        module: AutoformerLightningModule,
-        **kwargs,
-    ) -> torch.utils.data.DataLoader:
-        """
-        Create a PyTorch DataLoader for validation.
+    # def create_pytorch_validation_data_loader(
+    #     self,
+    #     data_path: str,
+    #     module: AutoformerLightningModule,
+    #     **kwargs,
+    # ) -> torch.utils.data.DataLoader:
+    #     """
+    #     Create a PyTorch DataLoader for validation.
         
-        Parameters
-        ----------
-        data_path
-            Path to the pickle file containing validation data.
-        module
-            The Autoformer lightning module.
+    #     Parameters
+    #     ----------
+    #     data_path
+    #         Path to the pickle file containing validation data.
+    #     module
+    #         The Autoformer lightning module.
         
-        Returns
-        -------
-        A PyTorch DataLoader for validation.
-        """
-        # Import here to avoid circular imports
-        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingInferenceDataset
+    #     Returns
+    #     -------
+    #     A PyTorch DataLoader for validation.
+    #     """
+    #     # Import here to avoid circular imports
+    #     from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingInferenceDataset
         
-        dataset = WindForecastingInferenceDataset(
-            data_path=data_path,
-            context_length=self.context_length,
-            prediction_length=self.prediction_length,
-            time_features=self.time_features,
-            repeat=False
-        )
+    #     dataset = WindForecastingInferenceDataset(
+    #         data_path=data_path,
+    #         context_length=self.context_length,
+    #         prediction_length=self.prediction_length,
+    #         time_features=self.time_features,
+    #         repeat=False
+    #     )
         
-        # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
-        return torch.utils.data.DataLoader(
-            dataset,
-            batch_size=self.batch_size,
-            shuffle=False,  # Never shuffle validation data
-            # worker_init_fn=self.__class__._worker_init_fn,
-            num_workers=kwargs.get('num_workers', 4),
-            pin_memory=kwargs.get('pin_memory', True),
-            persistent_workers=kwargs.get('persistent_workers', True),
-            skip_indices=kwargs.get("skip_indices", 1)
-            # drop_last=False,  # Keep all validation samples
-        )
+    #     # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
+    #     return torch.utils.data.DataLoader(
+    #         dataset,
+    #         batch_size=self.batch_size,
+    #         shuffle=False,  # Never shuffle validation data
+    #         # worker_init_fn=self.__class__._worker_init_fn,
+    #         num_workers=kwargs.get('num_workers', 4),
+    #         pin_memory=kwargs.get('pin_memory', True),
+    #         persistent_workers=kwargs.get('persistent_workers', True),
+    #         skip_indices=kwargs.get("skip_indices", 1)
+    #         # drop_last=False,  # Keep all validation samples
+    #     )
     
     def create_predictor(
         self,
