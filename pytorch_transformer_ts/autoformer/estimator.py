@@ -435,6 +435,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             num_workers=kwargs.get('num_workers', 4),
             pin_memory=kwargs.get('pin_memory', True),
             persistent_workers=kwargs.get('persistent_workers', True),
+            skip_indices=kwargs.get("skip_indices", 1)
             # drop_last=False,  # Keep all validation samples
         )
     

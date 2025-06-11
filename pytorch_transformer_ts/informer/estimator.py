@@ -463,7 +463,8 @@ class InformerEstimator(PyTorchLightningEstimator):
             context_length=self.context_length,
             prediction_length=self.prediction_length,
             time_features=self.time_features,
-            repeat=False
+            repeat=False,
+            skip_indices=kwargs.get("skip_indices", 1)
         )
         
         # Return DataLoader - PyTorch Lightning will add DistributedSampler automatically
