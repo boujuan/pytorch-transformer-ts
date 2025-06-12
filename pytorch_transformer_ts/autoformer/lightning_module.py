@@ -18,8 +18,8 @@ class AutoformerLightningModule(pl.LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 1e-8,
         gradient_clip_val: float = 1000.0,  # Gradient clipping
-        steps_to_decay: Optional[int] = None,  # Optional manual T_max value for CosineAnnealingLR
-        warmup_steps: int = 1000, # Number of warmup steps for LR
+        steps_to_decay: Optional[float] = 0.9,  # Optional manual T_max value for CosineAnnealingLR
+        warmup_steps: float = 0.1, # Number of warmup steps for LR
         eta_min_fraction: float = 0.01, # Fraction of initial LR for eta_min in cosine decay
         num_batches_per_epoch: int = None, # Number of batches per epoch for scheduler calculations
         batch_size: int = 2048, # Current trial's batch size
@@ -40,48 +40,13 @@ class AutoformerLightningModule(pl.LightningModule):
         self.lr = lr
         self.weight_decay = weight_decay
         
-        # Check if dynamic limit_train_batches scaling is enabled
-        if self.hparams.base_limit_train_batches is not None:
-            # When base_limit_train_batches is set, scale scheduler steps based on
-            # the dynamic limit_train_batches relative to the base configuration
-            
-            # Calculate the steps per epoch scaling factor
-            # This accounts for the dynamic limit_train_batches calculation:
-            # limit_train_batches = base_limit_train_batches * base_batch_size / current_batch_size
-            steps_per_epoch_scaling_factor = self.hparams.base_batch_size_for_scheduler_steps / self.hparams.batch_size
-            
-            # Scale scheduler step parameters to maintain proportional relationships
-            self.scaled_warmup_steps = round(self.hparams.warmup_steps * steps_per_epoch_scaling_factor)
-            self.scaled_steps_to_decay = round(self.hparams.steps_to_decay * steps_per_epoch_scaling_factor) if self.hparams.steps_to_decay is not None else None
-            
-            logger.info(f"Dynamic limit_train_batches scaling ENABLED: base_limit_train_batches={self.hparams.base_limit_train_batches}")
-            logger.info(f"Steps per epoch scaling: base_batch_size={self.hparams.base_batch_size_for_scheduler_steps}, "
-                       f"current_batch_size={self.hparams.batch_size}, scaling_factor={steps_per_epoch_scaling_factor}")
-            logger.info(f"This maintains proportional scheduler timing across different batch sizes with dynamic limit_train_batches")
-            logger.info(f"Original scheduler steps: warmup={self.hparams.warmup_steps}, "
-                       f"decay={self.hparams.steps_to_decay}, ")
-            logger.info(f"Scaled scheduler steps: warmup={self.scaled_warmup_steps}, "
-                       f"decay={self.scaled_steps_to_decay}, ")
-        else:
-            # Legacy batch size scaling for cases without dynamic limit_train_batches
-            scaling_factor = 1.0
-            if self.hparams.batch_size > 0:  # Avoid division by zero
-                scaling_factor = self.hparams.base_batch_size_for_scheduler_steps / self.hparams.batch_size
-            else:
-                logger.warning("Batch size is zero or negative. Using default scaling factor of 1.0.")
-                
-            # Scale scheduler step parameters
-            self.scaled_warmup_steps = round(self.hparams.warmup_steps * scaling_factor)
-            self.scaled_steps_to_decay = round(self.hparams.steps_to_decay * scaling_factor) if self.hparams.steps_to_decay is not None else None
-            
-            # Log the scaled values
-            logger.info(f"Legacy batch size scaling ENABLED: base_batch_size={self.hparams.base_batch_size_for_scheduler_steps}, "
-                       f"current_batch_size={self.hparams.batch_size}, scaling_factor={scaling_factor}")
-            logger.info(f"Original scheduler steps: warmup={self.hparams.warmup_steps}, "
-                       f"decay={self.hparams.steps_to_decay}, ")
-            logger.info(f"Scaled scheduler steps: warmup={self.scaled_warmup_steps}, "
-                       f"decay={self.scaled_steps_to_decay}, ")
-
+        # Use resolved absolute values directly (estimator calculated from fractions)
+        # The estimator has already calculated absolute steps from fractions based on
+        # actual training schedule: stage epochs × num_batches_per_epoch
+        # No additional batch size scaling needed since we have actual step counts
+        self.warmup_steps = self.hparams.warmup_steps or 0
+        self.steps_to_decay = self.hparams.steps_to_decay
+        
         # Initialize scheduler reference attributes
         self.warmup_scheduler_ref = None
         self.cosine_scheduler_ref = None
@@ -114,7 +79,7 @@ class AutoformerLightningModule(pl.LightningModule):
 
     def configure_optimizers(self):
         """Returns the optimizer to use"""
-        return torch.optim.AdamW(
+        optimizer = torch.optim.AdamW(
             self.model.parameters(),
             lr=self.lr,
             weight_decay=self.weight_decay,
@@ -136,13 +101,13 @@ class AutoformerLightningModule(pl.LightningModule):
         logger.info(f"Scheduler setup - num_batches_per_epoch: {steps_per_epoch}, warmup_steps: {self.hparams.warmup_steps}")
         
         # Create warmup scheduler
-        if self.scaled_warmup_steps > 0:
-            logger.info(f"Configuring LR scheduler: Linear warmup for {self.scaled_warmup_steps} steps.")
+        if self.warmup_steps > 0:
+            logger.info(f"Configuring LR scheduler: Linear warmup for {self.warmup_steps} steps.")
             
             # Define linear warmup function
             def lr_lambda_func(current_step: int):
-                if current_step < self.scaled_warmup_steps:
-                    return float(current_step) / float(max(1, self.scaled_warmup_steps))
+                if current_step < self.warmup_steps:
+                    return float(current_step) / float(max(1, self.warmup_steps))
                 return 1.0
             
             warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda_func)
@@ -150,15 +115,15 @@ class AutoformerLightningModule(pl.LightningModule):
             
             # Calculate T_max for cosine annealing
             # Check if manual steps_to_decay is configured
-            if self.scaled_steps_to_decay is not None and self.scaled_steps_to_decay > 0:
-                T_max = self.scaled_steps_to_decay
+            if self.steps_to_decay is not None and self.steps_to_decay > 0:
+                T_max = self.steps_to_decay
                 logger.info(f"Using scaled steps_to_decay={T_max} as T_max for CosineAnnealingLR.")
             else:
                 # Calculate based on epochs and steps per epoch
                 total_epochs_in_run = self.trainer.max_epochs
-                T_max_calculated = (steps_per_epoch * total_epochs_in_run) - self.scaled_warmup_steps
+                T_max_calculated = (steps_per_epoch * total_epochs_in_run) - self.warmup_steps
                 T_max = T_max_calculated
-                logger.info(f"steps_to_decay not configured or invalid. Calculating T_max = ({steps_per_epoch} * {total_epochs_in_run}) - {self.scaled_warmup_steps} = {T_max}")
+                logger.info(f"steps_to_decay not configured or invalid. Calculating T_max = ({steps_per_epoch} * {total_epochs_in_run}) - {self.warmup_steps} = {T_max}")
             
             # Ensure T_max is valid
             if T_max <= 0:
@@ -189,7 +154,7 @@ class AutoformerLightningModule(pl.LightningModule):
             sequential_scheduler = SequentialLR(
                 optimizer,
                 schedulers=[warmup_scheduler, cosine_scheduler],
-                milestones=[self.scaled_warmup_steps],
+                milestones=[self.warmup_steps],
             )
             self.sequential_scheduler_ref = sequential_scheduler  # Store reference
             
@@ -205,8 +170,8 @@ class AutoformerLightningModule(pl.LightningModule):
         else:
             # No warmup, just cosine annealing
             # Check if manual steps_to_decay is configured
-            if self.scaled_steps_to_decay is not None and self.scaled_steps_to_decay > 0:
-                T_max = self.scaled_steps_to_decay
+            if self.steps_to_decay is not None and self.steps_to_decay > 0:
+                T_max = self.steps_to_decay
                 logger.info(f"Using scaled steps_to_decay={T_max} as T_max for CosineAnnealingLR (no warmup).")
             else:
                 # Calculate based on epochs and steps per epoch

@@ -559,8 +559,8 @@ class TACTiS2LightningModule(pl.LightningModule):
             else:
                 # No warmup, just cosine annealing
                 # Check if manual steps_to_decay_s1 is configured
-                if self.scaled_steps_to_decay_s1 is not None and self.scaled_steps_to_decay_s1 > 0:
-                    T_max_s1 = self.scaled_steps_to_decay_s1
+                if self.steps_to_decay_s1 is not None and self.steps_to_decay_s1 > 0:
+                    T_max_s1 = self.steps_to_decay_s1
                     logger.info(f"Using scaled steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR (no warmup).")
                 else:
                     # Calculate based on epochs and steps per epoch

@@ -98,10 +98,10 @@ class InformerEstimator(PyTorchLightningEstimator):
         lr: float = 1e-4,
         weight_decay: float = 1e-8,
         gradient_clip_val: float = 1000.0,
-        warmup_steps: int = 1000, # Warmup steps
+        warmup_steps: float = 0.1, # Warmup steps
         # --- Scheduler specific arguments ---
         eta_min_fraction: float = 0.01,  # Fraction of initial LR for cosine decay eta_min
-        steps_to_decay: Optional[int] = None,  # Optional manual T_max value for CosineAnnealingLR
+        steps_to_decay: Optional[float] = 0.9,  # Optional manual T_max value for CosineAnnealingLR
         use_pytorch_dataloader: bool = False,
         **kwargs,
     ) -> None:
