@@ -19,8 +19,8 @@ class InformerLightningModule(pl.LightningModule):
         lr: float = 1e-4,
         weight_decay: float = 1e-8,
         gradient_clip_val: float = 1000.0,  # Gradient clipping
-        steps_to_decay: Optional[int] = None,  # Optional manual T_max value for CosineAnnealingLR
-        warmup_steps: int = 1000, # Number of warmup steps for LR
+        steps_to_decay: Optional[float] = 0.9,  # Optional manual T_max value for CosineAnnealingLR
+        warmup_steps: float = 0.1, # Number of warmup steps for LR
         eta_min_fraction: float = 0.01, # Fraction of initial LR for eta_min in cosine decay
         num_batches_per_epoch: int = None, # Number of batches per epoch for scheduler calculations
         batch_size: int = 2048, # Current trial's batch size
