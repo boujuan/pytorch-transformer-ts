@@ -42,6 +42,8 @@ from pytorch_transformer_ts.informer.lightning_module import InformerLightningMo
 # Set up logging
 logger = logging.getLogger(__name__)
 
+from pytorch_transformer_ts.utils.step_scaling import resolve_steps
+
 PREDICTION_INPUT_NAMES = [
     "feat_static_cat",
     "feat_static_real",
@@ -554,6 +556,58 @@ class InformerEstimator(PyTorchLightningEstimator):
             scaling=self.scaling,
             num_parallel_samples=self.num_parallel_samples,
         )
+        
+        # Calculate absolute steps from fractional values if needed
+        # This allows setting warmup/decay as fractions of each training stage
+        max_epochs = self.trainer_kwargs.get("max_epochs", 100)  # Default to 100 if not specified
+        
+        # Calculate effective batches per epoch considering limit_train_batches and DDP
+        effective_batches_per_epoch = self.num_batches_per_epoch
+        
+        # Adjust for distributed training (DDP) - data is split across GPUs
+        strategy = self.trainer_kwargs.get("strategy")
+        devices = self.trainer_kwargs.get("devices", 1)
+        
+        # Check if using DDP strategy (handles both string and object forms)
+        is_ddp = False
+        if strategy == "ddp":
+            is_ddp = True
+        elif hasattr(strategy, "__class__") and "DDP" in strategy.__class__.__name__:
+            is_ddp = True
+        
+        if is_ddp and devices > 1:
+            # In DDP, each GPU processes 1/devices of the data per epoch
+            original_batches = effective_batches_per_epoch
+            effective_batches_per_epoch = effective_batches_per_epoch // devices
+            logger.info(f"DDP detected ({devices} GPUs): adjusting steps per epoch {original_batches:,} -> {effective_batches_per_epoch:,}")
+        elif devices > 1:
+            logger.info(f"Multi-GPU detected ({devices} devices) but strategy={strategy} - no step adjustment applied")
+        
+        # First, check for trainer limit_train_batches setting
+        limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
+        if limit_train_batches is not None and limit_train_batches != "null":
+            # If limit_train_batches is set, that becomes our effective batch count
+            try:
+                limit_value = int(limit_train_batches)
+                if limit_value > 0:
+                    original_batches = effective_batches_per_epoch
+                    effective_batches_per_epoch = min(effective_batches_per_epoch or limit_value, limit_value)
+                    logger.info(f"limit_train_batches detected: {original_batches} -> {effective_batches_per_epoch}")
+            except (ValueError, TypeError):
+                # If it's not a valid number, ignore it
+                pass
+        
+        if effective_batches_per_epoch:
+            # Calculate total steps per stage using the correctly adjusted batch count
+            steps = max_epochs * effective_batches_per_epoch if effective_batches_per_epoch else 0
+            
+        logger.info(f"Training schedule calculation:")
+        logger.info(f"  Max epochs: {max_epochs}")
+        logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
+        
+        resolved_warmup = resolve_steps(self.warmup_steps, steps, "warmup_steps")
+        resolved_decay = resolve_steps(self.steps_to_decay, steps, "steps_to_decay")
+        
 
         # return InformerLightningModule(model=model, loss=self.loss) CHANGE
         return InformerLightningModule(
@@ -564,8 +618,8 @@ class InformerEstimator(PyTorchLightningEstimator):
             # Pass gradient clipping val
             gradient_clip_val=self.gradient_clip_val,
             # Pass training stage params
-            warmup_steps=self.warmup_steps, # Pass warmup steps
-            steps_to_decay=self.steps_to_decay, # Pass manual T_max value
+            warmup_steps=resolved_warmup, # Pass warmup steps
+            steps_to_decay=resolved_decay, # Pass manual T_max value
             # Pass batch size parameters for scheduler step scaling
             batch_size=self.batch_size,
             base_batch_size_for_scheduler_steps=self.base_batch_size_for_scheduler_steps,

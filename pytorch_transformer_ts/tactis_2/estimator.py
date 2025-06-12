@@ -40,6 +40,8 @@ from .lightning_module import TACTiS2LightningModule
 # Set up logging
 logger = logging.getLogger(__name__)
 
+from pytorch_transformer_ts.utils.step_scaling import resolve_steps
+
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
     "feat_static_cat",
@@ -730,24 +732,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
         logger.info(f"  Stage 2: epochs {self.stage2_start_epoch}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
         logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
-        
-        # Convert fractional warmup/decay steps to absolute values
-        def resolve_steps(value, total_steps, param_name):
-            if value is None:
-                return None
-            elif isinstance(value, (int, float)) and 0.0 <= value <= 1.0:
-                # Treat as fraction of the stage (including 1.0 = 100%)
-                absolute_value = int(value * total_steps)
-                logger.info(f"  {param_name}: {value} (fraction) → {absolute_value:,} steps")
-                return absolute_value
-            elif isinstance(value, (int, float)) and value > 1.0:
-                # Treat as absolute value (> 1.0)
-                absolute_value = int(value)
-                logger.info(f"  {param_name}: {absolute_value:,} steps (absolute)")
-                return absolute_value
-            else:
-                logger.warning(f"  {param_name}: Invalid value {value}, using None")
-                return None
         
         resolved_warmup_s1 = resolve_steps(self.warmup_steps_s1, steps_stage1, "warmup_steps_s1")
         resolved_warmup_s2 = resolve_steps(self.warmup_steps_s2, steps_stage2, "warmup_steps_s2")
