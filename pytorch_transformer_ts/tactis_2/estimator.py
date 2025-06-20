@@ -263,7 +263,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             
         params = {
             # --- General ---
-            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [3, 4, 5])),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [4, 5, 6])),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
             "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu"])), # Tune activation for Stage 2 components
             "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
