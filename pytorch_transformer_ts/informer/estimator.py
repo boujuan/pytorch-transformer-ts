@@ -186,7 +186,8 @@ class InformerEstimator(PyTorchLightningEstimator):
         if tuning_phase == 1:
             return {
                 # --- Input Params ---
-                "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
+                # "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
+                "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [5])),
                 "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [64, 128, 256, 512, 1024])),
                 
                 # --- Architecture Params ---
@@ -599,14 +600,14 @@ class InformerEstimator(PyTorchLightningEstimator):
         
         if effective_batches_per_epoch:
             # Calculate total steps per stage using the correctly adjusted batch count
-            steps = max_epochs * effective_batches_per_epoch if effective_batches_per_epoch else 0
+            total_steps = max_epochs * effective_batches_per_epoch if effective_batches_per_epoch else 0
             
         logger.info(f"Training schedule calculation:")
         logger.info(f"  Max epochs: {max_epochs}")
         logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
         
-        resolved_warmup = resolve_steps(self.warmup_steps, steps, "warmup_steps")
-        resolved_decay = resolve_steps(self.steps_to_decay, steps, "steps_to_decay")
+        resolved_warmup = resolve_steps(self.warmup_steps, total_steps, "warmup_steps")
+        resolved_decay = resolve_steps(self.steps_to_decay, total_steps, "steps_to_decay")
         
 
         # return InformerLightningModule(model=model, loss=self.loss) CHANGE

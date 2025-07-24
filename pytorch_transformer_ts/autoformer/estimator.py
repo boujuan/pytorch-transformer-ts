@@ -175,7 +175,8 @@ class AutoformerEstimator(PyTorchLightningEstimator):
             
         return {
             # --- Input Params ---
-            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
+            # "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [2, 3, 4])),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [5])),
             # "max_epochs": trial.suggest_int("max_epochs", 1, 10, 2),
             "batch_size": trial.suggest_categorical("batch_size", dynamic_kwargs.get("batch_size", [64, 128, 256, 512, 1024])),
             
