@@ -32,6 +32,7 @@ from gluonts.transform import (
 from gluonts.transform.sampler import InstanceSampler
 
 from pytorch_transformer_ts.spacetimeformer.lightning_module import SpacetimeformerLightningModule
+from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
 
 import lightning
 
@@ -468,7 +469,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         #     data_path
         #         Path to the pickle file containing training data.
         
-        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
+        
         return WindForecastingDatamodule(
             train_data_path=train_data_path, 
             val_data_path=val_data_path, 

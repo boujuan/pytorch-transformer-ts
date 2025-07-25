@@ -5,6 +5,7 @@ import logging
 import polars as pl
 import numpy as np
 
+import lightning
 import torch
 from gluonts.core.component import validated
 from gluonts.dataset.common import Dataset
@@ -35,12 +36,14 @@ from gluonts.transform.sampler import InstanceSampler
 from gluonts.model.forecast_generator import SampleForecastGenerator
 
 from .module import TACTiS2Model
+
 from .lightning_module import TACTiS2LightningModule
 
 # Set up logging
 logger = logging.getLogger(__name__)
 
 from pytorch_transformer_ts.utils.step_scaling import resolve_steps
+from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
 
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
@@ -504,6 +507,33 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             field_names=TRAINING_INPUT_NAMES,
             output_type=torch.tensor,
         )
+    
+    def create_pytorch_data_module(self,
+        train_data_path: str,
+        val_data_path: str,
+        **kwargs
+        ) -> lightning.pytorch.LightningDataModule:
+        
+        # Parameters
+        #     ----------
+        #     data_path
+        #         Path to the pickle file containing training data.
+        
+        return WindForecastingDatamodule(
+            train_data_path=train_data_path, 
+            val_data_path=val_data_path, 
+            train_sampler=self.train_sampler, 
+            context_length=self.context_length,
+            prediction_length=self.prediction_length,
+            time_features=self.time_features,
+            val_sampler=None, 
+            train_repeat=self.num_batches_per_epoch is not None,
+            val_repeat=False,
+            batch_size=self.batch_size,
+            num_workers=kwargs.get('num_workers', 4), 
+            pin_memory=kwargs.get('pin_memory', True)
+            )
+
     
     def create_pytorch_training_data_loader(
         self,
