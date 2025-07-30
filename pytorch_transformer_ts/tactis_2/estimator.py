@@ -43,7 +43,7 @@ from .lightning_module import TACTiS2LightningModule
 logger = logging.getLogger(__name__)
 
 from pytorch_transformer_ts.utils.step_scaling import resolve_steps
-from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
+from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
 
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
@@ -519,7 +519,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         #     data_path
         #         Path to the pickle file containing training data.
         
-        return WindForecastingDatamodule(
+        return WindForecastingDataset(
             train_data_path=train_data_path, 
             val_data_path=val_data_path, 
             train_sampler=self.train_sampler, 

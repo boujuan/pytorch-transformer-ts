@@ -364,8 +364,8 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         #     data_path
         #         Path to the pickle file containing training data.
         
-        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
-        return WindForecastingDatamodule(
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
+        return WindForecastingDataset(
             train_data_path=train_data_path, 
             val_data_path=val_data_path, 
             train_sampler=self.train_sampler, 
