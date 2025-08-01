@@ -135,6 +135,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         base_batch_size_for_scheduler_steps: int = 2048,
         base_limit_train_batches: Optional[int] = None,
         num_batches_per_epoch: Optional[int] = 50,
+        true_num_batches_per_epoch: int = None,
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
@@ -217,6 +218,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         self.batch_size = batch_size
         self.num_batches_per_epoch = num_batches_per_epoch
+        self.true_num_batches_per_epoch = true_num_batches_per_epoch
         
         self.train_sampler = train_sampler or ExpectedNumInstanceSampler(
             num_instances=1.0, min_future=prediction_length
@@ -718,7 +720,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         epochs_stage2 = max_epochs - self.stage2_start_epoch
         
         # Calculate effective batches per epoch considering limit_train_batches and DDP
-        effective_batches_per_epoch = self.num_batches_per_epoch
+        effective_batches_per_epoch = self.true_num_batches_per_epoch
         
         # Adjust for distributed training (DDP) - data is split across GPUs
         strategy = self.trainer_kwargs.get("strategy")

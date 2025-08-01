@@ -122,6 +122,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         base_batch_size_for_scheduler_steps: int = 2048,
         base_limit_train_batches: Optional[int] = None,
         num_batches_per_epoch: Optional[int] = 50,
+        true_num_batches_per_epoch: int = None,
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
@@ -217,6 +218,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         self.num_parallel_samples = num_parallel_samples
         self.batch_size = batch_size
         self.num_batches_per_epoch = num_batches_per_epoch
+        self.true_num_batches_per_epoch = true_num_batches_per_epoch
         self.lr = lr
         self.weight_decay = weight_decay
         self.eta_min_fraction = eta_min_fraction
@@ -662,7 +664,7 @@ class SpacetimeformerEstimator(PyTorchLightningEstimator):
         max_epochs = self.trainer_kwargs.get("max_epochs", 100)  # Default to 100 if not specified
         
         # Calculate effective batches per epoch considering limit_train_batches and DDP
-        effective_batches_per_epoch = self.num_batches_per_epoch
+        effective_batches_per_epoch = self.true_num_batches_per_epoch
         
         # Adjust for distributed training (DDP) - data is split across GPUs
         strategy = self.trainer_kwargs.get("strategy")
