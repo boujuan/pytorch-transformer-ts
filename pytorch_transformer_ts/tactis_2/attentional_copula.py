@@ -314,11 +314,13 @@ class AttentionalCopula(nn.Module):
         num_history = hist_encoded.shape[1] # num_history = series * hist_steps
         device = pred_encoded.device
 
-        # Use a fixed permutation for sampling consistency if needed, or keep random
-        permutation = torch.arange(0, num_variables).long()
-        # If multiple samples require different permutations (more complex):
-        # permutations = torch.stack([torch.randperm(num_variables, device=device) for _ in range(num_samples)])
-        permutations = torch.stack([permutation for _ in range(num_samples)]) # Fixed permutation across samples
+        # Use random permutations for better sample diversity (CRITICAL FIX for low uncertainty issue)
+        # Random permutations significantly improve sampling diversity by varying variable ordering per sample
+        permutations = torch.stack([torch.randperm(num_variables, device=device) for _ in range(num_samples)])
+        
+        # Note: Fixed permutation was causing near-identical samples with extremely low variance (~0.0002 m/s)
+        # permutation = torch.arange(0, num_variables).long()  # OLD: Fixed permutation (problematic)
+        # permutations = torch.stack([permutation for _ in range(num_samples)])  # OLD: Same for all samples
 
         # Precompute keys and values for the history part
         key_value_input_hist = torch.cat([hist_encoded, hist_true_u[:, :, None]], axis=2)
