@@ -720,7 +720,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         epochs_stage2 = max_epochs - self.stage2_start_epoch
         
         # Calculate effective batches per epoch considering limit_train_batches and DDP
-        effective_batches_per_epoch = self.true_num_batches_per_epoch
+        effective_batches_per_epoch = self.true_num_batches_per_epoch or self.num_batches_per_epoch
         
         # Adjust for distributed training (DDP) - data is split across GPUs
         strategy = self.trainer_kwargs.get("strategy")
