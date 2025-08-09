@@ -105,17 +105,27 @@ class DSFMarginal(nn.Module):
         if marginal_params.dim() == u.dim():
             marginal_params = marginal_params[:, :, None, :]
  
-        # Adjust bounds for [-1, 1] normalized data scale
-        left = -2.0 * torch.ones_like(u)
-        right = 2.0 * torch.ones_like(u)
+        # CRITICAL FIX #2: Expand search range to match original TACTiS implementation
+        # Original TACTiS uses max_value=1000.0 to avoid clipping inverse CDF values
+        # This prevents artificial constraints on sample diversity
+        max_value = 1000.0
+        left = -max_value * torch.ones_like(u)
+        right = max_value * torch.ones_like(u)
 
         for iter_num in range(max_iter): # Add iter_num for logging
             mid = (left + right) / 2
             cdf_mid = self.marginal_flow.forward_no_logdet(marginal_params, mid)
 
-            # Update bounds
-            left = torch.where(cdf_mid < u, mid, left)
-            right = torch.where(cdf_mid >= u, mid, right)
+            # CRITICAL FIX #3: Use original TACTiS binary search update logic
+            # Original uses error-based updating for more precise convergence
+            error = cdf_mid - u
+            left[error <= 0] = mid[error <= 0]  # Update left bound where CDF is below target
+            right[error >= 0] = mid[error >= 0]  # Update right bound where CDF is above target
+
+            # CRITICAL FIX #4: Add missing precision-based early stopping from original TACTiS
+            max_error = error.abs().max().item()
+            if max_error < precision:
+                break
 
         final_mid = (left + right) / 2
 

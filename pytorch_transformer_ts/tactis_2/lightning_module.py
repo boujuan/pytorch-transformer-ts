@@ -177,11 +177,15 @@ class TACTiS2LightningModule(pl.LightningModule):
             frozen_count = 0
             unfrozen_count = 0
             for name, param in self.model.tactis.named_parameters():
-                if name.startswith("flow_") or name.startswith("marginal"):
-                    param.requires_grad = False
+                # FIXED: Include decoder.marginal and decoder.copula patterns
+                is_marginal = (name.startswith("flow_") or name.startswith("marginal") or "decoder.marginal" in name)
+                is_copula = (name.startswith("copula_") or name.startswith("copula.") or "decoder.copula" in name)
+                
+                if is_marginal:
+                    param.requires_grad = False  # Freeze marginal/flow parameters in stage 2
                     frozen_count += 1
-                elif name.startswith("copula_") or name.startswith("copula."): # Check for direct attribute 'copula' too
-                    param.requires_grad = True
+                elif is_copula:
+                    param.requires_grad = True   # Unfreeze copula parameters in stage 2  
                     unfrozen_count += 1
                 else:
                     # Default: Keep requires_grad as is, but log a warning if it's unexpected

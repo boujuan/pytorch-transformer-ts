@@ -367,10 +367,10 @@ class AttentionalCopula(nn.Module):
             # For fixed permutation, p is just a scalar index repeated num_samples times
             p = permutations[:, i] # Shape [num_samples], contains the variable index for step i
 
-            # Get the encoded representation for the current variable(s) across batches
-            # Shape: [bsz, num_variables, input_dim] -> select p -> [bsz, input_dim]
-            # Expand for num_samples: [bsz, 1, input_dim] -> [bsz, num_samples, input_dim]
-            current_pred_encoded = pred_encoded[:, p[0], :].unsqueeze(1).expand(-1, num_samples, -1)
+            # CRITICAL FIX #1: Use ALL permutation indices, not just p[0]
+            # Shape: [bsz, num_variables, input_dim] -> select p (per sample) -> [bsz, num_samples, input_dim]
+            # Each sample uses its own variable index from the permutation
+            current_pred_encoded = pred_encoded[:, p, :]  # Advanced indexing: [bsz, num_samples, input_dim]
 
             if i == 0:
                 # First variable is sampled from Uniform(0,1)
@@ -460,9 +460,12 @@ class AttentionalCopula(nn.Module):
                 # Convert bin index to a value in [0, 1)
                 current_samples = (sampled_bins.float() + torch.rand_like(sampled_bins.float())) / self.resolution
 
-            # Store the sampled value for the current variable index p[0] (since fixed permutation)
+            # CRITICAL FIX #1: Store samples at correct variable positions per sample
             # samples shape: [bsz, num_variables, num_samples]
-            samples[:, p[0], :] = current_samples # Store [bsz, num_samples] into slice
+            # Use advanced indexing to store each sample at its corresponding variable index
+            batch_indices = torch.arange(num_batches, device=device)[:, None]  # [bsz, 1]
+            sample_indices = torch.arange(num_samples, device=device)[None, :]   # [1, num_samples]
+            samples[batch_indices, p[None, :], sample_indices] = current_samples
 
             # Compute and store keys/values for the *newly sampled* variable for subsequent steps
             # Input: [bsz, num_samples, input_dim] (current_pred_encoded)
