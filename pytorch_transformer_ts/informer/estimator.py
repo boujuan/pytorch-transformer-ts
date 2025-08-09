@@ -94,6 +94,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         base_batch_size_for_scheduler_steps: int = 2048,
         base_limit_train_batches: Optional[int] = None,
         num_batches_per_epoch: Optional[int] = 50,
+        true_num_batches_per_epoch: int = None,
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
@@ -151,7 +152,11 @@ class InformerEstimator(PyTorchLightningEstimator):
 
         self.num_parallel_samples = num_parallel_samples
         self.batch_size = batch_size
-        self.num_batches_per_epoch = num_batches_per_epoch
+        # this limits the data used from the training dataloader for each epoch. 
+        # If there is a limit, then it is probably using ExpectedNumSampler, and you should repeat the dataset to fill the batches
+        # elif there is no limit ie. it is None, then, then don't repeat the dataset
+        self.num_batches_per_epoch = num_batches_per_epoch 
+        self.true_num_batches_per_epoch = true_num_batches_per_epoch 
         self.lr = lr
         self.weight_decay = weight_decay
         self.eta_min_fraction = eta_min_fraction
@@ -404,8 +409,8 @@ class InformerEstimator(PyTorchLightningEstimator):
         #     data_path
         #         Path to the pickle file containing training data.
         
-        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
-        return WindForecastingDataset(
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
+        return WindForecastingDatamodule(
             train_data_path=train_data_path, 
             val_data_path=val_data_path, 
             train_sampler=self.train_sampler, 
@@ -557,13 +562,14 @@ class InformerEstimator(PyTorchLightningEstimator):
             scaling=self.scaling,
             num_parallel_samples=self.num_parallel_samples,
         )
+        # TODO HIGH this is not robust to the case that self.num_batches_per_epoch is None, try to patch with true_num_batches_per_epoch
         
         # Calculate absolute steps from fractional values if needed
         # This allows setting warmup/decay as fractions of each training stage
         max_epochs = self.trainer_kwargs.get("max_epochs", 100)  # Default to 100 if not specified
         
         # Calculate effective batches per epoch considering limit_train_batches and DDP
-        effective_batches_per_epoch = self.num_batches_per_epoch
+        effective_batches_per_epoch = self.true_num_batches_per_epoch
         
         # Adjust for distributed training (DDP) - data is split across GPUs
         strategy = self.trainer_kwargs.get("strategy")
@@ -604,7 +610,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             
         logger.info(f"Training schedule calculation:")
         logger.info(f"  Max epochs: {max_epochs}")
-        logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
+        logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch}")
         
         resolved_warmup = resolve_steps(self.warmup_steps, total_steps, "warmup_steps")
         resolved_decay = resolve_steps(self.steps_to_decay, total_steps, "steps_to_decay")
@@ -626,5 +632,5 @@ class InformerEstimator(PyTorchLightningEstimator):
             base_batch_size_for_scheduler_steps=self.base_batch_size_for_scheduler_steps,
             base_limit_train_batches=self.base_limit_train_batches,
             # Pass num_batches_per_epoch for scheduler calculations
-            num_batches_per_epoch=self.num_batches_per_epoch
+            num_batches_per_epoch=self.true_num_batches_per_epoch
         )

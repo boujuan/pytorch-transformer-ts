@@ -226,14 +226,26 @@ class SpacetimeformerLightningModule(pl.LightningModule):
       
 
     def forward(self, batch):
-        feat_static_cat = batch["feat_static_cat"]
-        feat_static_real = batch["feat_static_real"]
-        past_time_feat = batch["past_time_feat"]
-        past_target = batch["past_target"]
-        future_time_feat = batch["future_time_feat"]
-        future_target = batch["future_target"]
-        past_observed_values = batch["past_observed_values"]
-        future_observed_values = batch["future_observed_values"]
+        # feat_static_cat = batch["feat_static_cat"]
+        # feat_static_real = batch["feat_static_real"]
+        # past_time_feat = batch["past_time_feat"]
+        # past_target = batch["past_target"]
+        # future_time_feat = batch["future_time_feat"]
+        # future_target = batch["future_target"]
+        # past_observed_values = batch["past_observed_values"]
+        # future_observed_values = batch["future_observed_values"]
+         # ['past_target', 'future_target', 'past_time_feat', 
+        #                      'future_time_feat', 'past_observed_values', 'future_observed_values',
+        #                      'feat_static_cat', 'feat_static_real']
+        # order from pytorch_dataset.py
+        past_target = batch[0]
+        future_target = batch[1]
+        past_time_feat = batch[2]
+        future_time_feat = batch[3]
+        past_observed_values = batch[4]
+        future_observed_values = batch[5]
+        feat_static_cat = batch[6]
+        feat_static_real = batch[7]
 
         transformer_inputs, loc, scale, _ = self.model.create_network_inputs(
             feat_static_cat,

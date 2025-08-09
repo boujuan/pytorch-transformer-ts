@@ -43,7 +43,7 @@ from .lightning_module import TACTiS2LightningModule
 logger = logging.getLogger(__name__)
 
 from pytorch_transformer_ts.utils.step_scaling import resolve_steps
-from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
+from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
 
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
@@ -135,6 +135,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         base_batch_size_for_scheduler_steps: int = 2048,
         base_limit_train_batches: Optional[int] = None,
         num_batches_per_epoch: Optional[int] = 50,
+        true_num_batches_per_epoch: int = None,
         trainer_kwargs: Optional[Dict[str, Any]] = dict(),
         train_sampler: Optional[InstanceSampler] = None,
         validation_sampler: Optional[InstanceSampler] = None,
@@ -217,6 +218,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         
         self.batch_size = batch_size
         self.num_batches_per_epoch = num_batches_per_epoch
+        self.true_num_batches_per_epoch = true_num_batches_per_epoch
         
         self.train_sampler = train_sampler or ExpectedNumInstanceSampler(
             num_instances=1.0, min_future=prediction_length
@@ -519,7 +521,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         #     data_path
         #         Path to the pickle file containing training data.
         
-        return WindForecastingDataset(
+        return WindForecastingDatamodule(
             train_data_path=train_data_path, 
             val_data_path=val_data_path, 
             train_sampler=self.train_sampler, 
@@ -556,9 +558,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         A PyTorch DataLoader for training.
         """
         # Import here to avoid circular imports
-        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
         
-        data = WindForecastingDataset(
+        data = WindForecastingDatamodule(
             data_path=data_path,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
@@ -718,7 +720,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         epochs_stage2 = max_epochs - self.stage2_start_epoch
         
         # Calculate effective batches per epoch considering limit_train_batches and DDP
-        effective_batches_per_epoch = self.num_batches_per_epoch
+        effective_batches_per_epoch = self.true_num_batches_per_epoch
         
         # Adjust for distributed training (DDP) - data is split across GPUs
         strategy = self.trainer_kwargs.get("strategy")
@@ -796,5 +798,5 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             base_batch_size_for_scheduler_steps=self.base_batch_size_for_scheduler_steps,
             base_limit_train_batches=self.base_limit_train_batches,
             # Pass num_batches_per_epoch for scheduler calculations
-            num_batches_per_epoch=self.num_batches_per_epoch,
+            num_batches_per_epoch=self.true_num_batches_per_epoch,
         )
