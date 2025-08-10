@@ -87,7 +87,7 @@ class DSFMarginal(nn.Module):
 
         return transformed_x
 
-    def inverse(self, context: torch.Tensor, u: torch.Tensor, max_iter: int = 100) -> torch.Tensor:
+    def inverse(self, context: torch.Tensor, u: torch.Tensor, max_iter: int = 100, precision: float = 1e-6) -> torch.Tensor:
         """Compute inverse CDF using binary search"""
         # Expect context shape [batch, N, dim], u shape [batch, N] or [batch, N, samples]
         # No internal reshaping needed for context

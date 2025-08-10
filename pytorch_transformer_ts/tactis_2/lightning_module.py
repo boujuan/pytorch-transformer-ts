@@ -174,8 +174,13 @@ class TACTiS2LightningModule(pl.LightningModule):
 
             # 2. Freeze flow/marginal parameters, unfreeze copula parameters
             logger.info("Freezing flow/marginal parameters and unfreezing copula parameters...")
-            frozen_count = 0
-            unfrozen_count = 0
+            frozen_tensors = 0
+            unfrozen_tensors = 0
+            frozen_elements = 0
+            unfrozen_elements = 0
+            other_tensors = 0
+            other_elements = 0
+            
             for name, param in self.model.tactis.named_parameters():
                 # FIXED: Include decoder.marginal and decoder.copula patterns
                 is_marginal = (name.startswith("flow_") or name.startswith("marginal") or "decoder.marginal" in name)
@@ -183,15 +188,25 @@ class TACTiS2LightningModule(pl.LightningModule):
                 
                 if is_marginal:
                     param.requires_grad = False  # Freeze marginal/flow parameters in stage 2
-                    frozen_count += 1
+                    frozen_tensors += 1
+                    frozen_elements += param.numel()
                 elif is_copula:
                     param.requires_grad = True   # Unfreeze copula parameters in stage 2  
-                    unfrozen_count += 1
+                    unfrozen_tensors += 1
+                    unfrozen_elements += param.numel()
                 else:
                     # Default: Keep requires_grad as is, but log a warning if it's unexpected
                     logger.debug(f"Parameter '{name}' not explicitly frozen/unfrozen.")
+                    other_tensors += 1
+                    other_elements += param.numel()
 
-            logger.info(f"Froze {frozen_count} flow/marginal parameters. Ensured {unfrozen_count} copula parameters are trainable.")
+            # Provide clear, accurate logging
+            logger.info(f"Stage 2 Parameter Summary:")
+            logger.info(f"  Frozen (marginal/flow): {frozen_tensors} tensors, {frozen_elements:,} parameters")
+            logger.info(f"  Trainable (copula): {unfrozen_tensors} tensors, {unfrozen_elements:,} parameters")
+            if other_tensors > 0:
+                logger.info(f"  Other: {other_tensors} tensors, {other_elements:,} parameters")
+            logger.info(f"  Total model: {frozen_tensors + unfrozen_tensors + other_tensors} tensors, {frozen_elements + unfrozen_elements + other_elements:,} parameters")
 
             # 3. Update optimizer settings for the (potentially new) set of trainable parameters
             optimizer = self.optimizers()
