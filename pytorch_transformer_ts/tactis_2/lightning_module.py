@@ -408,6 +408,9 @@ class TACTiS2LightningModule(pl.LightningModule):
         # Log the loss
         self.log("train_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
         
+        # Stage-aware metric logging for Optuna optimization
+        self._log_stage_aware_metrics(loss, is_validation=False)
+        
         # Manual LR logging removed as LearningRateMonitor is now working
         
         return loss
@@ -468,6 +471,9 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         # Log the validation loss
         self.log("val_loss", loss.detach(), on_step=False, on_epoch=True, prog_bar=True)
+        
+        # Stage-aware metric logging for Optuna optimization
+        self._log_stage_aware_metrics(loss, is_validation=True)
         
         return loss
         
@@ -702,3 +708,107 @@ class TACTiS2LightningModule(pl.LightningModule):
              # Assume the direct output is the predictions/samples
              logger.debug(f"Inference - Model returned single output (predictions/samples)")
              return model_output
+    
+    def _log_stage_aware_metrics(self, loss: torch.Tensor, is_validation: bool = False):
+        """
+        Log stage-aware metrics for Optuna optimization.
+        
+        This method computes and logs the appropriate optimization metric based on
+        the current training stage:
+        - Stage 1: Use total NLL (meaningful for marginal learning)
+        - Stage 2: Use copula loss (meaningful for copula learning)
+        
+        Parameters:
+        -----------
+        loss : torch.Tensor
+            The total training/validation loss
+        is_validation : bool
+            Whether this is called from validation_step
+        """
+        try:
+            # Get the TACTiS model to access loss components
+            tactis_model = getattr(self.model, 'tactis', None)
+            
+            if self.stage == 1:
+                # Stage 1: Use total NLL as the optimization metric
+                stage_aware_metric = loss.detach()
+                
+                if is_validation:
+                    self.log("val_stage_aware_metric", stage_aware_metric, 
+                           on_step=False, on_epoch=True, prog_bar=False)
+                else:
+                    self.log("train_stage_aware_metric", stage_aware_metric, 
+                           on_step=True, on_epoch=True, prog_bar=False)
+                    
+            elif self.stage == 2:
+                # Stage 2: Try to use copula loss, fallback to total loss
+                if (tactis_model is not None and 
+                    hasattr(tactis_model, 'copula_loss') and 
+                    tactis_model.copula_loss is not None):
+                    
+                    # Use copula loss as the primary optimization metric for Stage 2
+                    copula_loss = tactis_model.copula_loss.detach()
+                    marginal_logdet = getattr(tactis_model, 'marginal_logdet', None)
+                    
+                    # Log Stage 2 specific metrics
+                    if is_validation:
+                        self.log("val_copula_loss", copula_loss, 
+                               on_step=False, on_epoch=True, prog_bar=True)
+                        if marginal_logdet is not None:
+                            self.log("val_marginal_logdet", marginal_logdet.detach(), 
+                                   on_step=False, on_epoch=True, prog_bar=False)
+                        
+                        # CRITICAL: This is what Optuna will optimize in Stage 2
+                        self.log("val_stage_aware_metric", copula_loss, 
+                               on_step=False, on_epoch=True, prog_bar=False)
+                    else:
+                        self.log("train_copula_loss", copula_loss, 
+                               on_step=True, on_epoch=True, prog_bar=True)
+                        if marginal_logdet is not None:
+                            self.log("train_marginal_logdet", marginal_logdet.detach(), 
+                                   on_step=True, on_epoch=True, prog_bar=False)
+                            
+                            # Log the ratio for monitoring
+                            total_loss_item = loss.item()
+                            if total_loss_item != 0:
+                                copula_ratio = abs(copula_loss.item() / total_loss_item)
+                                self.log("train_copula_ratio", copula_ratio, 
+                                       on_step=True, on_epoch=True, prog_bar=False)
+                        
+                        # CRITICAL: This is what Optuna will optimize in Stage 2
+                        self.log("train_stage_aware_metric", copula_loss, 
+                               on_step=True, on_epoch=True, prog_bar=False)
+                else:
+                    # Fallback: Use total NLL if copula loss not available
+                    logger.warning(f"Stage 2 but copula loss not available, using total loss")
+                    stage_aware_metric = loss.detach()
+                    
+                    if is_validation:
+                        self.log("val_stage_aware_metric", stage_aware_metric, 
+                               on_step=False, on_epoch=True, prog_bar=False)
+                    else:
+                        self.log("train_stage_aware_metric", stage_aware_metric, 
+                               on_step=True, on_epoch=True, prog_bar=False)
+            else:
+                # Unknown stage, use total loss
+                logger.warning(f"Unknown training stage: {self.stage}, using total loss")
+                stage_aware_metric = loss.detach()
+                
+                if is_validation:
+                    self.log("val_stage_aware_metric", stage_aware_metric, 
+                           on_step=False, on_epoch=True, prog_bar=False)
+                else:
+                    self.log("train_stage_aware_metric", stage_aware_metric, 
+                           on_step=True, on_epoch=True, prog_bar=False)
+                    
+        except Exception as e:
+            logger.error(f"Error in stage-aware metric logging: {e}")
+            # Fallback: Use total loss
+            stage_aware_metric = loss.detach()
+            
+            if is_validation:
+                self.log("val_stage_aware_metric", stage_aware_metric, 
+                       on_step=False, on_epoch=True, prog_bar=False)
+            else:
+                self.log("train_stage_aware_metric", stage_aware_metric, 
+                       on_step=True, on_epoch=True, prog_bar=False)
