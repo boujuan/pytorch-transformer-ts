@@ -798,5 +798,5 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             base_batch_size_for_scheduler_steps=self.base_batch_size_for_scheduler_steps,
             base_limit_train_batches=self.base_limit_train_batches,
             # Pass num_batches_per_epoch for scheduler calculations
-            num_batches_per_epoch=self.true_num_batches_per_epoch,
+            num_batches_per_epoch=self.true_num_batches_per_epoch or self.num_batches_per_epoch,
         )
