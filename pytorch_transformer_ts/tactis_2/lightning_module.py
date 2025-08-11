@@ -405,8 +405,17 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         # Loss is returned for automatic optimization
 
-        # Log the loss
+        # Log the loss (this is the actual loss used for backprop)
         self.log("train_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
+        
+        # In Stage 2, also log the total NLL for monitoring (even though it's not used for backprop)
+        if self.stage == 2:
+            # Get the TACTiS model to compute total loss for logging
+            tactis_model = getattr(self.model, 'tactis', None)
+            if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
+                if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
+                    total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
+                    self.log("train_total_nll", total_nll.detach(), on_step=True, on_epoch=True, prog_bar=False)
         
         # Stage-aware metric logging for Optuna optimization
         self._log_stage_aware_metrics(loss, is_validation=False)
@@ -469,8 +478,16 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.warning("NaN detected in validation loss! Replacing with large value for logging.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
-        # Log the validation loss
+        # Log the validation loss (this matches what's used for backprop in training)
         self.log("val_loss", loss.detach(), on_step=False, on_epoch=True, prog_bar=True)
+        
+        # In Stage 2, also log the total NLL for monitoring consistency
+        if self.stage == 2:
+            tactis_model = getattr(self.model, 'tactis', None)
+            if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
+                if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
+                    total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
+                    self.log("val_total_nll", total_nll.detach(), on_step=False, on_epoch=True, prog_bar=False)
         
         # Stage-aware metric logging for Optuna optimization
         self._log_stage_aware_metrics(loss, is_validation=True)
