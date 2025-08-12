@@ -136,6 +136,10 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.steps_to_decay_s1 = self.hparams.steps_to_decay_s1
         self.steps_to_decay_s2 = self.hparams.steps_to_decay_s2
         
+        # Store reference to Stage 2 optimizer for manual optimization
+        self._stage2_optimizer = None
+        self._stage2_scheduler = None
+        
         logger.info(f"Using resolved scheduler steps from estimator (no additional scaling):")
         logger.info(f"  warmup_s1={self.warmup_steps_s1}, warmup_s2={self.warmup_steps_s2}")
         logger.info(f"  decay_s1={self.steps_to_decay_s1}, decay_s2={self.steps_to_decay_s2}")
@@ -234,8 +238,63 @@ class TACTiS2LightningModule(pl.LightningModule):
         logger.info(f"Stage 2 optimizer config: lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}")
         
         return optimizer_stage2
-        
     
+    def _create_stage2_scheduler(self, optimizer):
+        """
+        Create a fresh scheduler for Stage 2 optimizer.
+        
+        Parameters:
+            optimizer: The Stage 2 optimizer to create scheduler for
+        """
+        # Get the scheduler configuration from configure_optimizers
+        steps_per_epoch = self.hparams.num_batches_per_epoch
+        if steps_per_epoch is None or steps_per_epoch <= 0:
+            logger.warning(f"Invalid num_batches_per_epoch: {steps_per_epoch}. Using 100 as default.")
+            steps_per_epoch = 100
+
+        warmup_steps = self.warmup_steps_s2
+        cosine_steps = self.steps_to_decay_s2
+        
+        if cosine_steps is None or cosine_steps <= 0:
+            logger.warning(f"Invalid steps_to_decay_s2: {cosine_steps}. Using 1000 as default.")
+            cosine_steps = 1000
+
+        # Create warmup scheduler (if warmup_steps > 0)
+        if warmup_steps > 0:
+            def warmup_lr_lambda(step):
+                return min(1.0, step / warmup_steps)
+            warmup_scheduler = LambdaLR(optimizer, lr_lambda=warmup_lr_lambda)
+        else:
+            warmup_scheduler = None
+
+        # Create cosine annealing scheduler
+        eta_min = self.lr_stage2 * self.hparams.eta_min_fraction_s2
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer, 
+            T_max=cosine_steps, 
+            eta_min=eta_min
+        )
+
+        # Combine schedulers if warmup is used
+        if warmup_scheduler is not None:
+            scheduler = SequentialLR(
+                optimizer, 
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps]
+            )
+        else:
+            scheduler = cosine_scheduler
+
+        # Store scheduler for manual optimization use
+        self._stage2_scheduler = scheduler
+        
+        # Replace in trainer's scheduler list
+        if hasattr(self.trainer, 'lr_scheduler_configs') and self.trainer.lr_scheduler_configs:
+            self.trainer.lr_scheduler_configs[0].scheduler = scheduler
+            logger.info("Created and registered fresh Stage 2 scheduler")
+        else:
+            logger.warning("Could not register Stage 2 scheduler with trainer")
+        
     def _apply_stage2_parameter_freezing(self):
         """
         Apply parameter freezing for Stage 2: freeze marginal/flow parameters, unfreeze copula parameters.
@@ -298,47 +357,34 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.info("Applying Stage 2 parameter freezing...")
             self._apply_stage2_parameter_freezing()
 
-            # 3. ORIGINAL TACTIS APPROACH: Create fresh optimizer with ONLY copula parameters
+            # 3. MANUAL OPTIMIZATION: Create fresh optimizer with ONLY copula parameters
             logger.info("Creating fresh Stage 2 optimizer with only copula parameters...")
             try:
                 # Create fresh optimizer with only copula parameters (original TACTiS design)
                 fresh_optimizer = self._create_stage2_optimizer()
                 
-                # Replace the optimizer in the trainer's optimizer list
-                # This follows PyTorch Lightning's internal structure
+                # Store the fresh optimizer for manual optimization use
+                self._stage2_optimizer = fresh_optimizer
+                
+                # Replace optimizer in trainer's internal list (for Lightning compatibility)
                 if hasattr(self.trainer, 'optimizers') and self.trainer.optimizers:
                     self.trainer.optimizers[0] = fresh_optimizer
                     logger.info("Successfully replaced Stage 1 optimizer with fresh Stage 2 optimizer")
-                    
-                    # Update optimizer wrapper if present (Lightning internal)
-                    if hasattr(self.trainer.strategy, '_lightning_optimizers'):
-                        if self.trainer.strategy._lightning_optimizers:
-                            # Update the first optimizer wrapper with new optimizer
-                            from lightning.pytorch.core.optimizer import LightningOptimizer
-                            self.trainer.strategy._lightning_optimizers[0] = LightningOptimizer._to_lightning_optimizer(
-                                fresh_optimizer, self.trainer.strategy, 0
-                            )
-                            logger.info("Updated Lightning optimizer wrapper")
-                    
-                    # Log successful Stage 2 transition
-                    self.log_dict({
-                        "stage": 2, 
-                        "learning_rate": self.lr_stage2, 
-                        "weight_decay": self.weight_decay_stage2,
-                        "optimizer_param_count": sum(p.numel() for p in fresh_optimizer.param_groups[0]['params'])
-                    })
-                    
-                    logger.info(f"Epoch {current_epoch}: Successfully created fresh Stage 2 optimizer")
-                    logger.info(f"Stage 2 optimizer trains {sum(p.numel() for p in fresh_optimizer.param_groups[0]['params']):,} parameters (copula only)")
-                    
-                    # Note: Scheduler will automatically work with the new optimizer
-                    current_scheduler = self.lr_schedulers()
-                    if current_scheduler:
-                        logger.info("Scheduler will continue with fresh optimizer (automatic compatibility)")
-                        # The scheduler should continue working as it's based on step counting, not parameter references
-                else:
-                    logger.error("No trainer optimizers found to replace for Stage 2")
-                    
+                
+                # Log successful Stage 2 transition
+                self.log_dict({
+                    "stage": 2, 
+                    "learning_rate": self.lr_stage2, 
+                    "weight_decay": self.weight_decay_stage2,
+                    "optimizer_param_count": sum(p.numel() for p in fresh_optimizer.param_groups[0]['params'])
+                })
+                
+                logger.info(f"Epoch {current_epoch}: Successfully created fresh Stage 2 optimizer")
+                logger.info(f"Stage 2 optimizer trains {sum(p.numel() for p in fresh_optimizer.param_groups[0]['params']):,} parameters (copula only)")
+                
+                # Create new scheduler for Stage 2 if needed
+                self._create_stage2_scheduler(fresh_optimizer)
+                
             except Exception as e:
                 logger.error(f"Failed to create fresh Stage 2 optimizer: {e}")
                 logger.warning("Continuing with existing optimizer configuration - Stage 2 may not work correctly")
@@ -347,7 +393,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                 
     def training_step(self, batch, batch_idx: int):
         """
-        Training step.
+        Training step with manual optimization for two-stage training.
         
         Parameters
         ----------
@@ -360,7 +406,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         -------
         The loss.
         """
-        # Automatic optimization handles optimizer steps, zero_grad, backward
+        # Manual optimization for proper two-stage training
         
         # Extract data from the batch
         past_target = batch["past_target"]
@@ -401,25 +447,58 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.warning("NaN detected in loss! Replacing with large value to continue training.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
-        # Loss is returned for automatic optimization
+        # Manual optimization - get the correct optimizer based on current stage
+        if self.stage == 2 and hasattr(self, '_stage2_optimizer') and self._stage2_optimizer is not None:
+            # Use Stage 2 fresh optimizer with only copula parameters
+            opt = self._stage2_optimizer
+            sch = getattr(self, '_stage2_scheduler', None)
+        else:
+            # Use Stage 1 optimizer (all parameters)
+            opt = self.optimizers()
+            sch = self.lr_schedulers()
+        
+        # Zero gradients
+        opt.zero_grad()
+        
+        # Backward pass
+        self.manual_backward(loss)
+        
+        # Apply gradient clipping based on current stage
+        if self.stage == 1:
+            clip_val = self.hparams.gradient_clip_val_stage1
+        else:
+            clip_val = self.hparams.gradient_clip_val_stage2
+            
+        if clip_val > 0:
+            self.clip_gradients(opt, gradient_clip_val=clip_val, gradient_clip_algorithm="norm")
+        
+        # Optimizer step
+        opt.step()
+        
+        # Update learning rate scheduler
+        if sch is not None:
+            if isinstance(sch, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                sch.step(loss)
+            else:
+                sch.step()
 
-        # Log the loss (this is the actual loss used for backprop)
-        self.log("train_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
+        # TRAINING METRIC: Log what's being optimized for training (stage-specific)
+        self.log("train_loss", loss.detach(), on_step=False, on_epoch=True, prog_bar=True)
         
-        # In Stage 2, also log the total NLL for monitoring (even though it's not used for backprop)
-        if self.stage == 2:
-            # Get the TACTiS model to compute total loss for logging
-            tactis_model = getattr(self.model, 'tactis', None)
-            if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
-                if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
-                    total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
-                    self.log("train_total_nll", total_nll.detach(), on_step=True, on_epoch=True, prog_bar=False)
+        # OPTUNA METRICS: Always log components for consistent optimization
+        tactis_model = getattr(self.model, 'tactis', None)
+        if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
+            if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
+                # DIAGNOSTIC: Marginal stability (should be constant in Stage 2)
+                self.log("train_marginal_logdet", tactis_model.marginal_logdet.detach(), 
+                       on_step=False, on_epoch=True, prog_bar=False)
+                
+                # OPTUNA TARGET: Consistent metric across both stages
+                total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
+                self.log("train_total_nll", total_nll.detach(), 
+                       on_step=False, on_epoch=True, prog_bar=False)
         
-        # Stage-aware metric logging for Optuna optimization
-        self._log_stage_aware_metrics(loss, is_validation=False)
-        
-        # Manual LR logging removed as LearningRateMonitor is now working
-        
+        # Return loss for logging (not used for backprop anymore)
         return loss
         
     def validation_step(self, batch, batch_idx: int):
@@ -476,19 +555,21 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.warning("NaN detected in validation loss! Replacing with large value for logging.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
-        # Log the validation loss (this matches what's used for backprop in training)
+        # TRAINING METRIC: Log what's being optimized for training (stage-specific)
         self.log("val_loss", loss.detach(), on_step=False, on_epoch=True, prog_bar=True)
         
-        # In Stage 2, also log the total NLL for monitoring consistency
-        if self.stage == 2:
-            tactis_model = getattr(self.model, 'tactis', None)
-            if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
-                if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
-                    total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
-                    self.log("val_total_nll", total_nll.detach(), on_step=False, on_epoch=True, prog_bar=False)
-        
-        # Stage-aware metric logging for Optuna optimization
-        self._log_stage_aware_metrics(loss, is_validation=True)
+        # OPTUNA METRICS: Always log components for consistent optimization
+        tactis_model = getattr(self.model, 'tactis', None)
+        if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
+            if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
+                # DIAGNOSTIC: Marginal stability (should be constant in Stage 2)
+                self.log("val_marginal_logdet", tactis_model.marginal_logdet.detach(), 
+                       on_step=False, on_epoch=True, prog_bar=False)
+                
+                # OPTUNA TARGET: Consistent metric across both stages
+                total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
+                self.log("val_total_nll", total_nll.detach(), 
+                       on_step=False, on_epoch=True, prog_bar=False)
         
         return loss
         
@@ -519,8 +600,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         logger.info(f"Created optimizer with {len(list(self.model.tactis.parameters()))} parameters")
         
-        # Configure gradient clipping directly in the lightning module
-        self.automatic_optimization = True
+        # Use manual optimization for two-stage training with optimizer switching
+        self.automatic_optimization = False
         
         # Get steps_per_epoch from hyperparameters
         steps_per_epoch = self.hparams.num_batches_per_epoch
@@ -690,107 +771,3 @@ class TACTiS2LightningModule(pl.LightningModule):
              # Assume the direct output is the predictions/samples
              logger.debug(f"Inference - Model returned single output (predictions/samples)")
              return model_output
-    
-    def _log_stage_aware_metrics(self, loss: torch.Tensor, is_validation: bool = False):
-        """
-        Log stage-aware metrics for Optuna optimization.
-        
-        This method computes and logs the appropriate optimization metric based on
-        the current training stage:
-        - Stage 1: Use total NLL (meaningful for marginal learning)
-        - Stage 2: Use copula loss (meaningful for copula learning)
-        
-        Parameters:
-        -----------
-        loss : torch.Tensor
-            The total training/validation loss
-        is_validation : bool
-            Whether this is called from validation_step
-        """
-        try:
-            # Get the TACTiS model to access loss components
-            tactis_model = getattr(self.model, 'tactis', None)
-            
-            if self.stage == 1:
-                # Stage 1: Use total NLL as the optimization metric
-                stage_aware_metric = loss.detach()
-                
-                if is_validation:
-                    self.log("val_stage_aware_metric", stage_aware_metric, 
-                           on_step=False, on_epoch=True, prog_bar=False)
-                else:
-                    self.log("train_stage_aware_metric", stage_aware_metric, 
-                           on_step=True, on_epoch=True, prog_bar=False)
-                    
-            elif self.stage == 2:
-                # Stage 2: Try to use copula loss, fallback to total loss
-                if (tactis_model is not None and 
-                    hasattr(tactis_model, 'copula_loss') and 
-                    tactis_model.copula_loss is not None):
-                    
-                    # Use copula loss as the primary optimization metric for Stage 2
-                    copula_loss = tactis_model.copula_loss.detach()
-                    marginal_logdet = getattr(tactis_model, 'marginal_logdet', None)
-                    
-                    # Log Stage 2 specific metrics
-                    if is_validation:
-                        self.log("val_copula_loss", copula_loss, 
-                               on_step=False, on_epoch=True, prog_bar=True)
-                        if marginal_logdet is not None:
-                            self.log("val_marginal_logdet", marginal_logdet.detach(), 
-                                   on_step=False, on_epoch=True, prog_bar=False)
-                        
-                        # CRITICAL: This is what Optuna will optimize in Stage 2
-                        self.log("val_stage_aware_metric", copula_loss, 
-                               on_step=False, on_epoch=True, prog_bar=False)
-                    else:
-                        self.log("train_copula_loss", copula_loss, 
-                               on_step=True, on_epoch=True, prog_bar=True)
-                        if marginal_logdet is not None:
-                            self.log("train_marginal_logdet", marginal_logdet.detach(), 
-                                   on_step=True, on_epoch=True, prog_bar=False)
-                            
-                            # Log the ratio for monitoring
-                            total_loss_item = loss.item()
-                            if total_loss_item != 0:
-                                copula_ratio = abs(copula_loss.item() / total_loss_item)
-                                self.log("train_copula_ratio", copula_ratio, 
-                                       on_step=True, on_epoch=True, prog_bar=False)
-                        
-                        # CRITICAL: This is what Optuna will optimize in Stage 2
-                        self.log("train_stage_aware_metric", copula_loss, 
-                               on_step=True, on_epoch=True, prog_bar=False)
-                else:
-                    # Fallback: Use total NLL if copula loss not available
-                    logger.warning(f"Stage 2 but copula loss not available, using total loss")
-                    stage_aware_metric = loss.detach()
-                    
-                    if is_validation:
-                        self.log("val_stage_aware_metric", stage_aware_metric, 
-                               on_step=False, on_epoch=True, prog_bar=False)
-                    else:
-                        self.log("train_stage_aware_metric", stage_aware_metric, 
-                               on_step=True, on_epoch=True, prog_bar=False)
-            else:
-                # Unknown stage, use total loss
-                logger.warning(f"Unknown training stage: {self.stage}, using total loss")
-                stage_aware_metric = loss.detach()
-                
-                if is_validation:
-                    self.log("val_stage_aware_metric", stage_aware_metric, 
-                           on_step=False, on_epoch=True, prog_bar=False)
-                else:
-                    self.log("train_stage_aware_metric", stage_aware_metric, 
-                           on_step=True, on_epoch=True, prog_bar=False)
-                    
-        except Exception as e:
-            logger.error(f"Error in stage-aware metric logging: {e}")
-            # Fallback: Use total loss
-            stage_aware_metric = loss.detach()
-            
-            if is_validation:
-                self.log("val_stage_aware_metric", stage_aware_metric, 
-                       on_step=False, on_epoch=True, prog_bar=False)
-            else:
-                self.log("train_stage_aware_metric", stage_aware_metric, 
-                       on_step=True, on_epoch=True, prog_bar=False)
