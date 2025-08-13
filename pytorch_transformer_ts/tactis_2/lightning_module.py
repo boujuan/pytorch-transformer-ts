@@ -483,7 +483,8 @@ class TACTiS2LightningModule(pl.LightningModule):
                 sch.step()
 
         # TRAINING METRIC: Log what's being optimized for training (stage-specific)
-        self.log("train_loss", loss.detach(), on_step=False, on_epoch=True, prog_bar=True)
+        # Log both per-step (for monitoring) and per-epoch (for Optuna)
+        self.log("train_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
         
         # OPTUNA METRICS: Always log components for consistent optimization
         tactis_model = getattr(self.model, 'tactis', None)
@@ -491,12 +492,12 @@ class TACTiS2LightningModule(pl.LightningModule):
             if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
                 # DIAGNOSTIC: Marginal stability (should be constant in Stage 2)
                 self.log("train_marginal_logdet", tactis_model.marginal_logdet.detach(), 
-                       on_step=False, on_epoch=True, prog_bar=False)
+                       on_step=True, on_epoch=True, prog_bar=False)
                 
                 # OPTUNA TARGET: Consistent metric across both stages
                 total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
                 self.log("train_total_nll", total_nll.detach(), 
-                       on_step=False, on_epoch=True, prog_bar=False)
+                       on_step=True, on_epoch=True, prog_bar=False)
         
         # Return loss for logging (not used for backprop anymore)
         return loss
@@ -556,7 +557,7 @@ class TACTiS2LightningModule(pl.LightningModule):
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
         # TRAINING METRIC: Log what's being optimized for training (stage-specific)
-        self.log("val_loss", loss.detach(), on_step=False, on_epoch=True, prog_bar=True)
+        self.log("val_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
         
         # OPTUNA METRICS: Always log components for consistent optimization
         tactis_model = getattr(self.model, 'tactis', None)
@@ -564,12 +565,12 @@ class TACTiS2LightningModule(pl.LightningModule):
             if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
                 # DIAGNOSTIC: Marginal stability (should be constant in Stage 2)
                 self.log("val_marginal_logdet", tactis_model.marginal_logdet.detach(), 
-                       on_step=False, on_epoch=True, prog_bar=False)
+                       on_step=True, on_epoch=True, prog_bar=False)
                 
                 # OPTUNA TARGET: Consistent metric across both stages
                 total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
                 self.log("val_total_nll", total_nll.detach(), 
-                       on_step=False, on_epoch=True, prog_bar=False)
+                       on_step=True, on_epoch=True, prog_bar=False)
         
         return loss
         
