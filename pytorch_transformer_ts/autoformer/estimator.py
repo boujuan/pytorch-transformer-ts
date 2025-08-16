@@ -274,15 +274,16 @@ class AutoformerEstimator(PyTorchLightningEstimator):
                     time_features=self.time_features,
                     pred_length=self.prediction_length,
                 ),
-                AddAgeFeature(
-                    target_field=FieldName.TARGET,
-                    output_field=FieldName.FEAT_AGE,
-                    pred_length=self.prediction_length,
-                    log_scale=True,
-                ),
+                # AddAgeFeature(
+                #     target_field=FieldName.TARGET,
+                #     output_field=FieldName.FEAT_AGE,
+                #     pred_length=self.prediction_length,
+                #     log_scale=True,
+                # ),
                 VstackFeatures(
                     output_field=FieldName.FEAT_TIME,
-                    input_fields=[FieldName.FEAT_TIME, FieldName.FEAT_AGE]
+                    # input_fields=[FieldName.FEAT_TIME, FieldName.FEAT_AGE]
+                    input_fields=[FieldName.FEAT_TIME]
                     + (
                         [FieldName.FEAT_DYNAMIC_REAL]
                         if self.num_feat_dynamic_real > 0

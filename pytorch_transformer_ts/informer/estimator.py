@@ -286,15 +286,16 @@ class InformerEstimator(PyTorchLightningEstimator):
                     pred_length=self.prediction_length,
                     # dtype=pl.Float32
                 ),
-                AddAgeFeature(
-                    target_field=FieldName.TARGET,
-                    output_field=FieldName.FEAT_AGE,
-                    pred_length=self.prediction_length,
-                    log_scale=True,
-                ),
+                # AddAgeFeature(
+                #     target_field=FieldName.TARGET,
+                #     output_field=FieldName.FEAT_AGE,
+                #     pred_length=self.prediction_length,
+                #     log_scale=True,
+                # ),
                 VstackFeatures(
                     output_field=FieldName.FEAT_TIME,
-                    input_fields=[FieldName.FEAT_TIME, FieldName.FEAT_AGE]
+                    # input_fields=[FieldName.FEAT_TIME, FieldName.FEAT_AGE]
+                    input_fields=[FieldName.FEAT_TIME]
                     + (
                         [FieldName.FEAT_DYNAMIC_REAL]
                         if self.num_feat_dynamic_real > 0
