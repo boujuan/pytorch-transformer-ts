@@ -56,6 +56,7 @@ class TACTiS2Model(nn.Module):
         loss_normalization: str = "series",
         encoder_type: str = "standard",
         dropout_rate: float = 0.1,
+        lock_skip_copula: bool = False,
         # Activation function parameters
         stage1_activation_function: str = "ReLU",  # Added parameter for stage 1 activation
         stage2_activation_function: str = "ReLU",  # Added parameter for stage 2 activation
@@ -233,6 +234,7 @@ class TACTiS2Model(nn.Module):
                 "flow_hid_dim": decoder_dsf_hidden_dim,
             },
             "skip_copula": False, # Will be controlled by LightningModule stage
+            "lock_skip_copula": lock_skip_copula, # Prevent automatic skip_copula updates
         }
 
         # Apply AttentionalCopula custom parameters if provided

@@ -32,7 +32,7 @@ from gluonts.transform import (
 from gluonts.transform.sampler import InstanceSampler
 
 from pytorch_transformer_ts.spacetimeformer.lightning_module import SpacetimeformerLightningModule
-from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
+from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset as WindForecastingDatamodule
 
 import lightning
 

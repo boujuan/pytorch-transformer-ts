@@ -43,7 +43,8 @@ from .lightning_module import TACTiS2LightningModule
 logger = logging.getLogger(__name__)
 
 from pytorch_transformer_ts.utils.step_scaling import resolve_steps
-from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
+from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
+# Note: WindForecastingDatamodule doesn't exist, using Dataset instead
 
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
