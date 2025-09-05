@@ -16,8 +16,8 @@ import torch
 import numpy as np
 from typing import Dict, Optional, List, Any
 import logging
-from pytorch_lightning.callbacks import Callback
-from pytorch_lightning import LightningModule
+from lightning.pytorch.callbacks import Callback
+from lightning.pytorch import LightningModule
 
 logger = logging.getLogger(__name__)
 

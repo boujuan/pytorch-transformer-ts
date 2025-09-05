@@ -305,7 +305,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
 
             # --- Optimizer Params ---
             "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
-            "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
+            "lr_stage2": trial.suggest_float("lr_stage2", 1e-5, 2e-3, log=True),
             "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
             "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
 
