@@ -33,6 +33,7 @@ class TACTiS(nn.Module):
         copula_temporal_encoder: Optional[Dict[str, Any]] = None, # Kept for potential future use
         copula_decoder: Optional[Dict[str, Any]] = None,
         skip_copula: bool = True,
+        lock_skip_copula: bool = False,  # Prevent automatic skip_copula updates when True
         encoder_type: str = "standard",
         stage: int = 1,
         stage1_activation_function: str = "ReLU",
@@ -91,6 +92,7 @@ class TACTiS(nn.Module):
         self.input_encoding_normalization = input_encoding_normalization
         self.loss_normalization = loss_normalization
         self.skip_copula = skip_copula
+        self.lock_skip_copula = lock_skip_copula
         self.bagging_size = bagging_size
         self.encoder_type = encoder_type
         self.stage1_activation_function = stage1_activation_function
@@ -756,10 +758,13 @@ class TACTiS(nn.Module):
         logger.info(f"TACTiS model: Setting stage to {stage}")
         self.stage = stage
 
-        # Update skip_copula flag based on the new stage
-        self.skip_copula = (stage == 1)
-        if hasattr(self.decoder, 'skip_copula'):
-             self.decoder.skip_copula = self.skip_copula
+        # Update skip_copula flag based on the new stage (unless locked)
+        if not self.lock_skip_copula:
+            self.skip_copula = (stage == 1)
+            if hasattr(self.decoder, 'skip_copula'):
+                self.decoder.skip_copula = self.skip_copula
+        else:
+            logger.info(f"TACTiS model: lock_skip_copula is True, keeping skip_copula={self.skip_copula}")
 
         # We don't need to initialize components here anymore as they should already
         # be initialized properly based on the stage parameter in __init__

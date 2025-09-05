@@ -108,6 +108,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         ac_mlp_dim: int = 128,      # Default: Dimension of AC's internal MLP layers
         stage2_activation_function: str = "ReLU", # Default: Activation in Stage 2 components (copula input encoder, copula main encoder, AC MLP)
         stage1_activation_function: str = "ReLU", # Activation function for Stage 1 components (flow input encoder, flow main encoder, marginal conditioner)
+        lock_skip_copula: bool = False,  # If True, prevents automatic skip_copula updates when changing stages
         # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
@@ -189,6 +190,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.stage1_activation_function = stage1_activation_function
         # Training stage / optimizer params
         self.initial_stage = initial_stage
+        self.lock_skip_copula = lock_skip_copula
         self.stage2_start_epoch = stage2_start_epoch
         self.eta_min_fraction_s1 = eta_min_fraction_s1  # Store eta_min fractions
         self.eta_min_fraction_s2 = eta_min_fraction_s2
@@ -694,6 +696,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "bagging_size": self.bagging_size,
             "input_encoding_normalization": self.input_encoding_normalization,
             "loss_normalization": self.loss_normalization,
+            "lock_skip_copula": self.lock_skip_copula,  # Pass lock_skip_copula flag
             "encoder_type": self.encoder_type, # Pass encoder type
             "dropout_rate": self.dropout_rate, # Pass dropout rate
             # "stage1_activation_function": self.stage1_activation_function, # Will be passed directly to LightningModule
