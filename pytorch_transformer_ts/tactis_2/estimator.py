@@ -43,8 +43,8 @@ from .lightning_module import TACTiS2LightningModule
 logger = logging.getLogger(__name__)
 
 from pytorch_transformer_ts.utils.step_scaling import resolve_steps
-from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
-# Note: WindForecastingDatamodule doesn't exist, using Dataset instead
+from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset, WindForecastingInferenceDataset
+from torch.utils.data import DataLoader
 
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
@@ -525,20 +525,65 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         #     data_path
         #         Path to the pickle file containing training data.
         
-        return WindForecastingDatamodule(
-            train_data_path=train_data_path, 
-            val_data_path=val_data_path, 
-            train_sampler=self.train_sampler, 
-            context_length=self.context_length,
-            prediction_length=self.prediction_length,
-            time_features=self.time_features,
-            val_sampler=None, 
-            train_repeat=self.num_batches_per_epoch is not None,
-            val_repeat=False,
-            batch_size=self.batch_size,
-            num_workers=kwargs.get('num_workers', 4), 
-            pin_memory=kwargs.get('pin_memory', True)
-            )
+        # Create a simple Lightning DataModule that manages train and validation datasets
+        class TACTiSDataModule(lightning.pytorch.LightningDataModule):
+            def __init__(module_self):
+                super().__init__()
+                module_self.train_data_path = train_data_path
+                module_self.val_data_path = val_data_path
+                module_self.batch_size = self.batch_size
+                module_self.num_workers = kwargs.get('num_workers', 4)
+                module_self.pin_memory = kwargs.get('pin_memory', True)
+                
+            def setup(module_self, stage=None):
+                if stage == 'fit' or stage is None:
+                    # Create training dataset
+                    module_self.train_dataset = WindForecastingDataset(
+                        data_path=module_self.train_data_path,
+                        context_length=self.context_length,
+                        prediction_length=self.prediction_length,
+                        time_features=self.time_features,
+                        sampler=self.train_sampler,
+                        repeat=self.num_batches_per_epoch is not None,
+                        skip_indices=1
+                    )
+                    
+                    # Create validation dataset if provided
+                    if module_self.val_data_path:
+                        module_self.val_dataset = WindForecastingInferenceDataset(
+                            data_path=module_self.val_data_path,
+                            context_length=self.context_length,
+                            prediction_length=self.prediction_length,
+                            time_features=self.time_features,
+                            sampler=None,
+                            repeat=False,
+                            skip_indices=1
+                        )
+                    else:
+                        module_self.val_dataset = None
+                        
+            def train_dataloader(module_self):
+                return DataLoader(
+                    module_self.train_dataset,
+                    batch_size=module_self.batch_size,
+                    num_workers=module_self.num_workers,
+                    pin_memory=module_self.pin_memory,
+                    persistent_workers=False
+                )
+            
+            def val_dataloader(module_self):
+                if module_self.val_dataset:
+                    return DataLoader(
+                        module_self.val_dataset,
+                        batch_size=module_self.batch_size,
+                        num_workers=module_self.num_workers,
+                        pin_memory=module_self.pin_memory,
+                        persistent_workers=False
+                    )
+                return None
+                
+        return TACTiSDataModule(
+)
 
     
     def create_pytorch_training_data_loader(
@@ -765,11 +810,29 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
             steps_stage2 = epochs_stage2 * effective_batches_per_epoch if effective_batches_per_epoch else 0
             
+        # Store the calculated effective batches per epoch for use in checkpoint saving
+        # If still None, use limit_train_batches from trainer_kwargs as fallback
+        if effective_batches_per_epoch is None:
+            limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
+            if limit_train_batches is not None and limit_train_batches != "null":
+                try:
+                    effective_batches_per_epoch = int(limit_train_batches)
+                    logger.info(f"Using limit_train_batches as fallback: {effective_batches_per_epoch}")
+                except (ValueError, TypeError):
+                    effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
+                    logger.warning(f"Could not parse limit_train_batches, using fallback: {effective_batches_per_epoch}")
+            else:
+                effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
+                logger.warning(f"No limit_train_batches found, using fallback: {effective_batches_per_epoch}")
+        
+        self.true_num_batches_per_epoch = effective_batches_per_epoch
+        
         logger.info(f"Training schedule calculation:")
         logger.info(f"  Max epochs: {max_epochs}")
         logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
         logger.info(f"  Stage 2: epochs {self.stage2_start_epoch}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
         logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
+        logger.info(f"  Stored true_num_batches_per_epoch: {self.true_num_batches_per_epoch}")
         
         resolved_warmup_s1 = resolve_steps(self.warmup_steps_s1, steps_stage1, "warmup_steps_s1")
         resolved_warmup_s2 = resolve_steps(self.warmup_steps_s2, steps_stage2, "warmup_steps_s2")
