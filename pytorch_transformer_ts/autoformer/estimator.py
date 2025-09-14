@@ -561,10 +561,28 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         if effective_batches_per_epoch:
             # Calculate total steps per stage using the correctly adjusted batch count
             steps = max_epochs * effective_batches_per_epoch if effective_batches_per_epoch else 0
+        
+        if effective_batches_per_epoch is None:
+            # Store the calculated effective batches per epoch for use in checkpoint saving
+            # If still None, use limit_train_batches from trainer_kwargs as fallback
+            limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
+            if limit_train_batches is not None and limit_train_batches != "null":
+                try:
+                    effective_batches_per_epoch = int(limit_train_batches)
+                    logger.info(f"Using limit_train_batches as fallback: {effective_batches_per_epoch}")
+                except (ValueError, TypeError):
+                    effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
+                    logger.warning(f"Could not parse limit_train_batches, using fallback: {effective_batches_per_epoch}")
+            else:
+                effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
+                logger.warning(f"No limit_train_batches found, using fallback: {effective_batches_per_epoch}")
+        
+        self.true_num_batches_per_epoch = effective_batches_per_epoch    
             
         logger.info(f"Training schedule calculation:")
         logger.info(f"  Max epochs: {max_epochs}")
         logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
+        logger.info(f" Stored true_num_batches_per_epoch: {self.true_num_batches_per_epoch}")
         
         resolved_warmup = resolve_steps(self.warmup_steps, steps, "warmup_steps")
         resolved_decay = resolve_steps(self.steps_to_decay, steps, "steps_to_decay")
