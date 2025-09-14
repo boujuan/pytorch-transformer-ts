@@ -577,7 +577,7 @@ class AutoformerEstimator(PyTorchLightningEstimator):
                 effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
                 logger.warning(f"No limit_train_batches found, using fallback: {effective_batches_per_epoch}")
         
-        self.true_num_batches_per_epoch = effective_batches_per_epoch    
+            self.true_num_batches_per_epoch = effective_batches_per_epoch    
             
         logger.info(f"Training schedule calculation:")
         logger.info(f"  Max epochs: {max_epochs}")
