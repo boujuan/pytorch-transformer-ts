@@ -769,69 +769,82 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         epochs_stage1 = self.stage2_start_epoch
         epochs_stage2 = max_epochs - self.stage2_start_epoch
         
-        # Calculate effective batches per epoch considering limit_train_batches and DDP
-        effective_batches_per_epoch = self.true_num_batches_per_epoch
-        
-        # Adjust for distributed training (DDP) - data is split across GPUs
+        # FIXED: Separate logical optimization steps from physical data loading steps
+        # This ensures learning rate scheduling uses the correct step count regardless of DDP
+
+        # First, determine the logical optimization steps per epoch (for LR scheduling)
+        logical_steps_per_epoch = self.true_num_batches_per_epoch
+
+        # Check for trainer limit_train_batches setting
+        limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
+        if limit_train_batches is not None and limit_train_batches != "null":
+            try:
+                limit_value = int(limit_train_batches)
+                if limit_value > 0:
+                    original_batches = logical_steps_per_epoch
+                    logical_steps_per_epoch = min(logical_steps_per_epoch or limit_value, limit_value)
+                    logger.info(f"limit_train_batches detected: {original_batches} -> {logical_steps_per_epoch}")
+            except (ValueError, TypeError):
+                pass
+
+        # Fallback for logical steps per epoch
+        if logical_steps_per_epoch is None:
+            if limit_train_batches is not None and limit_train_batches != "null":
+                try:
+                    logical_steps_per_epoch = int(limit_train_batches)
+                    logger.info(f"Using limit_train_batches as fallback: {logical_steps_per_epoch}")
+                except (ValueError, TypeError):
+                    logical_steps_per_epoch = self.num_batches_per_epoch or 50
+                    logger.warning(f"Could not parse limit_train_batches, using fallback: {logical_steps_per_epoch}")
+            else:
+                logical_steps_per_epoch = self.num_batches_per_epoch or 50
+                logger.warning(f"No limit_train_batches found, using fallback: {logical_steps_per_epoch}")
+
+        # Now handle DDP data distribution (separate from optimization steps)
         strategy = self.trainer_kwargs.get("strategy")
         devices = self.trainer_kwargs.get("devices", 1)
-        
-        # Check if using DDP strategy (handles both string and object forms)
+
+        # Check if using DDP strategy
         is_ddp = False
         if strategy == "ddp":
             is_ddp = True
         elif hasattr(strategy, "__class__") and "DDP" in strategy.__class__.__name__:
             is_ddp = True
-        
-        if is_ddp and devices > 1:
-            # In DDP, each GPU processes 1/devices of the data per epoch
-            original_batches = effective_batches_per_epoch
-            effective_batches_per_epoch = effective_batches_per_epoch // devices
-            logger.info(f"DDP detected ({devices} GPUs): adjusting steps per epoch {original_batches:,} -> {effective_batches_per_epoch:,}")
-        elif devices > 1:
-            logger.info(f"Multi-GPU detected ({devices} devices) but strategy={strategy} - no step adjustment applied")
-        
-        # First, check for trainer limit_train_batches setting
-        limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
-        if limit_train_batches is not None and limit_train_batches != "null":
-            # If limit_train_batches is set, that becomes our effective batch count
-            try:
-                limit_value = int(limit_train_batches)
-                if limit_value > 0:
-                    original_batches = effective_batches_per_epoch
-                    effective_batches_per_epoch = min(effective_batches_per_epoch or limit_value, limit_value)
-                    logger.info(f"limit_train_batches detected: {original_batches} -> {effective_batches_per_epoch}")
-            except (ValueError, TypeError):
-                # If it's not a valid number, ignore it
-                pass
-        
-        if effective_batches_per_epoch:
-            # Calculate total steps per stage using the correctly adjusted batch count
-            steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
-            steps_stage2 = epochs_stage2 * effective_batches_per_epoch if effective_batches_per_epoch else 0
-            
-        # Store the calculated effective batches per epoch for use in checkpoint saving
-        # If still None, use limit_train_batches from trainer_kwargs as fallback
-        if effective_batches_per_epoch is None:
-            limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
-            if limit_train_batches is not None and limit_train_batches != "null":
-                try:
-                    effective_batches_per_epoch = int(limit_train_batches)
-                    logger.info(f"Using limit_train_batches as fallback: {effective_batches_per_epoch}")
-                except (ValueError, TypeError):
-                    effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
-                    logger.warning(f"Could not parse limit_train_batches, using fallback: {effective_batches_per_epoch}")
-            else:
-                effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
-                logger.warning(f"No limit_train_batches found, using fallback: {effective_batches_per_epoch}")
-        
-        self.true_num_batches_per_epoch = effective_batches_per_epoch
+
+        # For data loading: adjust steps only if using PyTorch DataLoader with DDP
+        if self.use_pytorch_dataloader and is_ddp and devices > 1:
+            # Each GPU processes 1/devices of the data per epoch (for data loading only)
+            dataloader_steps_per_epoch = logical_steps_per_epoch // devices
+            logger.info(f"DDP + PyTorch DataLoader: data loading steps per GPU {logical_steps_per_epoch:,} -> {dataloader_steps_per_epoch:,}")
+        else:
+            # No adjustment needed for GluonTS data loading or non-DDP
+            dataloader_steps_per_epoch = logical_steps_per_epoch
+            if is_ddp and devices > 1:
+                logger.info(f"DDP detected ({devices} GPUs) but using GluonTS DataLoader - no data loading step adjustment")
+            elif devices > 1:
+                logger.info(f"Multi-GPU detected ({devices} devices) but strategy={strategy} - no adjustment needed")
+
+        # CRITICAL: Use logical_steps_per_epoch for learning rate scheduling calculations
+        if logical_steps_per_epoch:
+            steps_stage1 = epochs_stage1 * logical_steps_per_epoch
+            steps_stage2 = epochs_stage2 * logical_steps_per_epoch
+        else:
+            # Fallback if logical_steps_per_epoch is None/0
+            steps_stage1 = 0
+            steps_stage2 = 0
+            logger.warning("logical_steps_per_epoch is None or 0, using fallback step calculations")
+
+        # Store both values for different purposes
+        self.true_num_batches_per_epoch = logical_steps_per_epoch  # For LR scheduling
+        self.dataloader_steps_per_epoch = dataloader_steps_per_epoch  # For data loading
         
         logger.info(f"Training schedule calculation:")
         logger.info(f"  Max epochs: {max_epochs}")
         logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
         logger.info(f"  Stage 2: epochs {self.stage2_start_epoch}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
-        logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
+        logger.info(f"  Logical steps per epoch (for LR scheduling): {logical_steps_per_epoch:,}")
+        if self.use_pytorch_dataloader and is_ddp and devices > 1:
+            logger.info(f"  Data loading steps per GPU: {dataloader_steps_per_epoch:,}")
         logger.info(f"  Stored true_num_batches_per_epoch: {self.true_num_batches_per_epoch}")
         
         resolved_warmup_s1 = resolve_steps(self.warmup_steps_s1, steps_stage1, "warmup_steps_s1")
