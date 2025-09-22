@@ -247,82 +247,142 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
     def get_params(trial, tuning_phase: int = 0, dynamic_kwargs: Optional[Dict[str, Any]] = None):
         """
         Get parameters for hyperparameter tuning.
-        
+
         Parameters
         ----------
         trial
             Optuna trial object.
         tuning_phase
-            The current phase of tuning (default: 0).
+            The current phase of tuning:
+            - 1: Stage 1 (marginals only) - tune marginal/flow/decoder parameters
+            - 2: Stage 2 (copula only) - tune copula/ac_mlp parameters
+            - 0: Legacy (all parameters) - for backward compatibility
         dynamic_kwargs
             Optional dictionary of dynamic keyword arguments.
-        
+
         Returns
         -------
         Dict of parameter values.
         """
         if dynamic_kwargs is None:
             dynamic_kwargs = {}
-        # Optional logging
-        logger.debug(f"get_params called with tuning_phase={tuning_phase}, dynamic_kwargs={dynamic_kwargs}")
+
+        # Log tuning phase for clarity
+        logger.info(f"get_params called with tuning_phase={tuning_phase}")
         if dynamic_kwargs and 'resample_freq' in dynamic_kwargs:
             logger.debug(f"Available resample frequencies: {dynamic_kwargs['resample_freq']}")
-            # Could potentially use dynamic_kwargs['resample_freq'] to adjust search space
-            
-        params = {
-            # --- General ---
-            # "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [3, 4, 5])),
+
+        # Common parameters used in all phases
+        common_params = {
             "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [5])),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
-            "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu"])), # Tune activation for Stage 2 components
-            "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
-            "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256, 512]), # Tune batch size
-
-            # --- Marginal CDF Encoder ---
-            "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [16, 32, 64, 128, 256, 512])),
-            "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
-            "marginal_num_layers": trial.suggest_int("marginal_num_layers", 3, 5),
-            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 5),
-            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", dynamic_kwargs.get("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256])), # Renamed from marginal_ts_embedding_dim
-
-            # --- Attentional Copula Encoder ---
-            "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
-            "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
-            "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 3),
-            "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 2, 4),
-            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])), # Renamed from copula_ts_embedding_dim
-
-            # --- Attentional Copula MLP (Aligned with AttentionalCopula class) ---
-            "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 3, 6), # Tune number of layers
-            "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])), # Tune layer dimension
-
-            # --- Decoder ---
-            "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
-            "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", dynamic_kwargs.get("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512])),
-            "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
-            "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", dynamic_kwargs.get("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256])),
-            "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
-            "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", dynamic_kwargs.get("decoder_transformer_embedding_dim_per_head", [32, 64, 128])),
-            "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 5),
-            "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [50, 100, 200, 300])), # Corresponds to AttentionalCopula resolution
-
-            # --- Optimizer Params ---
-            "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
-            "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
-            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
-            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
-
-            # --- Dropout & Clipping ---
-            "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])), # Tune dropout rate
-            "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 3.0, 5.0])),
-            "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 3.0, 5.0, 10.0])),
-
-            # --- LR Scheduler Params ---
-            "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.05, log=True), # Tune eta_min fraction for Stage 1
-            "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-5, 0.01, log=True), # Tune eta_min fraction for Stage 2
-
+            "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256, 512]),
+            "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])),
         }
-        return params
+
+        if tuning_phase == 1:  # Stage 1: Marginals only
+            logger.info("Stage 1 tuning: Only marginal/flow/decoder parameters will be tuned")
+            stage1_params = {
+                # Stage 1 activation function
+                "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
+
+                # --- Marginal CDF Encoder ---
+                "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [16, 32, 64, 128, 256, 512])),
+                "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
+                "marginal_num_layers": trial.suggest_int("marginal_num_layers", 3, 5),
+                "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 5),
+                "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", dynamic_kwargs.get("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256])),
+
+                # --- Decoder ---
+                "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
+                "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", dynamic_kwargs.get("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512])),
+                "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
+                "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", dynamic_kwargs.get("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256])),
+                "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
+                "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", dynamic_kwargs.get("decoder_transformer_embedding_dim_per_head", [32, 64, 128])),
+                "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 5),
+                "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [50, 100, 200, 300])),
+
+                # --- Stage 1 Optimizer ---
+                "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
+                "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
+                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 3.0, 5.0])),
+                "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.05, log=True),
+            }
+            return {**common_params, **stage1_params}
+
+        elif tuning_phase == 2:  # Stage 2: Copula only
+            logger.info("Stage 2 tuning: Only copula/ac_mlp parameters will be tuned")
+            stage2_params = {
+                # Stage 2 activation function
+                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu"])),
+
+                # --- Attentional Copula Encoder ---
+                "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
+                "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
+                "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 3),
+                "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 2, 4),
+                "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])),
+
+                # --- Attentional Copula MLP ---
+                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 3, 6),
+                "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])),
+
+                # --- Stage 2 Optimizer ---
+                "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
+                "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
+                "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 3.0, 5.0, 10.0])),
+                "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-5, 0.01, log=True),
+            }
+            return {**common_params, **stage2_params}
+
+        else:  # Legacy mode (tuning_phase == 0): All parameters for backward compatibility
+            logger.warning(f"Legacy tuning mode (tuning_phase={tuning_phase}): All parameters will be tuned. Consider using tuning_phase=1 or 2 for efficiency.")
+            legacy_params = {
+                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu"])),
+                "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
+
+                # --- Marginal CDF Encoder ---
+                "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [16, 32, 64, 128, 256, 512])),
+                "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
+                "marginal_num_layers": trial.suggest_int("marginal_num_layers", 3, 5),
+                "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 5),
+                "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", dynamic_kwargs.get("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256])),
+
+                # --- Attentional Copula Encoder ---
+                "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
+                "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
+                "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 3),
+                "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 2, 4),
+                "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])),
+
+                # --- Attentional Copula MLP ---
+                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 3, 6),
+                "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])),
+
+                # --- Decoder ---
+                "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
+                "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", dynamic_kwargs.get("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512])),
+                "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
+                "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", dynamic_kwargs.get("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256])),
+                "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
+                "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", dynamic_kwargs.get("decoder_transformer_embedding_dim_per_head", [32, 64, 128])),
+                "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 5),
+                "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [50, 100, 200, 300])),
+
+                # --- Optimizer Params ---
+                "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
+                "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
+                "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
+                "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
+                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 3.0, 5.0])),
+                "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 3.0, 5.0, 10.0])),
+
+                # --- LR Scheduler Params ---
+                "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.05, log=True),
+                "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-5, 0.01, log=True),
+            }
+            return {**common_params, **legacy_params}
     
     def create_transformation(self, use_lazyframe=True) -> Transformation:
         """
