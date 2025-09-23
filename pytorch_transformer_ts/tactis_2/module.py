@@ -56,6 +56,7 @@ class TACTiS2Model(nn.Module):
         loss_normalization: str = "series",
         encoder_type: str = "standard",
         dropout_rate: float = 0.1,
+        skip_copula: bool = True,
         lock_skip_copula: bool = False,
         # Activation function parameters
         stage1_activation_function: str = "ReLU",  # Added parameter for stage 1 activation
@@ -125,6 +126,10 @@ class TACTiS2Model(nn.Module):
         # Store activation function parameters
         self.stage1_activation_function = stage1_activation_function
         self.stage2_activation_function = stage2_activation_function
+
+        # Store stage control parameters
+        self.skip_copula = skip_copula
+        self.lock_skip_copula = lock_skip_copula
         
         # GluonTS compatibility parameters
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -263,8 +268,12 @@ class TACTiS2Model(nn.Module):
             flow_temporal_encoder=flow_temporal_encoder_args, # Using flow_encoder args for now
             copula_temporal_encoder=copula_temporal_encoder_args, # Using copula_encoder args for now
             copula_decoder=copula_decoder_args,
+            skip_copula=self.skip_copula,
+            lock_skip_copula=self.lock_skip_copula,
             encoder_type=encoder_type,
             stage=stage,  # Pass the stage parameter to TACTiS
+            stage1_activation_function=self.stage1_activation_function,
+            stage2_activation_function=self.stage2_activation_function,
         )
     
     @property

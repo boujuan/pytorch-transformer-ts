@@ -110,6 +110,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         stage2_activation_function: str = "ReLU", # Default: Activation in Stage 2 components (copula input encoder, copula main encoder, AC MLP)
         stage1_activation_function: str = "ReLU", # Activation function for Stage 1 components (flow input encoder, flow main encoder, marginal conditioner)
         lock_skip_copula: bool = False,  # If True, prevents automatic skip_copula updates when changing stages
+        skip_copula: bool = True,  # If True, skips copula components (Stage 1 training)
         # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
@@ -120,8 +121,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         dropout_rate: float = 0.1,
         gradient_clip_val_stage1: float = 1000.0,
         gradient_clip_val_stage2: float = 1000.0,
-        warmup_steps_s1 = 1000, # Warmup steps for stage 1 (int=absolute, float=fraction of stage)
-        warmup_steps_s2 = 500,  # Warmup steps for stage 2 (int=absolute, float=fraction of stage)
+        warmup_steps_s1 = 0.15, # Warmup steps for stage 1 (int=absolute, float=fraction of stage)
+        warmup_steps_s2 = 0.08,  # Warmup steps for stage 2 (int=absolute, float=fraction of stage)
         # General Estimator arguments
         use_lazyframe: bool = False,
         num_feat_dynamic_real: int = 0,
@@ -191,6 +192,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.stage1_activation_function = stage1_activation_function
         # Training stage / optimizer params
         self.initial_stage = initial_stage
+        self.skip_copula = skip_copula
         self.lock_skip_copula = lock_skip_copula
         self.stage2_start_epoch = stage2_start_epoch
         self.eta_min_fraction_s1 = eta_min_fraction_s1  # Store eta_min fractions
@@ -274,7 +276,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
 
         # Common parameters used in all phases
         common_params = {
-            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [5])),
+            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [8, 10, 15, 20, 25])),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
             "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256, 512]),
             "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])),
@@ -304,10 +306,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [50, 100, 200, 300])),
 
                 # --- Stage 1 Optimizer ---
-                "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
+                "lr_stage1": trial.suggest_float("lr_stage1", 5e-6, 1e-3, log=True),
                 "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
-                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 3.0, 5.0])),
-                "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.05, log=True),
+                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 0.5, 1.0, 3.0, 5.0])),
+                "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.01, log=True),
             }
             return {**common_params, **stage1_params}
 
@@ -329,10 +331,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])),
 
                 # --- Stage 2 Optimizer ---
-                "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
+                "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 5e-4, log=True),
                 "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
-                "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 3.0, 5.0, 10.0])),
-                "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-5, 0.01, log=True),
+                "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 0.5, 1.0, 3.0, 5.0, 10.0])),
+                "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-3, 0.01, log=True),
             }
             return {**common_params, **stage2_params}
 
@@ -802,6 +804,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "bagging_size": self.bagging_size,
             "input_encoding_normalization": self.input_encoding_normalization,
             "loss_normalization": self.loss_normalization,
+            "skip_copula": self.skip_copula,  # Pass skip_copula flag from config
             "lock_skip_copula": self.lock_skip_copula,  # Pass lock_skip_copula flag
             "encoder_type": self.encoder_type, # Pass encoder type
             "dropout_rate": self.dropout_rate, # Pass dropout rate
