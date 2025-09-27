@@ -829,8 +829,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         max_epochs = self.trainer_kwargs.get("max_epochs", 100)  # Default to 100 if not specified
         
         # Calculate epochs per stage
-        epochs_stage1 = self.stage2_start_epoch
-        epochs_stage2 = max_epochs - self.stage2_start_epoch
+        # BUG FIX: Use actual training duration instead of theoretical stage2_start_epoch
+        epochs_stage1 = min(max_epochs, self.stage2_start_epoch)
+        epochs_stage2 = max_epochs - epochs_stage1
         
         # FIXED: Separate logical optimization steps from physical data loading steps
         # This ensures learning rate scheduling uses the correct step count regardless of DDP
@@ -902,9 +903,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.dataloader_steps_per_epoch = dataloader_steps_per_epoch  # For data loading
         
         logger.info(f"Training schedule calculation:")
-        logger.info(f"  Max epochs: {max_epochs}")
+        logger.info(f"  Max epochs: {max_epochs}, stage2_start_epoch: {self.stage2_start_epoch}")
+        logger.info(f"  SCHEDULER FIX: Using epochs_stage1={epochs_stage1} (min({max_epochs}, {self.stage2_start_epoch}))")
         logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
-        logger.info(f"  Stage 2: epochs {self.stage2_start_epoch}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
+        logger.info(f"  Stage 2: epochs {epochs_stage1}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
         logger.info(f"  Logical steps per epoch (for LR scheduling): {logical_steps_per_epoch:,}")
         if self.use_pytorch_dataloader and is_ddp and devices > 1:
             logger.info(f"  Data loading steps per GPU: {dataloader_steps_per_epoch:,}")

@@ -214,11 +214,19 @@ class TACTiS2LightningModule(pl.LightningModule):
                      steps_per_epoch = 100
                  
                  # Calculate T_max for Stage 2 cosine annealing
+                 # BUG FIX: Handle both two-stage training and Stage 2-only training
                  total_epochs_in_run = self.trainer.max_epochs
-                 epochs_in_stage2 = total_epochs_in_run - self.hparams.stage2_start_epoch
-                 
+                 current_epoch = self.current_epoch
+
+                 # For Stage 2 scheduler, calculate remaining epochs from current position
+                 # This works for both scenarios:
+                 # - Two-stage: transitioning mid-training (e.g., epoch 10 → 20 epochs remaining)
+                 # - Stage 2 only: starting from epoch 0 (e.g., epoch 0 → 30 epochs remaining)
+                 epochs_in_stage2 = total_epochs_in_run - current_epoch
+
                  # Log diagnostic information
-                 logger.info(f"Stage 2 scheduler setup - total_epochs: {total_epochs_in_run}, stage2_start_epoch: {self.hparams.stage2_start_epoch}, epochs_in_stage2: {epochs_in_stage2}")
+                 logger.info(f"Stage 2 scheduler setup - total_epochs: {total_epochs_in_run}, current_epoch: {current_epoch}, epochs_in_stage2: {epochs_in_stage2}")
+                 logger.info(f"SCHEDULER FIX: Stage 2 will run from epoch {current_epoch} to {total_epochs_in_run} ({epochs_in_stage2} epochs)")
                  
                  # Check if manual steps_to_decay_s2 is configured
                  if self.steps_to_decay_s2 is not None and self.steps_to_decay_s2 > 0:
@@ -509,9 +517,12 @@ class TACTiS2LightningModule(pl.LightningModule):
                     logger.info(f"Using steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR.")
                 else:
                     # Calculate based on epochs and steps per epoch
-                    epochs_in_stage1 = self.hparams.stage2_start_epoch
+                    # BUG FIX: Use actual max_epochs instead of stage2_start_epoch for scheduling
+                    actual_max_epochs = self.trainer.max_epochs if self.trainer else 30
+                    epochs_in_stage1 = min(actual_max_epochs, self.hparams.stage2_start_epoch)
                     T_max_s1_calculated = (steps_per_epoch * epochs_in_stage1) - self.warmup_steps_s1
                     T_max_s1 = T_max_s1_calculated
+                    logger.info(f"LR Scheduler Fix: Using epochs_in_stage1={epochs_in_stage1} (actual_max_epochs={actual_max_epochs}, stage2_start_epoch={self.hparams.stage2_start_epoch})")
                     logger.info(f"steps_to_decay_s1 not configured or invalid. Calculating T_max_s1 = ({steps_per_epoch} * {epochs_in_stage1}) - {self.warmup_steps_s1} = {T_max_s1}")
                 
                 # Ensure T_max is valid
@@ -564,8 +575,11 @@ class TACTiS2LightningModule(pl.LightningModule):
                     logger.info(f"Using scaled steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR (no warmup).")
                 else:
                     # Calculate based on epochs and steps per epoch
-                    epochs_in_stage1 = self.hparams.stage2_start_epoch
+                    # BUG FIX: Use actual max_epochs instead of stage2_start_epoch for scheduling
+                    actual_max_epochs = self.trainer.max_epochs if self.trainer else 30
+                    epochs_in_stage1 = min(actual_max_epochs, self.hparams.stage2_start_epoch)
                     T_max_s1 = steps_per_epoch * epochs_in_stage1
+                    logger.info(f"LR Scheduler Fix (no warmup): Using epochs_in_stage1={epochs_in_stage1} (actual_max_epochs={actual_max_epochs}, stage2_start_epoch={self.hparams.stage2_start_epoch})")
                     logger.info(f"steps_to_decay_s1 not configured or invalid. Calculating T_max_s1 = {steps_per_epoch} * {epochs_in_stage1} = {T_max_s1}")
                 
                 # Ensure T_max is valid
