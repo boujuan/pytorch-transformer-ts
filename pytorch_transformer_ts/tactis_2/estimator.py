@@ -278,7 +278,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         common_params = {
             "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [8, 10, 15, 20, 25])),
             "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
-            "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256, 512]),
+            "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512]),
             "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])),
         }
 
