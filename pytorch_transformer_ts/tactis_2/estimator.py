@@ -275,12 +275,26 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             logger.debug(f"Available resample frequencies: {dynamic_kwargs['resample_freq']}")
 
         # Common parameters used in all phases
-        common_params = {
-            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [8, 10, 15, 20, 25])),
-            "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
-            "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512]),
-            "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])),
-        }
+        # For Stage 2 tuning with fixed Stage 1 params, these may be provided directly
+        stage1_fixed = dynamic_kwargs.get("stage1_fixed_params", {})
+
+        if stage1_fixed:
+            # Use fixed values from Stage 1 (for independent Stage 2 tuning)
+            logger.info(f"Using fixed common params from Stage 1: {list(stage1_fixed.keys())}")
+            common_params = {
+                "context_length_factor": stage1_fixed.get("context_length_factor"),
+                "encoder_type": stage1_fixed.get("encoder_type"),
+                "batch_size": stage1_fixed.get("batch_size"),
+                "dropout_rate": stage1_fixed.get("dropout_rate"),
+            }
+        else:
+            # Suggest normally (for Stage 1 or sequential Stage 1→2 training)
+            common_params = {
+                "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [8, 10, 15, 20, 25])),
+                "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
+                "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512]),
+                "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])),
+            }
 
         if tuning_phase == 1:  # Stage 1: Marginals only
             logger.info("Stage 1 tuning: Only marginal/flow/decoder parameters will be tuned")
