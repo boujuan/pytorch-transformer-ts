@@ -889,18 +889,21 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         elif hasattr(strategy, "__class__") and "DDP" in strategy.__class__.__name__:
             is_ddp = True
 
+        # Handle devices parameter (can be int or "auto")
+        num_devices = devices if isinstance(devices, int) else 1
+
         # For data loading: adjust steps only if using PyTorch DataLoader with DDP
-        if self.use_pytorch_dataloader and is_ddp and devices > 1:
+        if self.use_pytorch_dataloader and is_ddp and num_devices > 1:
             # Each GPU processes 1/devices of the data per epoch (for data loading only)
-            dataloader_steps_per_epoch = logical_steps_per_epoch // devices
+            dataloader_steps_per_epoch = logical_steps_per_epoch // num_devices
             logger.info(f"DDP + PyTorch DataLoader: data loading steps per GPU {logical_steps_per_epoch:,} -> {dataloader_steps_per_epoch:,}")
         else:
             # No adjustment needed for GluonTS data loading or non-DDP
             dataloader_steps_per_epoch = logical_steps_per_epoch
-            if is_ddp and devices > 1:
-                logger.info(f"DDP detected ({devices} GPUs) but using GluonTS DataLoader - no data loading step adjustment")
-            elif devices > 1:
-                logger.info(f"Multi-GPU detected ({devices} devices) but strategy={strategy} - no adjustment needed")
+            if is_ddp and num_devices > 1:
+                logger.info(f"DDP detected ({num_devices} GPUs) but using GluonTS DataLoader - no data loading step adjustment")
+            elif num_devices > 1:
+                logger.info(f"Multi-GPU detected ({num_devices} devices) but strategy={strategy} - no adjustment needed")
 
         # CRITICAL: Use logical_steps_per_epoch for learning rate scheduling calculations
         if logical_steps_per_epoch:
@@ -922,7 +925,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
         logger.info(f"  Stage 2: epochs {epochs_stage1}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
         logger.info(f"  Logical steps per epoch (for LR scheduling): {logical_steps_per_epoch:,}")
-        if self.use_pytorch_dataloader and is_ddp and devices > 1:
+        if self.use_pytorch_dataloader and is_ddp and num_devices > 1:
             logger.info(f"  Data loading steps per GPU: {dataloader_steps_per_epoch:,}")
         logger.info(f"  Stored true_num_batches_per_epoch: {self.true_num_batches_per_epoch}")
         
