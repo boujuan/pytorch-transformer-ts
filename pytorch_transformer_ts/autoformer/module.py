@@ -587,7 +587,9 @@ class AutoformerModel(nn.Module):
             cardinalities=cardinality,
             embedding_dims=self.embedding_dimension,
         )
-        if scaling == "mean" or scaling == True:
+        
+        self.scaling = scaling
+        if scaling == "mean":
             self.scaler = MeanScaler(keepdim=True, dim=1)
         elif scaling == "std":
             self.scaler = StdScaler(keepdim=True, dim=1)
@@ -773,7 +775,7 @@ class AutoformerModel(nn.Module):
         inputs = (
             (torch.cat((past_target, future_target), dim=1) - loc) / scale
             if future_target is not None
-            else (past_target-loc) / scale
+            else (past_target - loc) / scale
         )
 
         inputs_length = (

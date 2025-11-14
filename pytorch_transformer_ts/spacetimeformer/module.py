@@ -1484,7 +1484,9 @@ class SpacetimeformerModel(nn.Module):
             cardinalities=cardinality,
             embedding_dims=self.embedding_dimension,
         )
-        if scaling == "mean" or scaling is True:
+        
+        self.scaling = scaling
+        if scaling == "mean":
             self.scaler = MeanScaler(keepdim=True, dim=1)
         elif scaling == "std":
             self.scaler = StdScaler(keepdim=True, dim=1)
