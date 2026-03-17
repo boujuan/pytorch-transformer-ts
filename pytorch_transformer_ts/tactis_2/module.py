@@ -51,6 +51,8 @@ class TACTiS2Model(nn.Module):
         decoder_transformer_embedding_dim_per_head: int,
         decoder_transformer_num_heads: int,
         decoder_num_bins: int, # Corresponds to AttentionalCopula resolution
+        ac_mlp_num_layers: int = 2, # AttentionalCopula MLP layers
+        ac_activation_function: str = "relu", # AttentionalCopula activation function
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
         loss_normalization: str = "series",
@@ -92,6 +94,10 @@ class TACTiS2Model(nn.Module):
             Number of layers in the flow input encoder.
         copula_input_encoder_layers
             Number of layers in the copula input encoder.
+        ac_mlp_num_layers
+            Number of MLP layers in the AttentionalCopula component.
+        ac_activation_function
+            Activation function to use in the AttentionalCopula component.
         bagging_size
             Size of the bagging ensemble. If None, no bagging is performed.
         input_encoding_normalization
@@ -130,6 +136,10 @@ class TACTiS2Model(nn.Module):
         # Store stage control parameters
         self.skip_copula = skip_copula
         self.lock_skip_copula = lock_skip_copula
+
+        # AttentionalCopula specific parameters (standardized naming)
+        self.ac_mlp_num_layers = ac_mlp_num_layers
+        self.ac_activation_function = ac_activation_function
         
         # GluonTS compatibility parameters
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -224,8 +234,8 @@ class TACTiS2Model(nn.Module):
                 "attention_heads": decoder_transformer_num_heads,
                 "attention_layers": decoder_transformer_num_layers,
                 "attention_dim": decoder_transformer_embedding_dim_per_head, # Dim per head
-                "mlp_layers": 2, # Default value, will be overridden if provided
-                "mlp_dim": decoder_transformer_d_model * 4, # Default value, will be overridden if provided
+                "mlp_layers": self.ac_mlp_num_layers,
+                "mlp_dim": decoder_transformer_d_model * 4, # Standard practice
                 "resolution": decoder_num_bins,
                 "dropout": dropout_rate, # Use configured dropout
                 "attention_mlp_class": "_easy_mlp", # Default value

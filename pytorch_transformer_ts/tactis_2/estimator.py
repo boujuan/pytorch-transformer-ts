@@ -143,7 +143,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
         use_pytorch_dataloader: bool = False,
-        **kwargs,        
+        **kwargs,
     ) -> None:
         # Prepare base trainer kwargs
         trainer_kwargs = {
@@ -209,7 +209,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.steps_to_decay_s2 = steps_to_decay_s2 # Store manual T_max value for stage 2
         self.base_batch_size_for_scheduler_steps = base_batch_size_for_scheduler_steps
         self.base_limit_train_batches = base_limit_train_batches
- 
+
         # Common parameters
         self.input_size = input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -286,6 +286,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "encoder_type": stage1_fixed.get("encoder_type"),
                 "batch_size": stage1_fixed.get("batch_size"),
                 "dropout_rate": stage1_fixed.get("dropout_rate"),
+                "loss_normalization": stage1_fixed.get("loss_normalization", "series"),
+                "stage2_start_epoch": stage1_fixed.get("stage2_start_epoch", 20),
             }
         else:
             # Suggest normally (for Stage 1 or sequential Stage 1→2 training)
@@ -294,6 +296,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
                 "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512]),
                 "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])),
+                "loss_normalization": trial.suggest_categorical("loss_normalization", ["none", "series", "timesteps", "both"]),
+                "stage2_start_epoch": trial.suggest_categorical("stage2_start_epoch", dynamic_kwargs.get("stage2_start_epoch", [5, 10, 15, 20])),
             }
 
         if tuning_phase == 1:  # Stage 1: Marginals only
@@ -324,14 +328,17 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
                 "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 0.5, 1.0, 3.0, 5.0])),
                 "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.01, log=True),
+
+                # --- Bagging ---
+                "bagging_size": trial.suggest_categorical("bagging_size", dynamic_kwargs.get("bagging_size", [None, 64, 128, 256])),
             }
             return {**common_params, **stage1_params}
 
         elif tuning_phase == 2:  # Stage 2: Copula only
             logger.info("Stage 2 tuning: Only copula/ac_mlp parameters will be tuned")
             stage2_params = {
-                # Stage 2 activation function
-                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu"])),
+                # Stage 2 activation function (for copula components)
+                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu", "swish", "mish"])),
 
                 # --- Attentional Copula Encoder ---
                 "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
@@ -341,7 +348,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])),
 
                 # --- Attentional Copula MLP ---
-                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 3, 6),
+                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 1, 6),
                 "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])),
 
                 # --- Stage 2 Optimizer ---
@@ -355,7 +362,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         else:  # Legacy mode (tuning_phase == 0): All parameters for backward compatibility
             logger.warning(f"Legacy tuning mode (tuning_phase={tuning_phase}): All parameters will be tuned. Consider using tuning_phase=1 or 2 for efficiency.")
             legacy_params = {
-                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu"])),
+                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu", "swish", "mish"])),
                 "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
 
                 # --- Marginal CDF Encoder ---
@@ -373,7 +380,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])),
 
                 # --- Attentional Copula MLP ---
-                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 3, 6),
+                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 1, 6),
                 "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])),
 
                 # --- Decoder ---
@@ -397,6 +404,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 # --- LR Scheduler Params ---
                 "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.05, log=True),
                 "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-5, 0.01, log=True),
+
+                # --- Bagging ---
+                "bagging_size": trial.suggest_categorical("bagging_size", dynamic_kwargs.get("bagging_size", [None, 64, 128, 256])),
             }
             return {**common_params, **legacy_params}
     
@@ -777,11 +787,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "lock_skip_copula": self.lock_skip_copula,  # Pass lock_skip_copula flag
             "encoder_type": self.encoder_type, # Pass encoder type
             "dropout_rate": self.dropout_rate, # Pass dropout rate
-            # "stage1_activation_function": self.stage1_activation_function, # Will be passed directly to LightningModule
-            # Attentional Copula specific MLP params (Aligned with AttentionalCopula class)
+            # Attentional Copula specific MLP params (standardized naming: ac_mlp_num_layers)
             "ac_mlp_num_layers": self.ac_mlp_num_layers,
             "ac_mlp_dim": self.ac_mlp_dim,
-            # "stage2_activation_function": self.stage2_activation_function, # Will be passed directly to LightningModule
+            # stage1/stage2 activation functions are passed directly to LightningModule
             # GluonTS compatability parameters
             "cardinality": self.cardinality,
             "num_feat_dynamic_real": self.num_feat_dynamic_real,
