@@ -517,12 +517,22 @@ class TACTiS(nn.Module):
         loss_batch = copula_loss_batch - marginal_logdet_batch # Shape [B]
 
         # Final scalar loss is the mean over the batch
-        loss = loss_batch.mean()
+        total_loss = loss_batch.mean()
+        
+        # CRITICAL FIX: In Stage 2, use only copula_loss for backpropagation
+        # The marginal_logdet is constant (frozen parameters) and dominates the gradient signal
+        if self.stage == 2 and not self.skip_copula:
+            # Use only copula loss for gradient computation in Stage 2
+            loss_for_backprop = copula_loss_batch.mean()
+            logger.debug(f"Stage 2: Using copula_loss ({loss_for_backprop:.4f}) for backprop, not total_loss ({total_loss:.4f})")
+        else:
+            # Stage 1: Use total loss as before
+            loss_for_backprop = total_loss
 
         # Return output (pred_value for training) and loss
         output = pred_value # For training, return target as "output"
 
-        return output, loss
+        return output, loss_for_backprop
 
     def sample(
         self,

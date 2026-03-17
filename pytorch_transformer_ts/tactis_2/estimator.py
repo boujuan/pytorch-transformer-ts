@@ -43,7 +43,7 @@ from .lightning_module import TACTiS2LightningModule
 logger = logging.getLogger(__name__)
 
 from pytorch_transformer_ts.utils.step_scaling import resolve_steps
-from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
+from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
 
 # Define standard field names for different operations
 PREDICTION_INPUT_NAMES = [
@@ -305,7 +305,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
 
             # --- Optimizer Params ---
             "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
-            "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
+            "lr_stage2": trial.suggest_float("lr_stage2", 1e-5, 2e-3, log=True),
             "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
             "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
 
@@ -522,7 +522,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         #     data_path
         #         Path to the pickle file containing training data.
         
-        return WindForecastingDatamodule(
+        return WindForecastingDataset(
             train_data_path=train_data_path, 
             val_data_path=val_data_path, 
             train_sampler=self.train_sampler, 
@@ -721,7 +721,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         epochs_stage2 = max_epochs - self.stage2_start_epoch
         
         # Calculate effective batches per epoch considering limit_train_batches and DDP
-        effective_batches_per_epoch = self.true_num_batches_per_epoch
+        effective_batches_per_epoch = self.true_num_batches_per_epoch or self.num_batches_per_epoch
         
         # Adjust for distributed training (DDP) - data is split across GPUs
         strategy = self.trainer_kwargs.get("strategy")
@@ -799,5 +799,5 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             base_batch_size_for_scheduler_steps=self.base_batch_size_for_scheduler_steps,
             base_limit_train_batches=self.base_limit_train_batches,
             # Pass num_batches_per_epoch for scheduler calculations
-            num_batches_per_epoch=self.true_num_batches_per_epoch,
+            num_batches_per_epoch=self.true_num_batches_per_epoch or self.num_batches_per_epoch,
         )
