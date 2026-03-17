@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 class TestTACTiS2Integration:
     """Integration tests for TACTiS-2 model."""
     
+    @pytest.fixture
     def sample_dataset(self):
         """Create a sample multivariate time series dataset."""
         np.random.seed(42)
@@ -80,6 +81,7 @@ class TestTACTiS2Integration:
         # For multivariate, we need to specify one_dim_target=False
         return ListDataset(data, freq="10s", one_dim_target=False)
     
+    @pytest.fixture
     def model_config(self):
         """Create a basic configuration for TACTiS-2 model."""
         return {
