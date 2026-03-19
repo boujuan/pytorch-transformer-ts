@@ -63,19 +63,7 @@ class AttentionalCopula(nn.Module):
 
         # Feed-forward layers
         feed_forwards = []
-        
-        # Map activation function names to torch.nn modules
-        activation_map = {
-            "relu": nn.ReLU(),
-            "gelu": nn.GELU(),
-            "leaky_relu": nn.LeakyReLU(),
-            "swish": nn.SiLU(),
-            "mish": nn.Mish(),
-        }
-        
-        # Get the activation function (default to ReLU if not recognized)
-        activation = activation_map.get(activation_function.lower(), nn.ReLU())
-        
+
         for _ in range(attention_layers):
             # Use the selected activation class
             layers = [nn.Linear(attention_heads * attention_dim, mlp_dim), self.activation_cls()]

@@ -410,9 +410,9 @@ class InformerEstimator(PyTorchLightningEstimator):
         #     data_path
         #         Path to the pickle file containing training data.
         
-        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDataset
-        return WindForecastingDataset(
-            train_data_path=train_data_path, 
+        from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
+        return WindForecastingDatamodule(
+            train_data_path=train_data_path,
             val_data_path=val_data_path, 
             train_sampler=self.train_sampler, 
             context_length=self.context_length,
