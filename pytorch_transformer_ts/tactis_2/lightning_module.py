@@ -390,7 +390,29 @@ class TACTiS2LightningModule(pl.LightningModule):
                 logger.warning("Continuing with existing optimizer configuration - Stage 2 may not work correctly")
 
             self.log("stage", self.stage, on_step=False, on_epoch=True)
-                
+
+    def _unpack_batch(self, batch):
+        """Unpack batch from either tuple (PyTorch DataLoader) or dict (GluonTS DataLoader) format.
+
+        WindForecastingDataset yields tuples:
+            (past_target, future_target, past_time_feat, future_time_feat,
+             past_observed_values, future_observed_values, feat_static_cat, feat_static_real)
+
+        GluonTS DataLoader yields dicts with string keys.
+        """
+        if isinstance(batch, (list, tuple)):
+            return {
+                "past_target": batch[0],
+                "future_target": batch[1],
+                "past_time_feat": batch[2],
+                "future_time_feat": batch[3],
+                "past_observed_values": batch[4],
+                "future_observed_values": batch[5],
+                "feat_static_cat": batch[6],
+                "feat_static_real": batch[7],
+            }
+        return batch
+
     def training_step(self, batch, batch_idx: int):
         """
         Training step with manual optimization for two-stage training.
@@ -407,7 +429,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         The loss.
         """
         # Manual optimization for proper two-stage training
-        
+        batch = self._unpack_batch(batch)
+
         # Extract data from the batch
         past_target = batch["past_target"]
         past_observed_values = batch["past_observed_values"]
@@ -517,6 +540,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         -------
         The loss.
         """
+        batch = self._unpack_batch(batch)
+
         past_target = batch["past_target"]
         past_observed_values = batch["past_observed_values"]
         future_target = batch["future_target"]
