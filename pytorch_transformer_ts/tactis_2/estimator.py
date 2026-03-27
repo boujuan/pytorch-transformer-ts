@@ -287,7 +287,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "batch_size": stage1_fixed.get("batch_size"),
                 "dropout_rate": stage1_fixed.get("dropout_rate"),
                 "loss_normalization": stage1_fixed.get("loss_normalization", "series"),
-                "stage2_start_epoch": stage1_fixed.get("stage2_start_epoch", 20),
             }
         else:
             # Suggest normally (for Stage 1 or sequential Stage 1→2 training)
@@ -297,11 +296,14 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512]),
                 "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])),
                 "loss_normalization": trial.suggest_categorical("loss_normalization", ["none", "series", "timesteps", "both"]),
-                "stage2_start_epoch": trial.suggest_categorical("stage2_start_epoch", dynamic_kwargs.get("stage2_start_epoch", [5, 10, 15, 20])),
             }
 
         if tuning_phase == 1:  # Stage 1: Marginals only
             logger.info("Stage 1 tuning: Only marginal/flow/decoder parameters will be tuned")
+            # Disable copula and prevent stage transition — all epochs are pure Stage 1
+            common_params["skip_copula"] = True
+            common_params["lock_skip_copula"] = True
+            common_params["stage2_start_epoch"] = 9999
             stage1_params = {
                 # Stage 1 activation function
                 "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
@@ -336,6 +338,13 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
 
         elif tuning_phase == 2:  # Stage 2: Copula only
             logger.info("Stage 2 tuning: Only copula/ac_mlp parameters will be tuned")
+            # stage2_start_epoch controls when Stage 2 begins — only meaningful here
+            common_params["stage2_start_epoch"] = trial.suggest_categorical(
+                "stage2_start_epoch",
+                dynamic_kwargs.get("stage2_start_epoch", [5, 10, 15, 20]),
+            )
+            common_params["skip_copula"] = False
+            common_params["lock_skip_copula"] = False
             stage2_params = {
                 # Stage 2 activation function (for copula components)
                 "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu", "swish", "mish"])),
@@ -361,6 +370,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
 
         else:  # Legacy mode (tuning_phase == 0): All parameters for backward compatibility
             logger.warning(f"Legacy tuning mode (tuning_phase={tuning_phase}): All parameters will be tuned. Consider using tuning_phase=1 or 2 for efficiency.")
+            common_params["stage2_start_epoch"] = trial.suggest_categorical(
+                "stage2_start_epoch",
+                dynamic_kwargs.get("stage2_start_epoch", [5, 10, 15, 20]),
+            )
             legacy_params = {
                 "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu", "swish", "mish"])),
                 "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),

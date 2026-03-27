@@ -45,6 +45,7 @@ STAGE1_ONLY_PARAMS = {
 
 # Parameters used only in Stage 2 (copula/ac_mlp)
 STAGE2_ONLY_PARAMS = {
+    "stage2_start_epoch": 10,  # Only tuned in Phase 2 (controls when copula training begins)
     "stage2_activation_function": "gelu",
     "copula_embedding_dim_per_head": 32,
     "copula_num_heads": 4,
@@ -59,14 +60,13 @@ STAGE2_ONLY_PARAMS = {
     "eta_min_fraction_s2": 0.005,
 }
 
-# Common parameters shared across phases
+# Common parameters shared across phases (no stage2_start_epoch — it's phase-specific)
 COMMON_PARAMS = {
     "context_length_factor": 10,
     "encoder_type": "standard",
     "batch_size": 64,
     "dropout_rate": 0.01,
     "loss_normalization": "series",
-    "stage2_start_epoch": 10,
 }
 
 # Keys that identify common params in the output dict
@@ -125,10 +125,17 @@ class TestGetParamsPhase1:
         # -- Verify lr_stage1 is present --
         assert "lr_stage1" in result, "lr_stage1 must be in Phase 1 result"
 
-        # -- Verify Stage 2 params are absent --
+        # -- Verify Stage 2 params are absent (except stage2_start_epoch which is forced to 9999) --
         assert "lr_stage2" not in result, "lr_stage2 must NOT be in Phase 1 result"
         for key in STAGE2_PARAM_KEYS:
+            if key == "stage2_start_epoch":
+                continue  # Allowed in Phase 1 as a forced override (9999)
             assert key not in result, f"Stage 2 param '{key}' must NOT be in Phase 1 result"
+
+        # -- Verify Phase 1 disables copula and prevents stage transition --
+        assert result["skip_copula"] is True, "Phase 1 must set skip_copula=True"
+        assert result["lock_skip_copula"] is True, "Phase 1 must set lock_skip_copula=True"
+        assert result["stage2_start_epoch"] == 9999, "Phase 1 must prevent stage transition"
 
     def test_phase1_values_match_trial_suggestions(self):
         """Returned values must match what the FixedTrial provides."""
@@ -214,7 +221,6 @@ class TestGetParamsPhase2WithFixedStage1:
             "batch_size": 128,
             "dropout_rate": 0.007,
             "loss_normalization": "both",
-            "stage2_start_epoch": 15,
         }
 
         # The FixedTrial only needs Stage 2 params since common params
@@ -258,7 +264,6 @@ class TestGetParamsPhase2WithFixedStage1:
             "batch_size": 512,
             "dropout_rate": 0.015,
             "loss_normalization": "none",
-            "stage2_start_epoch": 5,
         }
 
         trial = FixedTrial(STAGE2_ONLY_PARAMS)
@@ -274,7 +279,8 @@ class TestGetParamsPhase2WithFixedStage1:
         assert result["batch_size"] == 512
         assert result["dropout_rate"] == 0.015
         assert result["loss_normalization"] == "none"
-        assert result["stage2_start_epoch"] == 5
+        # stage2_start_epoch comes from trial (Phase 2 tunable), not from stage1_fixed
+        assert result["stage2_start_epoch"] == STAGE2_ONLY_PARAMS["stage2_start_epoch"]
 
 
 # ---------------------------------------------------------------------------
