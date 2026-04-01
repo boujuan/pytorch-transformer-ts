@@ -353,8 +353,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             common_params["skip_copula"] = False
             common_params["lock_skip_copula"] = False
             stage2_params = {
-                # Stage 2 activation function (for copula components)
-                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu", "swish", "mish"])),
+                # Stage 2 activation function — relu (sharp) vs gelu (smooth transformer standard)
+                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu"])),
 
                 # --- Attentional Copula Encoder ---
                 "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
@@ -364,13 +364,13 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])),
 
                 # --- Attentional Copula MLP ---
-                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 1, 6),
+                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 1, 4),
                 "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])),
 
                 # --- Stage 2 Optimizer ---
                 "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 5e-4, log=True),
                 "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
-                "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 0.5, 1.0, 3.0, 5.0, 10.0])),
+                "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0.5, 1.0, 3.0, 5.0, 10.0])),
                 "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-3, 0.01, log=True),
             }
             return {**common_params, **stage1_arch_params, **stage2_params}

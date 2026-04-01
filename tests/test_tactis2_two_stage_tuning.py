@@ -46,7 +46,7 @@ STAGE1_ONLY_PARAMS = {
 # Parameters used only in Stage 2 (copula/ac_mlp)
 STAGE2_ONLY_PARAMS = {
     "stage2_start_epoch": 10,  # Only tuned in Phase 2 (controls when copula training begins)
-    "stage2_activation_function": "gelu",
+    "stage2_activation_function": "relu",
     "copula_embedding_dim_per_head": 32,
     "copula_num_heads": 4,
     "copula_num_layers": 2,
