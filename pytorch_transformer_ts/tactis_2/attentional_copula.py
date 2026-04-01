@@ -8,7 +8,8 @@ _ACTIVATION_MAP: Dict[str, Type[nn.Module]] = {
     "relu": nn.ReLU,
     "gelu": nn.GELU,
     "leakyrelu": nn.LeakyReLU,
-    # Add other activations as needed
+    "swish": nn.SiLU,
+    "mish": nn.Mish,
 }
 
 
