@@ -212,19 +212,24 @@ class TestGetParamsPhase2WithFixedStage1:
         """
         When stage1_fixed_params is provided:
           - common_params must use the fixed values (NOT trial suggestions)
+          - Stage 1 architecture params must be passed through (so the model
+            is built with Phase 1's best marginal/flow/decoder config)
           - Stage 2 params must still come from trial suggestions
         """
-        # Fixed common values from a prior Stage 1 best trial
+        # Realistic Phase 1 best trial (common + stage1-specific params)
         stage1_fixed = {
+            # Common params
             "context_length_factor": 20,
             "encoder_type": "temporal",
             "batch_size": 128,
             "dropout_rate": 0.007,
             "loss_normalization": "both",
+            # Stage 1 architecture params (must be passed through to estimator)
+            **STAGE1_ONLY_PARAMS,
         }
 
-        # The FixedTrial only needs Stage 2 params since common params
-        # will be taken from stage1_fixed_params (not from the trial)
+        # The FixedTrial only needs Stage 2 params since common + stage1 params
+        # are taken from stage1_fixed_params (not from the trial)
         trial = FixedTrial(STAGE2_ONLY_PARAMS)
 
         result = TACTiS2Estimator.get_params(
@@ -233,11 +238,18 @@ class TestGetParamsPhase2WithFixedStage1:
             dynamic_kwargs={"stage1_fixed_params": stage1_fixed},
         )
 
-        # -- Common params must equal the fixed values, not trial suggestions --
-        for key, expected in stage1_fixed.items():
-            assert result[key] == expected, (
-                f"Common param '{key}' should be fixed at {expected!r}, "
+        # -- Common params must equal the fixed values --
+        for key in ("context_length_factor", "encoder_type", "batch_size", "dropout_rate", "loss_normalization"):
+            assert result[key] == stage1_fixed[key], (
+                f"Common param '{key}' should be fixed at {stage1_fixed[key]!r}, "
                 f"got {result[key]!r}"
+            )
+
+        # -- Stage 1 architecture params must be passed through --
+        for key in STAGE1_PARAM_KEYS:
+            assert key in result, f"Stage 1 arch param '{key}' must be passed through in Phase 2"
+            assert result[key] == STAGE1_ONLY_PARAMS[key], (
+                f"Stage 1 arch param '{key}': expected {STAGE1_ONLY_PARAMS[key]!r}, got {result[key]!r}"
             )
 
         # -- Stage 2 params must still be tunable (from trial) --
@@ -247,23 +259,22 @@ class TestGetParamsPhase2WithFixedStage1:
                 f"Stage 2 param '{key}': expected {expected!r}, got {result[key]!r}"
             )
 
-        # -- Stage 1 specific params must NOT be present --
-        assert "lr_stage1" not in result
-        for key in STAGE1_PARAM_KEYS:
-            assert key not in result, f"Stage 1 param '{key}' must NOT be in Phase 2 result"
+        # -- Phase 2 must enable copula --
+        assert result["skip_copula"] is False, "Phase 2 must set skip_copula=False"
 
     def test_common_params_differ_from_defaults_when_fixed(self):
         """
         Ensure the fixed values actually override what a normal Phase 2 trial
         would have produced (guards against the fixed path being ignored).
         """
-        # Use deliberately unusual values that differ from the defaults in COMMON_PARAMS
+        # Use deliberately unusual common values + stage1 arch params
         stage1_fixed = {
             "context_length_factor": 25,
             "encoder_type": "temporal",
             "batch_size": 512,
             "dropout_rate": 0.015,
             "loss_normalization": "none",
+            **STAGE1_ONLY_PARAMS,
         }
 
         trial = FixedTrial(STAGE2_ONLY_PARAMS)
@@ -281,6 +292,8 @@ class TestGetParamsPhase2WithFixedStage1:
         assert result["loss_normalization"] == "none"
         # stage2_start_epoch comes from trial (Phase 2 tunable), not from stage1_fixed
         assert result["stage2_start_epoch"] == STAGE2_ONLY_PARAMS["stage2_start_epoch"]
+        # skip_copula must be False for Phase 2
+        assert result["skip_copula"] is False
 
 
 # ---------------------------------------------------------------------------

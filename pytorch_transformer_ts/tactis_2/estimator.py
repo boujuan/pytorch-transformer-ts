@@ -338,6 +338,13 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
 
         elif tuning_phase == 2:  # Stage 2: Copula only
             logger.info("Stage 2 tuning: Only copula/ac_mlp parameters will be tuned")
+
+            # Pass through ALL Stage 1 architecture params so the model is built
+            # with the same marginal/flow/decoder config that Phase 1 optimized.
+            # Without this, the estimator would use YAML defaults instead of Phase 1's best.
+            stage1_arch_params = {k: v for k, v in stage1_fixed.items() if k not in common_params}
+            logger.info(f"Phase 2: Injecting {len(stage1_arch_params)} Stage 1 architecture params: {list(stage1_arch_params.keys())}")
+
             # stage2_start_epoch controls when Stage 2 begins — only meaningful here
             common_params["stage2_start_epoch"] = trial.suggest_categorical(
                 "stage2_start_epoch",
@@ -366,7 +373,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 0.5, 1.0, 3.0, 5.0, 10.0])),
                 "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-3, 0.01, log=True),
             }
-            return {**common_params, **stage2_params}
+            return {**common_params, **stage1_arch_params, **stage2_params}
 
         else:  # Legacy mode (tuning_phase == 0): All parameters for backward compatibility
             logger.warning(f"Legacy tuning mode (tuning_phase={tuning_phase}): All parameters will be tuned. Consider using tuning_phase=1 or 2 for efficiency.")
