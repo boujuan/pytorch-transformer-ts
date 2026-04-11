@@ -45,7 +45,6 @@ STAGE1_ONLY_PARAMS = {
 
 # Parameters used only in Stage 2 (copula/ac_mlp)
 STAGE2_ONLY_PARAMS = {
-    "stage2_start_epoch": 10,  # Only tuned in Phase 2 (controls when copula training begins)
     "stage2_activation_function": "relu",
     "copula_embedding_dim_per_head": 32,
     "copula_num_heads": 4,
@@ -81,7 +80,7 @@ STAGE2_PARAM_KEYS = set(STAGE2_ONLY_PARAMS.keys())
 
 def _all_fixed_params():
     """Return a merged dict of ALL possible param suggestions with reasonable defaults."""
-    return {**COMMON_PARAMS, **STAGE1_ONLY_PARAMS, **STAGE2_ONLY_PARAMS}
+    return {**COMMON_PARAMS, **STAGE1_ONLY_PARAMS, **STAGE2_ONLY_PARAMS, "stage2_start_epoch": 10}
 
 
 def _phase1_fixed_params():
@@ -259,8 +258,10 @@ class TestGetParamsPhase2WithFixedStage1:
                 f"Stage 2 param '{key}': expected {expected!r}, got {result[key]!r}"
             )
 
-        # -- Phase 2 must enable copula --
+        # -- Phase 2 must enable copula and start in Stage 2 --
         assert result["skip_copula"] is False, "Phase 2 must set skip_copula=False"
+        assert result["initial_stage"] == 2, "Phase 2 must set initial_stage=2"
+        assert result["stage2_start_epoch"] == 0, "Phase 2 must set stage2_start_epoch=0"
 
     def test_common_params_differ_from_defaults_when_fixed(self):
         """
@@ -290,9 +291,9 @@ class TestGetParamsPhase2WithFixedStage1:
         assert result["batch_size"] == 512
         assert result["dropout_rate"] == 0.015
         assert result["loss_normalization"] == "none"
-        # stage2_start_epoch comes from trial (Phase 2 tunable), not from stage1_fixed
-        assert result["stage2_start_epoch"] == STAGE2_ONLY_PARAMS["stage2_start_epoch"]
-        # skip_copula must be False for Phase 2
+        # Phase 2 starts in Stage 2 directly (checkpoint-based, no warm-up)
+        assert result["initial_stage"] == 2
+        assert result["stage2_start_epoch"] == 0
         assert result["skip_copula"] is False
 
 

@@ -143,8 +143,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
         use_pytorch_dataloader: bool = False,
+        phase1_checkpoint_path: str = None,
         **kwargs,
     ) -> None:
+        self.phase1_checkpoint_path = phase1_checkpoint_path
+
         # Prepare base trainer kwargs
         trainer_kwargs = {
             "max_epochs": 100,
@@ -345,11 +348,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             stage1_arch_params = {k: v for k, v in stage1_fixed.items() if k not in common_params}
             logger.info(f"Phase 2: Injecting {len(stage1_arch_params)} Stage 1 architecture params: {list(stage1_arch_params.keys())}")
 
-            # stage2_start_epoch controls when Stage 2 begins — only meaningful here
-            common_params["stage2_start_epoch"] = trial.suggest_categorical(
-                "stage2_start_epoch",
-                dynamic_kwargs.get("stage2_start_epoch", [5, 10, 15, 20]),
-            )
+            # Phase 2 loads Phase 1 checkpoint → starts directly in Stage 2
+            # No stage2_start_epoch tuning needed (no Stage 1 warm-up)
+            common_params["initial_stage"] = 2
+            common_params["stage2_start_epoch"] = 0
             common_params["skip_copula"] = False
             common_params["lock_skip_copula"] = False
             stage2_params = {
@@ -946,4 +948,6 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             base_limit_train_batches=self.base_limit_train_batches,
             # Pass num_batches_per_epoch for scheduler calculations
             num_batches_per_epoch=self.true_num_batches_per_epoch or self.num_batches_per_epoch,
+            # Phase 2: load pre-trained marginal weights from Phase 1 checkpoint
+            phase1_checkpoint_path=self.phase1_checkpoint_path,
         )

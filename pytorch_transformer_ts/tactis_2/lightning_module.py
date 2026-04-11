@@ -37,6 +37,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         batch_size: int = 2048, # Current trial's batch size
         base_batch_size_for_scheduler_steps: int = 2048, # Base batch size for scheduler step calculations
         base_limit_train_batches: int = None, # Base limit train batches - if set, disables batch size scaling
+        phase1_checkpoint_path: str = None, # Path to Phase 1 best checkpoint for Phase 2 tuning
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -150,10 +151,30 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.cosine_scheduler_ref = None
         self.sequential_scheduler_ref = None
 
+        # Store Phase 1 checkpoint path for Phase 2 tuning (loaded in on_fit_start)
+        self.phase1_checkpoint_path = phase1_checkpoint_path
+
         # Set the stage in the model
         if hasattr(self.model.tactis, "set_stage"):
             self.model.tactis.set_stage(self.stage)
-            
+
+    def on_fit_start(self):
+        """Load Phase 1 marginal weights before training begins (Phase 2 only)."""
+        if self.phase1_checkpoint_path is not None:
+            checkpoint = torch.load(self.phase1_checkpoint_path, map_location=self.device)
+            state_dict = checkpoint['state_dict']
+
+            # Load marginal weights only (strict=False ignores missing copula keys)
+            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+            logger.info(f"Phase 2: Loaded Phase 1 checkpoint from {self.phase1_checkpoint_path}")
+            logger.info(f"  Loaded: {len(state_dict)} keys, Missing (copula): {len(missing)}, Unexpected: {len(unexpected)}")
+
+            # Freeze marginals and set Stage 2
+            self._apply_stage2_parameter_freezing()
+            self.model.tactis.set_stage(2)
+            self.stage = 2
+            logger.info("Phase 2: Marginals loaded and frozen. Starting in Stage 2 (copula-only training).")
+
     def _get_marginal_parameters(self):
         """
         Get marginal/flow parameters that should be optimized in Stage 1.
