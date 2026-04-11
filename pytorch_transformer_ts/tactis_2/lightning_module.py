@@ -584,18 +584,24 @@ class TACTiS2LightningModule(pl.LightningModule):
         # TRAINING METRIC: Log what's being optimized for training (stage-specific)
         self.log("val_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
         
-        # OPTUNA METRICS: Always log components for consistent optimization
+        # DIAGNOSTIC METRICS: Always log components
         tactis_model = getattr(self.model, 'tactis', None)
         if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
             if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
-                # DIAGNOSTIC: Marginal stability (should be constant in Stage 2)
-                self.log("val_marginal_logdet", tactis_model.marginal_logdet.detach(), 
+                # Marginal stability (should be constant in Stage 2)
+                self.log("val_marginal_logdet", tactis_model.marginal_logdet.detach(),
                        on_step=True, on_epoch=True, prog_bar=False)
-                
-                # OPTUNA TARGET: Consistent metric across both stages
+
+                # Total NLL (copula_loss - marginal_logdet)
                 total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
-                self.log("val_total_nll", total_nll.detach(), 
+                self.log("val_total_nll", total_nll.detach(),
                        on_step=True, on_epoch=True, prog_bar=False)
+
+                # PHASE 2 METRIC: Copula loss only — logged in Stage 2 so
+                # ModelCheckpoint can monitor it without Stage 1 interference
+                if self.stage >= 2 and not getattr(self.hparams, 'skip_copula', True):
+                    self.log("val_copula_loss", tactis_model.copula_loss.detach(),
+                           on_step=False, on_epoch=True, prog_bar=False)
         
         return loss
         
