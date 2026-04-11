@@ -622,7 +622,7 @@ class TACTiS2LightningModule(pl.LightningModule):
                 # Always logged so ModelCheckpoint(monitor='val_copula_loss') doesn't crash.
                 # Stage 1: inf (ModelCheckpoint with mode='min' will never save this as best)
                 # Stage 2: actual copula loss (what we want to optimize)
-                if self.stage >= 2 and not getattr(self.hparams, 'skip_copula', True):
+                if self.stage >= 2 and not self.hparams.model_config.get('skip_copula', True):
                     self.log("val_copula_loss", tactis_model.copula_loss.detach(),
                            on_step=False, on_epoch=True, prog_bar=False)
                 else:
