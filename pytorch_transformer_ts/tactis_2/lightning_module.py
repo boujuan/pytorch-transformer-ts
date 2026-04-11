@@ -597,10 +597,15 @@ class TACTiS2LightningModule(pl.LightningModule):
                 self.log("val_total_nll", total_nll.detach(),
                        on_step=True, on_epoch=True, prog_bar=False)
 
-                # PHASE 2 METRIC: Copula loss only — logged in Stage 2 so
-                # ModelCheckpoint can monitor it without Stage 1 interference
+                # PHASE 2 METRIC: Copula loss only.
+                # Always logged so ModelCheckpoint(monitor='val_copula_loss') doesn't crash.
+                # Stage 1: inf (ModelCheckpoint with mode='min' will never save this as best)
+                # Stage 2: actual copula loss (what we want to optimize)
                 if self.stage >= 2 and not getattr(self.hparams, 'skip_copula', True):
                     self.log("val_copula_loss", tactis_model.copula_loss.detach(),
+                           on_step=False, on_epoch=True, prog_bar=False)
+                else:
+                    self.log("val_copula_loss", torch.tensor(float('inf'), device=self.device),
                            on_step=False, on_epoch=True, prog_bar=False)
         
         return loss
