@@ -392,14 +392,6 @@ class TACTiS2LightningModule(pl.LightningModule):
                     self.trainer.optimizers[0] = fresh_optimizer
                     logger.info("Successfully replaced Stage 1 optimizer with fresh Stage 2 optimizer")
 
-                # Log successful Stage 2 transition
-                self.log_dict({
-                    "stage": 2,
-                    "learning_rate": self.lr_stage2,
-                    "weight_decay": self.weight_decay_stage2,
-                    "optimizer_param_count": sum(p.numel() for p in fresh_optimizer.param_groups[0]['params'])
-                })
-
                 logger.info(f"Epoch {current_epoch}: Successfully created fresh Stage 2 optimizer")
                 logger.info(f"Stage 2 optimizer trains {sum(p.numel() for p in fresh_optimizer.param_groups[0]['params']):,} parameters (copula only)")
 
@@ -409,8 +401,6 @@ class TACTiS2LightningModule(pl.LightningModule):
             except Exception as e:
                 logger.error(f"Failed to create fresh Stage 2 optimizer: {e}")
                 logger.warning("Continuing with existing optimizer configuration - Stage 2 may not work correctly")
-
-            self.log("stage", self.stage, on_step=False, on_epoch=True)
 
     def _unpack_batch(self, batch):
         """Unpack batch from either tuple (PyTorch DataLoader) or dict (GluonTS DataLoader) format.
@@ -534,14 +524,14 @@ class TACTiS2LightningModule(pl.LightningModule):
         tactis_model = getattr(self.model, 'tactis', None)
         if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
             if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
-                # DIAGNOSTIC: Marginal stability (should be constant in Stage 2)
-                self.log("train_marginal_logdet", tactis_model.marginal_logdet.detach(), 
-                       on_step=True, on_epoch=True, prog_bar=False)
-                
-                # OPTUNA TARGET: Consistent metric across both stages
+                safe_marginal_logdet = torch.nan_to_num(tactis_model.marginal_logdet.detach(), nan=0.0, posinf=1e6, neginf=-1e6)
+                self.log("train_marginal_logdet", safe_marginal_logdet,
+                       on_step=False, on_epoch=True, prog_bar=False)
+
                 total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
-                self.log("train_total_nll", total_nll.detach(), 
-                       on_step=True, on_epoch=True, prog_bar=False)
+                safe_total_nll = torch.nan_to_num(total_nll.detach(), nan=1e6, posinf=1e6, neginf=-1e6)
+                self.log("train_total_nll", safe_total_nll,
+                       on_step=False, on_epoch=True, prog_bar=False)
         
         # Return loss for logging (not used for backprop anymore)
         return loss
@@ -609,14 +599,14 @@ class TACTiS2LightningModule(pl.LightningModule):
         tactis_model = getattr(self.model, 'tactis', None)
         if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
             if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
-                # Marginal stability (should be constant in Stage 2)
-                self.log("val_marginal_logdet", tactis_model.marginal_logdet.detach(),
-                       on_step=True, on_epoch=True, prog_bar=False)
+                safe_marginal_logdet = torch.nan_to_num(tactis_model.marginal_logdet.detach(), nan=0.0, posinf=1e6, neginf=-1e6)
+                self.log("val_marginal_logdet", safe_marginal_logdet,
+                       on_step=False, on_epoch=True, prog_bar=False)
 
-                # Total NLL (copula_loss - marginal_logdet)
                 total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
-                self.log("val_total_nll", total_nll.detach(),
-                       on_step=True, on_epoch=True, prog_bar=False)
+                safe_total_nll = torch.nan_to_num(total_nll.detach(), nan=1e6, posinf=1e6, neginf=-1e6)
+                self.log("val_total_nll", safe_total_nll,
+                       on_step=False, on_epoch=True, prog_bar=False)
 
                 # PHASE 2 METRIC: Copula loss only.
                 # Always logged so ModelCheckpoint(monitor='val_copula_loss') doesn't crash.
