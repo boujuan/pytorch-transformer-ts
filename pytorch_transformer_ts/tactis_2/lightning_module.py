@@ -1,5 +1,6 @@
 # Use the newer namespace consistent with Lightning > v2.0
 import logging
+import os
 import lightning.pytorch as pl
 import torch
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR
@@ -363,6 +364,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         super().on_train_epoch_start()
         current_epoch = self.current_epoch
         
+        if self.stage == 2 and current_epoch == 0:
+            logger.info(f"Epoch {current_epoch}: Resumed directly into Stage 2 (initial_stage=2); skipping transition.")
         if self.stage == 1 and current_epoch >= self.stage2_start_epoch:
             logger.info(f"Epoch {current_epoch}: Entering Stage 2 transition.")
             self.stage = 2
@@ -401,6 +404,22 @@ class TACTiS2LightningModule(pl.LightningModule):
             except Exception as e:
                 logger.error(f"Failed to create fresh Stage 2 optimizer: {e}")
                 logger.warning("Continuing with existing optimizer configuration - Stage 2 may not work correctly")
+
+    def on_train_epoch_end(self):
+        super().on_train_epoch_end()
+        epoch = self.current_epoch
+        save_every = 5
+        is_save_epoch = (epoch + 1) % save_every == 0
+        is_final = self.trainer is not None and self.trainer.max_epochs is not None and (epoch + 1) >= self.trainer.max_epochs
+        if (is_save_epoch or is_final) and self.trainer.is_global_zero:
+            try:
+                ckpt_dir = self.trainer.default_root_dir
+                os.makedirs(ckpt_dir, exist_ok=True)
+                path = os.path.join(ckpt_dir, f"manual_save_epoch{epoch}.ckpt")
+                self.trainer.save_checkpoint(path)
+                logger.info(f"Manual save (defensive): {path}")
+            except Exception as save_err:
+                logger.error(f"Defensive save failed at epoch {epoch}: {save_err}", exc_info=True)
 
     def _unpack_batch(self, batch):
         """Unpack batch from either tuple (PyTorch DataLoader) or dict (GluonTS DataLoader) format.
@@ -508,7 +527,12 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         # Optimizer step
         opt.step()
-        
+
+        try:
+            self.trainer.fit_loop.epoch_loop.manual_optimization.optim_step_progress.increment_completed()
+        except (AttributeError, TypeError):
+            pass
+
         # Update learning rate scheduler
         if sch is not None:
             if isinstance(sch, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -632,21 +656,26 @@ class TACTiS2LightningModule(pl.LightningModule):
         This method creates the initial Stage 1 optimizer. Stage 2 transition 
         replaces this with a fresh optimizer containing only copula parameters.
         """
-        # Always start with Stage 1 configuration
-        # Stage 2 transition will replace this with fresh copula-only optimizer
-        initial_lr = self.lr_stage1
-        initial_weight_decay = self.weight_decay_stage1
+        if self.stage == 2:
+            logger.info("configure_optimizers: stage=2 detected (resume path); applying Stage 2 freezing and building copula-only optimizer to match saved optimizer state")
+            self._apply_stage2_parameter_freezing()
+            optimizer = self._create_stage2_optimizer()
+            self._stage2_optimizer = optimizer
+            initial_lr = self.lr_stage2
+            initial_weight_decay = self.weight_decay_stage2
+        else:
+            initial_lr = self.lr_stage1
+            initial_weight_decay = self.weight_decay_stage1
 
-        logger.info(f"Configuring Stage 1 optimizer with lr={initial_lr}, weight_decay={initial_weight_decay}")
+            logger.info(f"Configuring Stage 1 optimizer with lr={initial_lr}, weight_decay={initial_weight_decay}")
 
-        # Create Stage 1 optimizer with ALL model parameters (original TACTiS design)
-        optimizer = torch.optim.AdamW(
-            self.model.tactis.parameters(),  # All parameters for Stage 1
-            lr=initial_lr,
-            weight_decay=initial_weight_decay,
-        )
-        
-        logger.info(f"Created optimizer with {len(list(self.model.tactis.parameters()))} parameters")
+            optimizer = torch.optim.AdamW(
+                self.model.tactis.parameters(),
+                lr=initial_lr,
+                weight_decay=initial_weight_decay,
+            )
+
+            logger.info(f"Created optimizer with {len(list(self.model.tactis.parameters()))} parameters")
         
         # Use manual optimization for two-stage training with optimizer switching
         self.automatic_optimization = False
