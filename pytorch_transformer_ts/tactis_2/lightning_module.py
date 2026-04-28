@@ -657,12 +657,21 @@ class TACTiS2LightningModule(pl.LightningModule):
         replaces this with a fresh optimizer containing only copula parameters.
         """
         if self.stage == 2:
-            logger.info("configure_optimizers: stage=2 detected (resume path); applying Stage 2 freezing and building copula-only optimizer to match saved optimizer state")
+            logger.info("configure_optimizers: stage=2 detected (resume path); applying Stage 2 freezing, building copula-only optimizer + scheduler")
             self._apply_stage2_parameter_freezing()
             optimizer = self._create_stage2_optimizer()
             self._stage2_optimizer = optimizer
-            initial_lr = self.lr_stage2
-            initial_weight_decay = self.weight_decay_stage2
+            self._create_stage2_scheduler(optimizer)
+            self.automatic_optimization = False
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": self._stage2_scheduler,
+                    "interval": "step",
+                    "frequency": 1,
+                    "name": "lr_scheduler_stage2_resume",
+                },
+            }
         else:
             initial_lr = self.lr_stage1
             initial_weight_decay = self.weight_decay_stage1
