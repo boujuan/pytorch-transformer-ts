@@ -8,7 +8,8 @@ _ACTIVATION_MAP: Dict[str, Type[nn.Module]] = {
     "relu": nn.ReLU,
     "gelu": nn.GELU,
     "leakyrelu": nn.LeakyReLU,
-    # Add other activations as needed
+    "swish": nn.SiLU,
+    "mish": nn.Mish,
 }
 
 
@@ -63,6 +64,7 @@ class AttentionalCopula(nn.Module):
 
         # Feed-forward layers
         feed_forwards = []
+
         for _ in range(attention_layers):
             # Use the selected activation class
             layers = [nn.Linear(attention_heads * attention_dim, mlp_dim), self.activation_cls()]
@@ -314,11 +316,13 @@ class AttentionalCopula(nn.Module):
         num_history = hist_encoded.shape[1] # num_history = series * hist_steps
         device = pred_encoded.device
 
-        # Use a fixed permutation for sampling consistency if needed, or keep random
-        permutation = torch.arange(0, num_variables).long()
-        # If multiple samples require different permutations (more complex):
-        # permutations = torch.stack([torch.randperm(num_variables, device=device) for _ in range(num_samples)])
-        permutations = torch.stack([permutation for _ in range(num_samples)]) # Fixed permutation across samples
+        # Use random permutations for better sample diversity (CRITICAL FIX for low uncertainty issue)
+        # Random permutations significantly improve sampling diversity by varying variable ordering per sample
+        permutations = torch.stack([torch.randperm(num_variables, device=device) for _ in range(num_samples)])
+        
+        # Note: Fixed permutation was causing near-identical samples with extremely low variance (~0.0002 m/s)
+        # permutation = torch.arange(0, num_variables).long()  # OLD: Fixed permutation (problematic)
+        # permutations = torch.stack([permutation for _ in range(num_samples)])  # OLD: Same for all samples
 
         # Precompute keys and values for the history part
         key_value_input_hist = torch.cat([hist_encoded, hist_true_u[:, :, None]], axis=2)
@@ -365,10 +369,10 @@ class AttentionalCopula(nn.Module):
             # For fixed permutation, p is just a scalar index repeated num_samples times
             p = permutations[:, i] # Shape [num_samples], contains the variable index for step i
 
-            # Get the encoded representation for the current variable(s) across batches
-            # Shape: [bsz, num_variables, input_dim] -> select p -> [bsz, input_dim]
-            # Expand for num_samples: [bsz, 1, input_dim] -> [bsz, num_samples, input_dim]
-            current_pred_encoded = pred_encoded[:, p[0], :].unsqueeze(1).expand(-1, num_samples, -1)
+            # CRITICAL FIX #1: Use ALL permutation indices, not just p[0]
+            # Shape: [bsz, num_variables, input_dim] -> select p (per sample) -> [bsz, num_samples, input_dim]
+            # Each sample uses its own variable index from the permutation
+            current_pred_encoded = pred_encoded[:, p, :]  # Advanced indexing: [bsz, num_samples, input_dim]
 
             if i == 0:
                 # First variable is sampled from Uniform(0,1)
@@ -458,9 +462,12 @@ class AttentionalCopula(nn.Module):
                 # Convert bin index to a value in [0, 1)
                 current_samples = (sampled_bins.float() + torch.rand_like(sampled_bins.float())) / self.resolution
 
-            # Store the sampled value for the current variable index p[0] (since fixed permutation)
+            # CRITICAL FIX #1: Store samples at correct variable positions per sample
             # samples shape: [bsz, num_variables, num_samples]
-            samples[:, p[0], :] = current_samples # Store [bsz, num_samples] into slice
+            # Use advanced indexing to store each sample at its corresponding variable index
+            batch_indices = torch.arange(num_batches, device=device)[:, None]  # [bsz, 1]
+            sample_indices = torch.arange(num_samples, device=device)[None, :]   # [1, num_samples]
+            samples[batch_indices, p[None, :], sample_indices] = current_samples
 
             # Compute and store keys/values for the *newly sampled* variable for subsequent steps
             # Input: [bsz, num_samples, input_dim] (current_pred_encoded)

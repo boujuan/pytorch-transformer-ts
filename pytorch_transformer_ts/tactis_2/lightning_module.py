@@ -37,6 +37,7 @@ class TACTiS2LightningModule(pl.LightningModule):
         batch_size: int = 2048, # Current trial's batch size
         base_batch_size_for_scheduler_steps: int = 2048, # Base batch size for scheduler step calculations
         base_limit_train_batches: int = None, # Base limit train batches - if set, disables batch size scaling
+        phase1_checkpoint_path: str = None, # Path to Phase 1 best checkpoint for Phase 2 tuning
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -136,6 +137,10 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.steps_to_decay_s1 = self.hparams.steps_to_decay_s1
         self.steps_to_decay_s2 = self.hparams.steps_to_decay_s2
         
+        # Store reference to Stage 2 optimizer for manual optimization
+        self._stage2_optimizer = None
+        self._stage2_scheduler = None
+        
         logger.info(f"Using resolved scheduler steps from estimator (no additional scaling):")
         logger.info(f"  warmup_s1={self.warmup_steps_s1}, warmup_s2={self.warmup_steps_s2}")
         logger.info(f"  decay_s1={self.steps_to_decay_s1}, decay_s2={self.steps_to_decay_s2}")
@@ -146,9 +151,208 @@ class TACTiS2LightningModule(pl.LightningModule):
         self.cosine_scheduler_ref = None
         self.sequential_scheduler_ref = None
 
+        # Store Phase 1 checkpoint path for Phase 2 tuning (loaded in on_fit_start)
+        self.phase1_checkpoint_path = phase1_checkpoint_path
+
         # Set the stage in the model
         if hasattr(self.model.tactis, "set_stage"):
             self.model.tactis.set_stage(self.stage)
+
+    def on_fit_start(self):
+        """Load Phase 1 marginal weights before training begins (Phase 2 only)."""
+        if self.phase1_checkpoint_path is not None:
+            checkpoint = torch.load(self.phase1_checkpoint_path, map_location=self.device)
+            state_dict = checkpoint['state_dict']
+
+            # Load marginal weights only (strict=False ignores missing copula keys)
+            missing, unexpected = self.load_state_dict(state_dict, strict=False)
+            logger.info(f"Phase 2: Loaded Phase 1 checkpoint from {self.phase1_checkpoint_path}")
+            logger.info(f"  Loaded: {len(state_dict)} keys, Missing (copula): {len(missing)}, Unexpected: {len(unexpected)}")
+
+            # Freeze marginals and set Stage 2
+            self._apply_stage2_parameter_freezing()
+            self.model.tactis.set_stage(2)
+            self.stage = 2
+            logger.info("Phase 2: Marginals loaded and frozen. Starting in Stage 2 (copula-only training).")
+
+    def _get_marginal_parameters(self):
+        """
+        Get marginal/flow parameters that should be optimized in Stage 1.
+        
+        Returns:
+            list: List of marginal/flow parameters that have requires_grad=True
+        """
+        marginal_parameter_names = [
+            "flow_series_encoder",
+            "flow_time_encoding", 
+            "flow_input_encoder",
+            "flow_encoder",
+            "decoder.marginal",
+        ]
+        
+        marginal_params = []
+        marginal_param_count = 0
+        
+        for name, param in self.model.tactis.named_parameters():
+            if any(pname in name for pname in marginal_parameter_names):
+                if param.requires_grad:
+                    marginal_params.append(param)
+                    marginal_param_count += param.numel()
+                    logger.debug(f"Marginal parameter: {name} ({param.numel()} elements)")
+        
+        logger.info(f"Found {len(marginal_params)} marginal parameter tensors, {marginal_param_count:,} total parameters")
+        return marginal_params
+
+    def _get_copula_parameters(self):
+        """
+        Get copula parameters that should be optimized in Stage 2.
+        
+        Returns:
+            list: List of copula parameters that have requires_grad=True
+        """
+        copula_parameter_names = [
+            "copula_series_encoder",
+            "copula_time_encoding",
+            "copula_input_encoder", 
+            "copula_encoder",
+            "decoder.copula",
+        ]
+        
+        copula_params = []
+        copula_param_count = 0
+        
+        for name, param in self.model.tactis.named_parameters():
+            if any(pname in name for pname in copula_parameter_names):
+                if param.requires_grad:
+                    copula_params.append(param)
+                    copula_param_count += param.numel()
+                    logger.debug(f"Copula parameter: {name} ({param.numel()} elements)")
+        
+        logger.info(f"Found {len(copula_params)} copula parameter tensors, {copula_param_count:,} total parameters")
+        return copula_params
+    
+    def _create_stage2_optimizer(self):
+        """
+        Create a fresh optimizer with ONLY copula parameters for Stage 2.
+        This follows the original TACTiS-2 design of creating a new optimizer 
+        rather than updating the existing one.
+        
+        Returns:
+            torch.optim.Optimizer: Fresh optimizer configured for Stage 2 with only copula parameters
+        """
+        # Get only copula parameters that should be trained in Stage 2
+        copula_params = self._get_copula_parameters()
+        
+        if not copula_params:
+            logger.error("No copula parameters found for Stage 2 optimizer!")
+            # Fallback to all parameters to prevent crash
+            copula_params = list(self.model.tactis.parameters())
+        
+        # Create fresh optimizer with Stage 2 configuration
+        optimizer_stage2 = torch.optim.AdamW(
+            copula_params,
+            lr=self.lr_stage2,
+            weight_decay=self.weight_decay_stage2,
+        )
+        
+        logger.info(f"Created fresh Stage 2 optimizer with {len(copula_params)} parameter tensors")
+        logger.info(f"Stage 2 optimizer config: lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}")
+        
+        return optimizer_stage2
+    
+    def _create_stage2_scheduler(self, optimizer):
+        """
+        Create a fresh scheduler for Stage 2 optimizer.
+        
+        Parameters:
+            optimizer: The Stage 2 optimizer to create scheduler for
+        """
+        # Get the scheduler configuration from configure_optimizers
+        steps_per_epoch = self.hparams.num_batches_per_epoch
+        if steps_per_epoch is None or steps_per_epoch <= 0:
+            logger.warning(f"Invalid num_batches_per_epoch: {steps_per_epoch}. Using 100 as default.")
+            steps_per_epoch = 100
+
+        warmup_steps = self.warmup_steps_s2
+        cosine_steps = self.steps_to_decay_s2
+        
+        if cosine_steps is None or cosine_steps <= 0:
+            logger.warning(f"Invalid steps_to_decay_s2: {cosine_steps}. Using 1000 as default.")
+            cosine_steps = 1000
+
+        # Create warmup scheduler (if warmup_steps > 0)
+        if warmup_steps > 0:
+            def warmup_lr_lambda(step):
+                return min(1.0, step / warmup_steps)
+            warmup_scheduler = LambdaLR(optimizer, lr_lambda=warmup_lr_lambda)
+        else:
+            warmup_scheduler = None
+
+        # Create cosine annealing scheduler
+        eta_min = self.lr_stage2 * self.hparams.eta_min_fraction_s2
+        cosine_scheduler = CosineAnnealingLR(
+            optimizer, 
+            T_max=cosine_steps, 
+            eta_min=eta_min
+        )
+
+        # Combine schedulers if warmup is used
+        if warmup_scheduler is not None:
+            scheduler = SequentialLR(
+                optimizer, 
+                schedulers=[warmup_scheduler, cosine_scheduler],
+                milestones=[warmup_steps]
+            )
+        else:
+            scheduler = cosine_scheduler
+
+        # Store scheduler for manual optimization use
+        self._stage2_scheduler = scheduler
+        
+        # Replace in trainer's scheduler list
+        if hasattr(self.trainer, 'lr_scheduler_configs') and self.trainer.lr_scheduler_configs:
+            self.trainer.lr_scheduler_configs[0].scheduler = scheduler
+            logger.info("Created and registered fresh Stage 2 scheduler")
+        else:
+            logger.warning("Could not register Stage 2 scheduler with trainer")
+        
+    def _apply_stage2_parameter_freezing(self):
+        """
+        Apply parameter freezing for Stage 2: freeze marginal/flow parameters, unfreeze copula parameters.
+        """
+        frozen_tensors = 0
+        unfrozen_tensors = 0
+        frozen_elements = 0
+        unfrozen_elements = 0
+        other_tensors = 0
+        other_elements = 0
+        
+        for name, param in self.model.tactis.named_parameters():
+            # FIXED: Include decoder.marginal and decoder.copula patterns
+            is_marginal = (name.startswith("flow_") or name.startswith("marginal") or "decoder.marginal" in name)
+            is_copula = (name.startswith("copula_") or name.startswith("copula.") or "decoder.copula" in name)
+            
+            if is_marginal:
+                param.requires_grad = False  # Freeze marginal/flow parameters in stage 2
+                frozen_tensors += 1
+                frozen_elements += param.numel()
+            elif is_copula:
+                param.requires_grad = True   # Unfreeze copula parameters in stage 2  
+                unfrozen_tensors += 1
+                unfrozen_elements += param.numel()
+            else:
+                # Default: Keep requires_grad as is, but log for transparency
+                logger.debug(f"Parameter '{name}' not explicitly frozen/unfrozen.")
+                other_tensors += 1
+                other_elements += param.numel()
+
+        # Provide clear, accurate logging
+        logger.info(f"Stage 2 Parameter Freezing Summary:")
+        logger.info(f"  Frozen (marginal/flow): {frozen_tensors} tensors, {frozen_elements:,} parameters")
+        logger.info(f"  Trainable (copula): {unfrozen_tensors} tensors, {unfrozen_elements:,} parameters")
+        if other_tensors > 0:
+            logger.info(f"  Other: {other_tensors} tensors, {other_elements:,} parameters")
+        logger.info(f"  Total model: {frozen_tensors + unfrozen_tensors + other_tensors} tensors, {frozen_elements + unfrozen_elements + other_elements:,} parameters")
             
     def on_train_epoch_start(self):
         """
@@ -163,174 +367,76 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.info(f"Epoch {current_epoch}: Entering Stage 2 transition.")
             self.stage = 2
 
-            # Update the stage in the model - this no longer initializes components
-            # but just updates the flags and enables already initialized components
+            # 1. Update the stage in the model 
             if hasattr(self.model.tactis, "set_stage"):
                 self.model.tactis.set_stage(self.stage)
                 logger.info(f"Epoch {current_epoch}: Called model.tactis.set_stage(2)")
             else:
-                 logger.warning("model.tactis does not have set_stage method.")
-                 # Cannot proceed with freezing/optimizer update if stage cannot be set in model
+                logger.warning("model.tactis does not have set_stage method.")
 
-            # 2. Freeze flow/marginal parameters, unfreeze copula parameters
-            logger.info("Freezing flow/marginal parameters and unfreezing copula parameters...")
-            frozen_count = 0
-            unfrozen_count = 0
-            for name, param in self.model.tactis.named_parameters():
-                if name.startswith("flow_") or name.startswith("marginal"):
-                    param.requires_grad = False
-                    frozen_count += 1
-                elif name.startswith("copula_") or name.startswith("copula."): # Check for direct attribute 'copula' too
-                    param.requires_grad = True
-                    unfrozen_count += 1
-                else:
-                    # Default: Keep requires_grad as is, but log a warning if it's unexpected
-                    logger.debug(f"Parameter '{name}' not explicitly frozen/unfrozen.")
+            # 2. Apply parameter freezing for Stage 2
+            logger.info("Applying Stage 2 parameter freezing...")
+            self._apply_stage2_parameter_freezing()
 
-            logger.info(f"Froze {frozen_count} flow/marginal parameters. Ensured {unfrozen_count} copula parameters are trainable.")
+            # 3. MANUAL OPTIMIZATION: Create fresh optimizer with ONLY copula parameters
+            logger.info("Creating fresh Stage 2 optimizer with only copula parameters...")
+            try:
+                # Create fresh optimizer with only copula parameters (original TACTiS design)
+                fresh_optimizer = self._create_stage2_optimizer()
 
-            # 3. Update optimizer settings for the (potentially new) set of trainable parameters
-            optimizer = self.optimizers()
-            if isinstance(optimizer, list): # Handle cases with LR schedulers
-                 optimizer = optimizer[0]
+                # Store the fresh optimizer for manual optimization use
+                self._stage2_optimizer = fresh_optimizer
 
-            if optimizer:
-                 # Update LR, initial_lr, and weight_decay for all parameter groups
-                 # This is crucial for proper scheduler behavior in Stage 2
-                 for param_group in optimizer.param_groups:
-                     param_group['initial_lr'] = self.lr_stage2  # Critical for LambdaLR reference point
-                     param_group['lr'] = self.lr_stage2
-                     param_group['weight_decay'] = self.weight_decay_stage2
-                 self.log_dict({"stage": 2, "learning_rate": self.lr_stage2, "weight_decay": self.weight_decay_stage2})
-                 logger.info(f"Epoch {current_epoch}: Switched to Stage 2. Updated optimizer lr={self.lr_stage2}, weight_decay={self.weight_decay_stage2}. Parameter freezing applied.")
-                 
-                 # 4. Set up Stage 2 CosineAnnealingLR scheduler
-                 # Get steps_per_epoch from hyperparameters
-                 steps_per_epoch = self.hparams.num_batches_per_epoch
-                 
-                 # Check if steps_per_epoch is valid
-                 if steps_per_epoch is None or steps_per_epoch <= 0:
-                     logger.warning(f"Invalid num_batches_per_epoch: {steps_per_epoch}. Using 100 as default.")
-                     steps_per_epoch = 100
-                 
-                 # Calculate T_max for Stage 2 cosine annealing
-                 total_epochs_in_run = self.trainer.max_epochs
-                 epochs_in_stage2 = total_epochs_in_run - self.hparams.stage2_start_epoch
-                 
-                 # Log diagnostic information
-                 logger.info(f"Stage 2 scheduler setup - total_epochs: {total_epochs_in_run}, stage2_start_epoch: {self.hparams.stage2_start_epoch}, epochs_in_stage2: {epochs_in_stage2}")
-                 
-                 # Check if manual steps_to_decay_s2 is configured
-                 if self.steps_to_decay_s2 is not None and self.steps_to_decay_s2 > 0:
-                     T_max_s2 = self.steps_to_decay_s2
-                     logger.info(f"Using steps_to_decay_s2={T_max_s2} as T_max for Stage 2 CosineAnnealingLR.")
-                 else:
-                     # Calculate based on epochs and steps per epoch
-                     T_max_s2_calculated = steps_per_epoch * epochs_in_stage2
-                     T_max_s2 = T_max_s2_calculated
-                     logger.info(f"steps_to_decay_s2 not configured or invalid. Calculating T_max_s2 = {steps_per_epoch} * {epochs_in_stage2} = {T_max_s2}")
-                 
-                 # Ensure T_max is valid
-                 if T_max_s2 <= 0:
-                     logger.warning(f"Stage 2 Cosine Annealing duration (T_max_s2) is not positive ({T_max_s2}). Using constant LR for Stage 2.")
-                     
-                     # Update the existing warmup scheduler to a constant LR if it exists
-                     if self.warmup_scheduler_ref is not None:
-                         # Define a constant lambda function
-                         constant_lambda = lambda _: 1.0
-                         self.warmup_scheduler_ref.lr_lambdas = [constant_lambda]
-                         logger.info(f"Updated warmup scheduler to constant LR for Stage 2.")
-                         return
-                     else:
-                         logger.error("No scheduler reference available to update for Stage 2.")
-                         return
-                 
-                 # Calculate eta_min for Stage 2
-                 lr_s2 = self.hparams.lr_stage2
-                 eta_frac_s2 = self.hparams.eta_min_fraction_s2
-                 eta_min_s2 = lr_s2 * eta_frac_s2
-                 
-                 logger.info(f"Configuring Stage 2 LR scheduler: Linear warmup for {self.warmup_steps_s2} steps.")
-                 
-                 # Update Warmup Scheduler if it exists
-                 if self.warmup_scheduler_ref is not None:
-                     # Define new warmup function that starts from 0 and scales to 1.0
-                     final_warmup_steps_s2 = max(1, int(self.warmup_steps_s2))
-                     def lr_lambda_func_s2(current_step: int):
-                         if current_step < final_warmup_steps_s2 - 1:
-                             return float(current_step + 1) / float(final_warmup_steps_s2)  # current_step is 0-indexed
-                         return 1.0  # Ensure we reach exactly 1.0 at the step before milestone
-                     
-                     # Update the lambda function and reset scheduler
-                     self.warmup_scheduler_ref.lr_lambdas = [lr_lambda_func_s2]
-                     self.warmup_scheduler_ref.last_epoch = -1  # Reset for fresh warmup start
-                     
-                     # Update the base_lrs of the LambdaLR to the new lr_stage2
-                     # Fetch the optimizer again as it might be a new list/object after reconfigure
-                     current_optimizer = self.optimizers()
-                     if isinstance(current_optimizer, list):
-                         current_optimizer = current_optimizer[0]
-                     
-                     if current_optimizer:
-                         self.warmup_scheduler_ref.base_lrs = [pg['initial_lr'] for pg in current_optimizer.param_groups]
-                         logger.info(f"Updated warmup_scheduler_ref.base_lrs to: {[pg['initial_lr'] for pg in current_optimizer.param_groups]} for Stage 2.")
-                     else:
-                         logger.error("Failed to retrieve optimizer to update warmup_scheduler_ref.base_lrs for Stage 2.")
-                     
-                     logger.info(f"Updated warmup scheduler with new warmup steps: {final_warmup_steps_s2} and reset epoch counter")
-                 
-                 # Adjust T_max for cosine annealing to account for warmup steps
-                 # Only adjust if we're using the calculated value, not the manual value
-                 if self.steps_to_decay_s2 is None or self.steps_to_decay_s2 <= 0:
-                     T_max_s2 = T_max_s2 - self.warmup_steps_s2
-                     logger.info(f"Stage 2 Cosine Annealing adjusted for warmup: T_max_s2 = {T_max_s2} (after subtracting {self.warmup_steps_s2} warmup steps)")
-                 
-                 if T_max_s2 <= 0:
-                     logger.warning(f"Adjusted T_max_s2 after warmup is not positive ({T_max_s2}). Using warmup-only scheduler for Stage 2.")
-                     # In this case, we'll let the warmup scheduler handle everything
-                     # and just set cosine to have minimal effect if it exists
-                     if self.cosine_scheduler_ref is not None:
-                         self.cosine_scheduler_ref.T_max = 1
-                         self.cosine_scheduler_ref.eta_min = lr_s2  # No decay
-                         self.cosine_scheduler_ref.last_epoch = -1  # Reset internal counter
-                         logger.info(f"Set cosine scheduler to constant LR (T_max=1, eta_min=lr_s2)")
-                     
-                     # Update sequential scheduler if it exists
-                     if self.sequential_scheduler_ref is not None:
-                         self.sequential_scheduler_ref.milestones = [self.warmup_steps_s2]
-                         self.sequential_scheduler_ref.last_epoch = -1  # Reset internal counter
-                         logger.info(f"Updated sequential scheduler milestone to {self.warmup_steps_s2}")
-                     return
-                 
-                 logger.info(f"Configuring CosineAnnealingLR for Stage 2: T_max={T_max_s2}, eta_min={eta_min_s2}")
-                 
-                 # Update Cosine Scheduler if it exists
-                 if self.cosine_scheduler_ref is not None:
-                     # Update existing cosine scheduler parameters
-                     # Update cosine scheduler parameters for Stage 2
-                     self.cosine_scheduler_ref.base_lrs = [self.hparams.lr_stage2]  # Set correct base LR
-                     self.cosine_scheduler_ref.T_max = T_max_s2
-                     self.cosine_scheduler_ref.eta_min = eta_min_s2
-                     self.cosine_scheduler_ref.last_epoch = -1  # Reset internal counter
-                     logger.info(f"Updated cosine scheduler with T_max={T_max_s2}, eta_min={eta_min_s2}")
-                 
-                 # Update Sequential Scheduler if it exists
-                 if self.sequential_scheduler_ref is not None:
-                     # Update the milestone - add 1 to ensure warmup completes before transition
-                     self.sequential_scheduler_ref.milestones = [self.warmup_steps_s2]
-                     # Reset internal counter
-                     self.sequential_scheduler_ref.last_epoch = -1
-                     logger.info(f"Updated sequential scheduler with new milestone: {self.warmup_steps_s2}")
-                 else:
-                     logger.error("No sequential scheduler reference available to update.")
-            else:
-                 logger.warning(f"Epoch {current_epoch}: Tried to switch to Stage 2, but optimizer not found. Cannot update LR/WD.")
+                # Replace optimizer in trainer's internal list (for Lightning compatibility)
+                if hasattr(self.trainer, 'optimizers') and self.trainer.optimizers:
+                    self.trainer.optimizers[0] = fresh_optimizer
+                    logger.info("Successfully replaced Stage 1 optimizer with fresh Stage 2 optimizer")
+
+                # Log successful Stage 2 transition
+                self.log_dict({
+                    "stage": 2,
+                    "learning_rate": self.lr_stage2,
+                    "weight_decay": self.weight_decay_stage2,
+                    "optimizer_param_count": sum(p.numel() for p in fresh_optimizer.param_groups[0]['params'])
+                })
+
+                logger.info(f"Epoch {current_epoch}: Successfully created fresh Stage 2 optimizer")
+                logger.info(f"Stage 2 optimizer trains {sum(p.numel() for p in fresh_optimizer.param_groups[0]['params']):,} parameters (copula only)")
+
+                # Create new scheduler for Stage 2 if needed
+                self._create_stage2_scheduler(fresh_optimizer)
+
+            except Exception as e:
+                logger.error(f"Failed to create fresh Stage 2 optimizer: {e}")
+                logger.warning("Continuing with existing optimizer configuration - Stage 2 may not work correctly")
 
             self.log("stage", self.stage, on_step=False, on_epoch=True)
-                
+
+    def _unpack_batch(self, batch):
+        """Unpack batch from either tuple (PyTorch DataLoader) or dict (GluonTS DataLoader) format.
+
+        WindForecastingDataset yields tuples:
+            (past_target, future_target, past_time_feat, future_time_feat,
+             past_observed_values, future_observed_values, feat_static_cat, feat_static_real)
+
+        GluonTS DataLoader yields dicts with string keys.
+        """
+        if isinstance(batch, (list, tuple)):
+            return {
+                "past_target": batch[0],
+                "future_target": batch[1],
+                "past_time_feat": batch[2],
+                "future_time_feat": batch[3],
+                "past_observed_values": batch[4],
+                "future_observed_values": batch[5],
+                "feat_static_cat": batch[6],
+                "feat_static_real": batch[7],
+            }
+        return batch
+
     def training_step(self, batch, batch_idx: int):
         """
-        Training step.
+        Training step with manual optimization for two-stage training.
         
         Parameters
         ----------
@@ -343,8 +449,9 @@ class TACTiS2LightningModule(pl.LightningModule):
         -------
         The loss.
         """
-        # Automatic optimization handles optimizer steps, zero_grad, backward
-        
+        # Manual optimization for proper two-stage training
+        batch = self._unpack_batch(batch)
+
         # Extract data from the batch
         past_target = batch["past_target"]
         past_observed_values = batch["past_observed_values"]
@@ -384,13 +491,59 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.warning("NaN detected in loss! Replacing with large value to continue training.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
-        # Loss is returned for automatic optimization
+        # Manual optimization - get the correct optimizer based on current stage
+        if self.stage == 2 and hasattr(self, '_stage2_optimizer') and self._stage2_optimizer is not None:
+            # Use Stage 2 fresh optimizer with only copula parameters
+            opt = self._stage2_optimizer
+            sch = getattr(self, '_stage2_scheduler', None)
+        else:
+            # Use Stage 1 optimizer (all parameters)
+            opt = self.optimizers()
+            sch = self.lr_schedulers()
+        
+        # Zero gradients
+        opt.zero_grad()
+        
+        # Backward pass
+        self.manual_backward(loss)
+        
+        # Apply gradient clipping based on current stage
+        if self.stage == 1:
+            clip_val = self.hparams.gradient_clip_val_stage1
+        else:
+            clip_val = self.hparams.gradient_clip_val_stage2
+            
+        if clip_val > 0:
+            self.clip_gradients(opt, gradient_clip_val=clip_val, gradient_clip_algorithm="norm")
+        
+        # Optimizer step
+        opt.step()
+        
+        # Update learning rate scheduler
+        if sch is not None:
+            if isinstance(sch, torch.optim.lr_scheduler.ReduceLROnPlateau):
+                sch.step(loss)
+            else:
+                sch.step()
 
-        # Log the loss
+        # TRAINING METRIC: Log what's being optimized for training (stage-specific)
+        # Log both per-step (for monitoring) and per-epoch (for Optuna)
         self.log("train_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
         
-        # Manual LR logging removed as LearningRateMonitor is now working
+        # OPTUNA METRICS: Always log components for consistent optimization
+        tactis_model = getattr(self.model, 'tactis', None)
+        if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
+            if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
+                # DIAGNOSTIC: Marginal stability (should be constant in Stage 2)
+                self.log("train_marginal_logdet", tactis_model.marginal_logdet.detach(), 
+                       on_step=True, on_epoch=True, prog_bar=False)
+                
+                # OPTUNA TARGET: Consistent metric across both stages
+                total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
+                self.log("train_total_nll", total_nll.detach(), 
+                       on_step=True, on_epoch=True, prog_bar=False)
         
+        # Return loss for logging (not used for backprop anymore)
         return loss
         
     def validation_step(self, batch, batch_idx: int):
@@ -408,6 +561,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         -------
         The loss.
         """
+        batch = self._unpack_batch(batch)
+
         past_target = batch["past_target"]
         past_observed_values = batch["past_observed_values"]
         future_target = batch["future_target"]
@@ -447,8 +602,32 @@ class TACTiS2LightningModule(pl.LightningModule):
             logger.warning("NaN detected in validation loss! Replacing with large value for logging.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
         
-        # Log the validation loss
-        self.log("val_loss", loss.detach(), on_step=False, on_epoch=True, prog_bar=True)
+        # TRAINING METRIC: Log what's being optimized for training (stage-specific)
+        self.log("val_loss", loss.detach(), on_step=True, on_epoch=True, prog_bar=True)
+        
+        # DIAGNOSTIC METRICS: Always log components
+        tactis_model = getattr(self.model, 'tactis', None)
+        if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
+            if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
+                # Marginal stability (should be constant in Stage 2)
+                self.log("val_marginal_logdet", tactis_model.marginal_logdet.detach(),
+                       on_step=True, on_epoch=True, prog_bar=False)
+
+                # Total NLL (copula_loss - marginal_logdet)
+                total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
+                self.log("val_total_nll", total_nll.detach(),
+                       on_step=True, on_epoch=True, prog_bar=False)
+
+                # PHASE 2 METRIC: Copula loss only.
+                # Always logged so ModelCheckpoint(monitor='val_copula_loss') doesn't crash.
+                # Stage 1: inf (ModelCheckpoint with mode='min' will never save this as best)
+                # Stage 2: actual copula loss (what we want to optimize)
+                if self.stage >= 2 and not self.hparams.model_config.get('skip_copula', True):
+                    self.log("val_copula_loss", tactis_model.copula_loss.detach(),
+                           on_step=False, on_epoch=True, prog_bar=False)
+                else:
+                    self.log("val_copula_loss", torch.tensor(float('inf'), device=self.device),
+                           on_step=False, on_epoch=True, prog_bar=False)
         
         return loss
         
@@ -456,89 +635,94 @@ class TACTiS2LightningModule(pl.LightningModule):
         """
         Configure optimizers for training.
         
-        Returns
-        -------
-        The optimizer to use.
+        STAGE-AWARE APPROACH: 
+        - Stage 1: Create optimizer with ALL parameters (matches original TACTiS design)
+        - Stage 2: Fresh optimizer with ONLY copula parameters created during transition
+        
+        This method creates the initial Stage 1 optimizer. Stage 2 transition 
+        replaces this with a fresh optimizer containing only copula parameters.
         """
-        # Initialize optimizer with parameters for the current stage
-        current_lr = self.lr_stage1 if self.stage == 1 else self.lr_stage2
-        current_weight_decay = self.weight_decay_stage1 if self.stage == 1 else self.weight_decay_stage2
+        # Always start with Stage 1 configuration
+        # Stage 2 transition will replace this with fresh copula-only optimizer
+        initial_lr = self.lr_stage1
+        initial_weight_decay = self.weight_decay_stage1
 
-        logger.info(f"Configuring optimizer for Stage {self.stage} with lr={current_lr}, weight_decay={current_weight_decay}")
+        logger.info(f"Configuring Stage 1 optimizer with lr={initial_lr}, weight_decay={initial_weight_decay}")
 
-        optimizer = torch.optim.AdamW( # INFO: Changed from Adam to AdamW
-            self.parameters(),
-            lr=current_lr,
-            weight_decay=current_weight_decay,
+        # Create Stage 1 optimizer with ALL model parameters (original TACTiS design)
+        optimizer = torch.optim.AdamW(
+            self.model.tactis.parameters(),  # All parameters for Stage 1
+            lr=initial_lr,
+            weight_decay=initial_weight_decay,
         )
         
-        # Configure gradient clipping directly in the lightning module
-        # This helps with numerical stability by preventing extreme gradient values
-        self.automatic_optimization = True # Explicitly set to True
+        logger.info(f"Created optimizer with {len(list(self.model.tactis.parameters()))} parameters")
+        
+        # Use manual optimization for two-stage training with optimizer switching
+        self.automatic_optimization = False
         
         # Get steps_per_epoch from hyperparameters
         steps_per_epoch = self.hparams.num_batches_per_epoch
-        
-        # Check if steps_per_epoch is valid
         if steps_per_epoch is None or steps_per_epoch <= 0:
             logger.warning(f"Invalid num_batches_per_epoch: {steps_per_epoch}. Using 100 as default.")
             steps_per_epoch = 100
             
-        # Log diagnostic information
-        logger.info(f"Scheduler setup - num_batches_per_epoch: {steps_per_epoch}, stage2_start_epoch: {self.hparams.stage2_start_epoch}, warmup_steps_s1: {self.warmup_steps_s1}")
+        # Create comprehensive scheduler that handles both stages
+        logger.info(f"Scheduler setup - steps_per_epoch: {steps_per_epoch}, stage2_start_epoch: {self.hparams.stage2_start_epoch}")
         
         # For Stage 1, implement warmup + cosine annealing
         if self.stage == 1:
             # Create warmup scheduler
             if self.warmup_steps_s1 > 0:
                 logger.info(f"Configuring LR scheduler: Linear warmup for {self.warmup_steps_s1} steps.")
-                
+
                 # Define linear warmup function
                 def lr_lambda_func(current_step: int):
                     if current_step < self.warmup_steps_s1:
                         return float(current_step) / float(max(1, self.warmup_steps_s1))
                     return 1.0
-                
+
                 warmup_scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda_func)
                 self.warmup_scheduler_ref = warmup_scheduler  # Store reference
-                
+
                 # Calculate T_max for cosine annealing in Stage 1
                 # Check if manual steps_to_decay_s1 is configured
                 if self.steps_to_decay_s1 is not None and self.steps_to_decay_s1 > 0:
                     T_max_s1 = self.steps_to_decay_s1
                     logger.info(f"Using steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR.")
                 else:
-                    # Calculate based on epochs and steps per epoch
-                    epochs_in_stage1 = self.hparams.stage2_start_epoch
+                    # BUG FIX: Use actual max_epochs instead of stage2_start_epoch for scheduling
+                    actual_max_epochs = self.trainer.max_epochs if self.trainer else 30
+                    epochs_in_stage1 = min(actual_max_epochs, self.hparams.stage2_start_epoch)
                     T_max_s1_calculated = (steps_per_epoch * epochs_in_stage1) - self.warmup_steps_s1
                     T_max_s1 = T_max_s1_calculated
+                    logger.info(f"LR Scheduler Fix: Using epochs_in_stage1={epochs_in_stage1} (actual_max_epochs={actual_max_epochs}, stage2_start_epoch={self.hparams.stage2_start_epoch})")
                     logger.info(f"steps_to_decay_s1 not configured or invalid. Calculating T_max_s1 = ({steps_per_epoch} * {epochs_in_stage1}) - {self.warmup_steps_s1} = {T_max_s1}")
-                
+
                 # Ensure T_max is valid
                 if T_max_s1 <= 0:
                     logger.warning(f"Stage 1 Cosine Annealing duration (T_max_s1) is not positive ({T_max_s1}). Only applying warmup for Stage 1.")
-                    # Return only the warmup scheduler if T_max is not positive
                     return {
                         "optimizer": optimizer,
                         "lr_scheduler": {
                             "scheduler": warmup_scheduler,
-                            "interval": "step",  # Step scheduler every training step
+                            "interval": "step",
                             "frequency": 1,
                             "name": "lr_scheduler_stage1_warmup_only",
                         },
                     }
-                
+
                 # Calculate eta_min for Stage 1
                 lr_s1 = self.hparams.lr_stage1
                 eta_frac_s1 = self.hparams.eta_min_fraction_s1
                 eta_min_s1 = lr_s1 * eta_frac_s1
-                
+
                 logger.info(f"Configuring Stage 1 CosineAnnealingLR: T_max={T_max_s1}. Inputs: lr_stage1={lr_s1}, eta_min_fraction_s1={eta_frac_s1}. Calculated eta_min={eta_min_s1}")
-                
+
                 # Create cosine annealing scheduler for Stage 1
                 cosine_scheduler_s1 = CosineAnnealingLR(optimizer, T_max=T_max_s1, eta_min=eta_min_s1)
                 self.cosine_scheduler_ref = cosine_scheduler_s1  # Store reference
-                
+
                 # Create sequential scheduler that combines warmup and cosine annealing
                 sequential_scheduler_s1 = SequentialLR(
                     optimizer,
@@ -546,32 +730,32 @@ class TACTiS2LightningModule(pl.LightningModule):
                     milestones=[self.warmup_steps_s1],
                 )
                 self.sequential_scheduler_ref = sequential_scheduler_s1  # Store reference
-                
+
                 return {
                     "optimizer": optimizer,
                     "lr_scheduler": {
                         "scheduler": sequential_scheduler_s1,
-                        "interval": "step",  # Step scheduler every training step
+                        "interval": "step",
                         "frequency": 1,
                         "name": "lr_scheduler_stage1",
                     },
                 }
             else:
-                # No warmup, just cosine annealing
-                # Check if manual steps_to_decay_s1 is configured
+                # No warmup, just cosine annealing for Stage 1
                 if self.steps_to_decay_s1 is not None and self.steps_to_decay_s1 > 0:
                     T_max_s1 = self.steps_to_decay_s1
                     logger.info(f"Using scaled steps_to_decay_s1={T_max_s1} as T_max for Stage 1 CosineAnnealingLR (no warmup).")
                 else:
-                    # Calculate based on epochs and steps per epoch
-                    epochs_in_stage1 = self.hparams.stage2_start_epoch
+                    # BUG FIX: Use actual max_epochs instead of stage2_start_epoch for scheduling
+                    actual_max_epochs = self.trainer.max_epochs if self.trainer else 30
+                    epochs_in_stage1 = min(actual_max_epochs, self.hparams.stage2_start_epoch)
                     T_max_s1 = steps_per_epoch * epochs_in_stage1
+                    logger.info(f"LR Scheduler Fix (no warmup): Using epochs_in_stage1={epochs_in_stage1} (actual_max_epochs={actual_max_epochs}, stage2_start_epoch={self.hparams.stage2_start_epoch})")
                     logger.info(f"steps_to_decay_s1 not configured or invalid. Calculating T_max_s1 = {steps_per_epoch} * {epochs_in_stage1} = {T_max_s1}")
-                
+
                 # Ensure T_max is valid
                 if T_max_s1 <= 0:
                     logger.warning(f"Stage 1 Cosine Annealing duration (T_max_s1) is not positive ({T_max_s1}). Using constant LR for Stage 1.")
-                    # Return a constant LR scheduler (identity function)
                     identity_scheduler = LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
                     return {
                         "optimizer": optimizer,
@@ -582,29 +766,133 @@ class TACTiS2LightningModule(pl.LightningModule):
                             "name": "lr_scheduler_stage1_constant",
                         },
                     }
-                
+
                 # Calculate eta_min for Stage 1
                 eta_min_s1 = self.hparams.lr_stage1 * self.hparams.eta_min_fraction_s1
-                
+
                 logger.info(f"Configuring Stage 1 CosineAnnealingLR (no warmup): T_max={T_max_s1}, calculated eta_min={eta_min_s1} (lr_stage1={self.hparams.lr_stage1}, eta_min_fraction_s1={self.hparams.eta_min_fraction_s1})")
-                
+
                 # Create cosine annealing scheduler for Stage 1
                 cosine_scheduler_s1 = CosineAnnealingLR(optimizer, T_max=T_max_s1, eta_min=eta_min_s1)
                 self.cosine_scheduler_ref = cosine_scheduler_s1  # Store reference
-                
+
                 return {
                     "optimizer": optimizer,
                     "lr_scheduler": {
                         "scheduler": cosine_scheduler_s1,
-                        "interval": "step",  # Step scheduler every training step
+                        "interval": "step",
                         "frequency": 1,
-                        "name": "lr_scheduler_stage1",
+                        "name": "lr_scheduler_stage1_cosine",
                     },
                 }
         else:
-            # For Stage 2, the scheduler will be set in on_train_epoch_start
-            logger.info(f"Stage 2 scheduler will be configured during on_train_epoch_start.")
-            return optimizer
+            # For Stage 2-only training (initial_stage=2), configure scheduler here
+            # For two-stage training (1→2 transition), scheduler is updated in on_train_epoch_start
+            logger.info(f"Configuring Stage 2 scheduler in configure_optimizers (Stage 2-only or initial setup).")
+
+            # Create warmup scheduler for Stage 2 if enabled
+            if self.warmup_steps_s2 > 0:
+                logger.info(f"Configuring LR scheduler: Linear warmup for {self.warmup_steps_s2} steps (Stage 2).")
+
+                # Define linear warmup function for Stage 2
+                def lr_lambda_func_s2(current_step: int):
+                    if current_step < self.warmup_steps_s2:
+                        return float(current_step) / float(max(1, self.warmup_steps_s2))
+                    return 1.0
+
+                warmup_scheduler_s2 = LambdaLR(optimizer, lr_lambda=lr_lambda_func_s2)
+                self.warmup_scheduler_ref = warmup_scheduler_s2  # Store reference
+
+                # Calculate T_max for cosine annealing in Stage 2
+                if self.steps_to_decay_s2 is not None and self.steps_to_decay_s2 > 0:
+                    T_max_s2 = self.steps_to_decay_s2
+                    logger.info(f"Using steps_to_decay_s2={T_max_s2} as T_max for Stage 2 CosineAnnealingLR.")
+                else:
+                    actual_max_epochs = self.trainer.max_epochs if self.trainer else 30
+                    epochs_in_stage2 = actual_max_epochs  # All epochs are Stage 2
+                    T_max_s2_calculated = (steps_per_epoch * epochs_in_stage2) - self.warmup_steps_s2
+                    T_max_s2 = T_max_s2_calculated
+                    logger.info(f"Stage 2 Scheduler: Using epochs_in_stage2={epochs_in_stage2} (actual_max_epochs={actual_max_epochs})")
+                    logger.info(f"steps_to_decay_s2 not configured or invalid. Calculating T_max_s2 = ({steps_per_epoch} * {epochs_in_stage2}) - {self.warmup_steps_s2} = {T_max_s2}")
+
+                if T_max_s2 <= 0:
+                    logger.warning(f"Stage 2 Cosine Annealing duration (T_max_s2) is not positive ({T_max_s2}). Only applying warmup for Stage 2.")
+                    return {
+                        "optimizer": optimizer,
+                        "lr_scheduler": {
+                            "scheduler": warmup_scheduler_s2,
+                            "interval": "step",
+                            "frequency": 1,
+                            "name": "lr_scheduler_stage2_warmup_only",
+                        },
+                    }
+
+                lr_s2 = self.hparams.lr_stage2
+                eta_frac_s2 = self.hparams.eta_min_fraction_s2
+                eta_min_s2 = lr_s2 * eta_frac_s2
+
+                logger.info(f"Configuring Stage 2 CosineAnnealingLR: T_max={T_max_s2}. Inputs: lr_stage2={lr_s2}, eta_min_fraction_s2={eta_frac_s2}. Calculated eta_min={eta_min_s2}")
+
+                cosine_scheduler_s2 = CosineAnnealingLR(optimizer, T_max=T_max_s2, eta_min=eta_min_s2)
+                self.cosine_scheduler_ref = cosine_scheduler_s2  # Store reference
+
+                sequential_scheduler_s2 = SequentialLR(
+                    optimizer,
+                    schedulers=[warmup_scheduler_s2, cosine_scheduler_s2],
+                    milestones=[self.warmup_steps_s2],
+                )
+                self.sequential_scheduler_ref = sequential_scheduler_s2  # Store reference
+
+                return {
+                    "optimizer": optimizer,
+                    "lr_scheduler": {
+                        "scheduler": sequential_scheduler_s2,
+                        "interval": "step",
+                        "frequency": 1,
+                        "name": "lr_scheduler_stage2",
+                    },
+                }
+            else:
+                # No warmup, just cosine annealing for Stage 2
+                if self.steps_to_decay_s2 is not None and self.steps_to_decay_s2 > 0:
+                    T_max_s2 = self.steps_to_decay_s2
+                    logger.info(f"Using steps_to_decay_s2={T_max_s2} as T_max for Stage 2 CosineAnnealingLR (no warmup).")
+                else:
+                    actual_max_epochs = self.trainer.max_epochs if self.trainer else 30
+                    epochs_in_stage2 = actual_max_epochs  # All epochs are Stage 2
+                    T_max_s2 = steps_per_epoch * epochs_in_stage2
+                    logger.info(f"Stage 2 Scheduler (no warmup): Using epochs_in_stage2={epochs_in_stage2} (actual_max_epochs={actual_max_epochs})")
+                    logger.info(f"steps_to_decay_s2 not configured or invalid. Calculating T_max_s2 = {steps_per_epoch} * {epochs_in_stage2} = {T_max_s2}")
+
+                if T_max_s2 <= 0:
+                    logger.warning(f"Stage 2 Cosine Annealing duration (T_max_s2) is not positive ({T_max_s2}). Using constant LR for Stage 2.")
+                    identity_scheduler_s2 = LambdaLR(optimizer, lr_lambda=lambda _: 1.0)
+                    return {
+                        "optimizer": optimizer,
+                        "lr_scheduler": {
+                            "scheduler": identity_scheduler_s2,
+                            "interval": "step",
+                            "frequency": 1,
+                            "name": "lr_scheduler_stage2_constant",
+                        },
+                    }
+
+                eta_min_s2 = self.hparams.lr_stage2 * self.hparams.eta_min_fraction_s2
+
+                logger.info(f"Configuring Stage 2 CosineAnnealingLR (no warmup): T_max={T_max_s2}, calculated eta_min={eta_min_s2} (lr_stage2={self.hparams.lr_stage2}, eta_min_fraction_s2={self.hparams.eta_min_fraction_s2})")
+
+                cosine_scheduler_s2 = CosineAnnealingLR(optimizer, T_max=T_max_s2, eta_min=eta_min_s2)
+                self.cosine_scheduler_ref = cosine_scheduler_s2  # Store reference
+
+                return {
+                    "optimizer": optimizer,
+                    "lr_scheduler": {
+                        "scheduler": cosine_scheduler_s2,
+                        "interval": "step",
+                        "frequency": 1,
+                        "name": "lr_scheduler_stage2",
+                    },
+                }
     
     def configure_gradient_clipping(self, optimizer, gradient_clip_val, gradient_clip_algorithm=None):
         """

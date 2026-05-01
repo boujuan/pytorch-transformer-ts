@@ -33,6 +33,7 @@ class TACTiS(nn.Module):
         copula_temporal_encoder: Optional[Dict[str, Any]] = None, # Kept for potential future use
         copula_decoder: Optional[Dict[str, Any]] = None,
         skip_copula: bool = True,
+        lock_skip_copula: bool = False,  # Prevent automatic skip_copula updates when True
         encoder_type: str = "standard",
         stage: int = 1,
         stage1_activation_function: str = "ReLU",
@@ -91,6 +92,7 @@ class TACTiS(nn.Module):
         self.input_encoding_normalization = input_encoding_normalization
         self.loss_normalization = loss_normalization
         self.skip_copula = skip_copula
+        self.lock_skip_copula = lock_skip_copula
         self.bagging_size = bagging_size
         self.encoder_type = encoder_type
         self.stage1_activation_function = stage1_activation_function
@@ -517,12 +519,22 @@ class TACTiS(nn.Module):
         loss_batch = copula_loss_batch - marginal_logdet_batch # Shape [B]
 
         # Final scalar loss is the mean over the batch
-        loss = loss_batch.mean()
+        total_loss = loss_batch.mean()
+        
+        # CRITICAL FIX: In Stage 2, use only copula_loss for backpropagation
+        # The marginal_logdet is constant (frozen parameters) and dominates the gradient signal
+        if self.stage == 2 and not self.skip_copula:
+            # Use only copula loss for gradient computation in Stage 2
+            loss_for_backprop = copula_loss_batch.mean()
+            logger.debug(f"Stage 2: Using copula_loss ({loss_for_backprop:.4f}) for backprop, not total_loss ({total_loss:.4f})")
+        else:
+            # Stage 1: Use total loss as before
+            loss_for_backprop = total_loss
 
         # Return output (pred_value for training) and loss
         output = pred_value # For training, return target as "output"
 
-        return output, loss
+        return output, loss_for_backprop
 
     def sample(
         self,
@@ -756,10 +768,13 @@ class TACTiS(nn.Module):
         logger.info(f"TACTiS model: Setting stage to {stage}")
         self.stage = stage
 
-        # Update skip_copula flag based on the new stage
-        self.skip_copula = (stage == 1)
-        if hasattr(self.decoder, 'skip_copula'):
-             self.decoder.skip_copula = self.skip_copula
+        # Update skip_copula flag based on the new stage (unless locked)
+        if not self.lock_skip_copula:
+            self.skip_copula = (stage == 1)
+            if hasattr(self.decoder, 'skip_copula'):
+                self.decoder.skip_copula = self.skip_copula
+        else:
+            logger.info(f"TACTiS model: lock_skip_copula is True, keeping skip_copula={self.skip_copula}")
 
         # We don't need to initialize components here anymore as they should already
         # be initialized properly based on the stage parameter in __init__

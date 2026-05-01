@@ -51,11 +51,15 @@ class TACTiS2Model(nn.Module):
         decoder_transformer_embedding_dim_per_head: int,
         decoder_transformer_num_heads: int,
         decoder_num_bins: int, # Corresponds to AttentionalCopula resolution
+        ac_mlp_num_layers: int = 2, # AttentionalCopula MLP layers
+        ac_activation_function: str = "relu", # AttentionalCopula activation function
         bagging_size: Optional[int] = None,
         input_encoding_normalization: bool = True,
         loss_normalization: str = "series",
         encoder_type: str = "standard",
         dropout_rate: float = 0.1,
+        skip_copula: bool = True,
+        lock_skip_copula: bool = False,
         # Activation function parameters
         stage1_activation_function: str = "ReLU",  # Added parameter for stage 1 activation
         stage2_activation_function: str = "ReLU",  # Added parameter for stage 2 activation
@@ -90,6 +94,10 @@ class TACTiS2Model(nn.Module):
             Number of layers in the flow input encoder.
         copula_input_encoder_layers
             Number of layers in the copula input encoder.
+        ac_mlp_num_layers
+            Number of MLP layers in the AttentionalCopula component.
+        ac_activation_function
+            Activation function to use in the AttentionalCopula component.
         bagging_size
             Size of the bagging ensemble. If None, no bagging is performed.
         input_encoding_normalization
@@ -124,6 +132,14 @@ class TACTiS2Model(nn.Module):
         # Store activation function parameters
         self.stage1_activation_function = stage1_activation_function
         self.stage2_activation_function = stage2_activation_function
+
+        # Store stage control parameters
+        self.skip_copula = skip_copula
+        self.lock_skip_copula = lock_skip_copula
+
+        # AttentionalCopula specific parameters (standardized naming)
+        self.ac_mlp_num_layers = ac_mlp_num_layers
+        self.ac_activation_function = ac_activation_function
         
         # GluonTS compatibility parameters
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -218,8 +234,8 @@ class TACTiS2Model(nn.Module):
                 "attention_heads": decoder_transformer_num_heads,
                 "attention_layers": decoder_transformer_num_layers,
                 "attention_dim": decoder_transformer_embedding_dim_per_head, # Dim per head
-                "mlp_layers": 2, # Default value, will be overridden if provided
-                "mlp_dim": decoder_transformer_d_model * 4, # Default value, will be overridden if provided
+                "mlp_layers": self.ac_mlp_num_layers,
+                "mlp_dim": decoder_transformer_d_model * 4, # Standard practice
                 "resolution": decoder_num_bins,
                 "dropout": dropout_rate, # Use configured dropout
                 "attention_mlp_class": "_easy_mlp", # Default value
@@ -233,6 +249,7 @@ class TACTiS2Model(nn.Module):
                 "flow_hid_dim": decoder_dsf_hidden_dim,
             },
             "skip_copula": False, # Will be controlled by LightningModule stage
+            "lock_skip_copula": lock_skip_copula, # Prevent automatic skip_copula updates
         }
 
         # Apply AttentionalCopula custom parameters if provided
@@ -261,8 +278,12 @@ class TACTiS2Model(nn.Module):
             flow_temporal_encoder=flow_temporal_encoder_args, # Using flow_encoder args for now
             copula_temporal_encoder=copula_temporal_encoder_args, # Using copula_encoder args for now
             copula_decoder=copula_decoder_args,
+            skip_copula=self.skip_copula,
+            lock_skip_copula=self.lock_skip_copula,
             encoder_type=encoder_type,
             stage=stage,  # Pass the stage parameter to TACTiS
+            stage1_activation_function=self.stage1_activation_function,
+            stage2_activation_function=self.stage2_activation_function,
         )
     
     @property

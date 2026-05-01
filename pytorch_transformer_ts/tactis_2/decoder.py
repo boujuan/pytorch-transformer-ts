@@ -283,8 +283,18 @@ class CopulaDecoder(nn.Module):
         # Extract prediction period encodings
         pred_encoded_flow_flat = flow_encoded_merged[:, pred_indices_n, :]  # [B, S*pred_len, D_flow]
 
+        # Enhanced logging for debugging
+        logger.info(f"🔍 DECODER SAMPLING STATE:")
+        logger.info(f"   - skip_copula = {self.skip_copula}")
+        logger.info(f"   - copula_encoded is None = {copula_encoded_merged is None}")
+        logger.info(f"   - copula exists = {self.copula is not None}")
+        logger.info(f"   - num_samples = {num_samples}")
+        logger.info(f"   - prediction steps = {num_pred_steps}")
+        logger.info(f"   - series count = {S}")
+        
         # Generate samples in U(0,1) space
         if not self.skip_copula and copula_encoded_merged is not None and self.copula is not None:
+            logger.info("✅ Using COPULA sampling (Stage 2 - correlated samples)")
             # Use Copula to sample correlated U values (Stage 2)
             hist_encoded_copula_flat = copula_encoded_merged[:, hist_indices_n, :]  # [B, S*hist_len, D_copula]
             pred_encoded_copula_flat = copula_encoded_merged[:, pred_indices_n, :]  # [B, S*pred_len, D_copula]
@@ -297,6 +307,11 @@ class CopulaDecoder(nn.Module):
             )
         else:
             # Stage 1 or Copula skipped: Sample uniformly (independent samples)
+            logger.warning("⚠️  FALLBACK TO UNIFORM SAMPLING (Stage 1 behavior):")
+            logger.warning(f"   - This will produce INDEPENDENT samples with minimal variation")
+            logger.warning(f"   - skip_copula = {self.skip_copula}")
+            logger.warning(f"   - copula_encoded available = {copula_encoded_merged is not None}")
+            logger.warning(f"   - copula initialized = {self.copula is not None}")
             N_pred = S * num_pred_steps
             pred_samples_u_flat = torch.rand(B, N_pred, num_samples, device=device)  # [B, S*pred_len, num_samples]
 

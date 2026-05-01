@@ -412,7 +412,7 @@ class InformerEstimator(PyTorchLightningEstimator):
         
         from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
         return WindForecastingDatamodule(
-            train_data_path=train_data_path, 
+            train_data_path=train_data_path,
             val_data_path=val_data_path, 
             train_sampler=self.train_sampler, 
             context_length=self.context_length,
@@ -563,7 +563,7 @@ class InformerEstimator(PyTorchLightningEstimator):
             scaling=self.scaling,
             num_parallel_samples=self.num_parallel_samples,
         )
-        # TODO HIGH this is not robust to the case that self.num_batches_per_epoch is None, try to patch with true_num_batches_per_epoch
+        # NOTE: Handling for None num_batches_per_epoch via true_num_batches_per_epoch with fallback logic below
         
         # Calculate absolute steps from fractional values if needed
         # This allows setting warmup/decay as fractions of each training stage
@@ -571,18 +571,35 @@ class InformerEstimator(PyTorchLightningEstimator):
         
         # Calculate effective batches per epoch considering limit_train_batches and DDP
         effective_batches_per_epoch = self.true_num_batches_per_epoch
-        
+
+        # First, resolve None case for effective_batches_per_epoch BEFORE any DDP adjustments
+        if effective_batches_per_epoch is None:
+            # If still None, use limit_train_batches from trainer_kwargs as fallback
+            limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
+            if limit_train_batches is not None and limit_train_batches != "null":
+                try:
+                    effective_batches_per_epoch = int(limit_train_batches)
+                    logger.info(f"Using limit_train_batches as fallback for effective_batches_per_epoch: {effective_batches_per_epoch}")
+                except (ValueError, TypeError):
+                    effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
+                    logger.warning(f"Could not parse limit_train_batches, using fallback: {effective_batches_per_epoch}")
+            else:
+                effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
+                logger.warning(f"No limit_train_batches found, using fallback: {effective_batches_per_epoch}")
+
+            self.true_num_batches_per_epoch = effective_batches_per_epoch
+
         # Adjust for distributed training (DDP) - data is split across GPUs
         strategy = self.trainer_kwargs.get("strategy")
         devices = self.trainer_kwargs.get("devices", 1)
-        
+
         # Check if using DDP strategy (handles both string and object forms)
         is_ddp = False
         if strategy == "ddp":
             is_ddp = True
         elif hasattr(strategy, "__class__") and "DDP" in strategy.__class__.__name__:
             is_ddp = True
-        
+
         if is_ddp and devices > 1:
             # In DDP, each GPU processes 1/devices of the data per epoch
             original_batches = effective_batches_per_epoch
@@ -590,46 +607,28 @@ class InformerEstimator(PyTorchLightningEstimator):
             logger.info(f"DDP detected ({devices} GPUs): adjusting steps per epoch {original_batches:,} -> {effective_batches_per_epoch:,}")
         elif devices > 1:
             logger.info(f"Multi-GPU detected ({devices} devices) but strategy={strategy} - no step adjustment applied")
-        
-        # First, check for trainer limit_train_batches setting
+
+        # Check for trainer limit_train_batches setting (may cap effective batches)
         limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
         if limit_train_batches is not None and limit_train_batches != "null":
-            # If limit_train_batches is set, that becomes our effective batch count
             try:
                 limit_value = int(limit_train_batches)
-                if limit_value > 0:
+                if limit_value > 0 and limit_value < effective_batches_per_epoch:
                     original_batches = effective_batches_per_epoch
-                    effective_batches_per_epoch = min(effective_batches_per_epoch or limit_value, limit_value)
-                    logger.info(f"limit_train_batches detected: {original_batches} -> {effective_batches_per_epoch}")
+                    effective_batches_per_epoch = limit_value
+                    logger.info(f"limit_train_batches detected: capping {original_batches} -> {effective_batches_per_epoch}")
             except (ValueError, TypeError):
                 # If it's not a valid number, ignore it
                 pass
-        
-        if effective_batches_per_epoch:
-            # Calculate total steps per stage using the correctly adjusted batch count
-            steps = max_epochs * effective_batches_per_epoch if effective_batches_per_epoch else 0
-        
-        if effective_batches_per_epoch is None:
-            # Store the calculated effective batches per epoch for use in checkpoint saving
-            # If still None, use limit_train_batches from trainer_kwargs as fallback
-            limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
-            if limit_train_batches is not None and limit_train_batches != "null":
-                try:
-                    effective_batches_per_epoch = int(limit_train_batches)
-                    logger.info(f"Using limit_train_batches as fallback: {effective_batches_per_epoch}")
-                except (ValueError, TypeError):
-                    effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
-                    logger.warning(f"Could not parse limit_train_batches, using fallback: {effective_batches_per_epoch}")
-            else:
-                effective_batches_per_epoch = self.num_batches_per_epoch or 50  # Final fallback
-                logger.warning(f"No limit_train_batches found, using fallback: {effective_batches_per_epoch}")
-        
-            self.true_num_batches_per_epoch = effective_batches_per_epoch   
-        
+
+        # Calculate total steps for scheduler using the correctly adjusted batch count
+        steps = max_epochs * effective_batches_per_epoch
+
         logger.info(f"Training schedule calculation:")
         logger.info(f"  Max epochs: {max_epochs}")
         logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch}")
-        logger.info(f" Stored true_num_batches_per_epoch: {self.true_num_batches_per_epoch}")
+        logger.info(f"  Total training steps: {steps}")
+        logger.info(f"  Stored true_num_batches_per_epoch: {self.true_num_batches_per_epoch}")
         
         resolved_warmup = resolve_steps(self.warmup_steps, steps, "warmup_steps")
         resolved_decay = resolve_steps(self.steps_to_decay, steps, "steps_to_decay")

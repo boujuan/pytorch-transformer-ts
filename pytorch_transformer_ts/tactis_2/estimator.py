@@ -108,6 +108,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         ac_mlp_dim: int = 128,      # Default: Dimension of AC's internal MLP layers
         stage2_activation_function: str = "ReLU", # Default: Activation in Stage 2 components (copula input encoder, copula main encoder, AC MLP)
         stage1_activation_function: str = "ReLU", # Activation function for Stage 1 components (flow input encoder, flow main encoder, marginal conditioner)
+        lock_skip_copula: bool = False,  # If True, prevents automatic skip_copula updates when changing stages
+        skip_copula: bool = True,  # If True, skips copula components (Stage 1 training)
         # Passed to TACTiS2LightningModule
         initial_stage: int = 1,
         stage2_start_epoch: int = 10,
@@ -118,8 +120,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         dropout_rate: float = 0.1,
         gradient_clip_val_stage1: float = 1000.0,
         gradient_clip_val_stage2: float = 1000.0,
-        warmup_steps_s1 = 1000, # Warmup steps for stage 1 (int=absolute, float=fraction of stage)
-        warmup_steps_s2 = 500,  # Warmup steps for stage 2 (int=absolute, float=fraction of stage)
+        warmup_steps_s1 = 0.15, # Warmup steps for stage 1 (int=absolute, float=fraction of stage)
+        warmup_steps_s2 = 0.08,  # Warmup steps for stage 2 (int=absolute, float=fraction of stage)
         # General Estimator arguments
         use_lazyframe: bool = False,
         num_feat_dynamic_real: int = 0,
@@ -141,8 +143,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         validation_sampler: Optional[InstanceSampler] = None,
         input_size: int = 1, # Number of target series
         use_pytorch_dataloader: bool = False,
-        **kwargs,        
+        phase1_checkpoint_path: str = None,
+        **kwargs,
     ) -> None:
+        self.phase1_checkpoint_path = phase1_checkpoint_path
+
         # Prepare base trainer kwargs
         trainer_kwargs = {
             "max_epochs": 100,
@@ -189,6 +194,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.stage1_activation_function = stage1_activation_function
         # Training stage / optimizer params
         self.initial_stage = initial_stage
+        self.skip_copula = skip_copula
+        self.lock_skip_copula = lock_skip_copula
         self.stage2_start_epoch = stage2_start_epoch
         self.eta_min_fraction_s1 = eta_min_fraction_s1  # Store eta_min fractions
         self.eta_min_fraction_s2 = eta_min_fraction_s2
@@ -205,7 +212,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.steps_to_decay_s2 = steps_to_decay_s2 # Store manual T_max value for stage 2
         self.base_batch_size_for_scheduler_steps = base_batch_size_for_scheduler_steps
         self.base_limit_train_batches = base_limit_train_batches
- 
+
         # Common parameters
         self.input_size = input_size
         self.num_feat_dynamic_real = num_feat_dynamic_real
@@ -244,82 +251,186 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
     def get_params(trial, tuning_phase: int = 0, dynamic_kwargs: Optional[Dict[str, Any]] = None):
         """
         Get parameters for hyperparameter tuning.
-        
+
         Parameters
         ----------
         trial
             Optuna trial object.
         tuning_phase
-            The current phase of tuning (default: 0).
+            The current phase of tuning:
+            - 1: Stage 1 (marginals only) - tune marginal/flow/decoder parameters
+            - 2: Stage 2 (copula only) - tune copula/ac_mlp parameters
+            - 0: Legacy (all parameters) - for backward compatibility
         dynamic_kwargs
             Optional dictionary of dynamic keyword arguments.
-        
+
         Returns
         -------
         Dict of parameter values.
         """
         if dynamic_kwargs is None:
             dynamic_kwargs = {}
-        # Optional logging
-        logger.debug(f"get_params called with tuning_phase={tuning_phase}, dynamic_kwargs={dynamic_kwargs}")
+
+        # Log tuning phase for clarity
+        logger.info(f"get_params called with tuning_phase={tuning_phase}")
         if dynamic_kwargs and 'resample_freq' in dynamic_kwargs:
             logger.debug(f"Available resample frequencies: {dynamic_kwargs['resample_freq']}")
             # Could potentially use dynamic_kwargs['resample_freq'] to adjust search space
-            
-        params = {
-            # --- General ---
-            # "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [3, 4, 5])),
-            "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [10])),
-            "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
-            "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu"])), # Tune activation for Stage 2 components
-            "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
-            "batch_size": trial.suggest_categorical("batch_size", [64, 128, 256, 512]), # Tune batch size
 
-            # --- Marginal CDF Encoder ---
-            "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [16, 32, 64, 128, 256, 512])),
-            "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
-            "marginal_num_layers": trial.suggest_int("marginal_num_layers", 3, 5),
-            "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 5),
-            "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", dynamic_kwargs.get("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256])), # Renamed from marginal_ts_embedding_dim
+        # Common parameters used in all phases
+        # For Stage 2 tuning with fixed Stage 1 params, these may be provided directly
+        stage1_fixed = dynamic_kwargs.get("stage1_fixed_params", {})
 
-            # --- Attentional Copula Encoder ---
-            "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
-            "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
-            "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 3),
-            "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 2, 4),
-            "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])), # Renamed from copula_ts_embedding_dim
+        if stage1_fixed:
+            # Use fixed values from Stage 1 (for independent Stage 2 tuning)
+            logger.info(f"Using fixed common params from Stage 1: {list(stage1_fixed.keys())}")
+            common_params = {
+                "context_length_factor": stage1_fixed.get("context_length_factor"),
+                "encoder_type": stage1_fixed.get("encoder_type"),
+                "batch_size": stage1_fixed.get("batch_size"),
+                "dropout_rate": stage1_fixed.get("dropout_rate"),
+                "loss_normalization": stage1_fixed.get("loss_normalization", "series"),
+            }
+        else:
+            # Suggest normally (for Stage 1 or sequential Stage 1→2 training)
+            common_params = {
+                "context_length_factor": trial.suggest_categorical("context_length_factor", dynamic_kwargs.get("context_length_factor", [8, 10, 15, 20, 25])),
+                "encoder_type": trial.suggest_categorical("encoder_type", ["standard", "temporal"]),
+                "batch_size": trial.suggest_categorical("batch_size", [32, 64, 128, 256, 512]),
+                "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])),
+                "loss_normalization": trial.suggest_categorical("loss_normalization", ["none", "series", "timesteps", "both"]),
+            }
 
-            # --- Attentional Copula MLP (Aligned with AttentionalCopula class) ---
-            "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 3, 6), # Tune number of layers
-            "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])), # Tune layer dimension
+        if tuning_phase == 1:  # Stage 1: Marginals only
+            logger.info("Stage 1 tuning: Only marginal/flow/decoder parameters will be tuned")
+            # Disable copula and prevent stage transition — all epochs are pure Stage 1
+            common_params["skip_copula"] = True
+            common_params["lock_skip_copula"] = True
+            common_params["stage2_start_epoch"] = 9999
+            stage1_params = {
+                # Stage 1 activation function
+                "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
 
-            # --- Decoder ---
-            "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
-            "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", dynamic_kwargs.get("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512])),
-            "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
-            "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", dynamic_kwargs.get("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256])),
-            "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
-            "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", dynamic_kwargs.get("decoder_transformer_embedding_dim_per_head", [32, 64, 128])),
-            "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 5),
-            "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [50, 100, 200, 300])), # Corresponds to AttentionalCopula resolution
+                # --- Marginal CDF Encoder ---
+                "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [16, 32, 64, 128, 256, 512])),
+                "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
+                "marginal_num_layers": trial.suggest_int("marginal_num_layers", 3, 5),
+                "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 5),
+                "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", dynamic_kwargs.get("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256])),
 
-            # --- Optimizer Params ---
-            "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
-            "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
-            "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
-            "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
+                # --- Decoder ---
+                "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
+                "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", dynamic_kwargs.get("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512])),
+                "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
+                "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", dynamic_kwargs.get("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256])),
+                "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
+                "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", dynamic_kwargs.get("decoder_transformer_embedding_dim_per_head", [32, 64, 128])),
+                "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 5),
+                "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [50, 100, 200, 300])),
 
-            # --- Dropout & Clipping ---
-            "dropout_rate": trial.suggest_categorical("dropout_rate", dynamic_kwargs.get("dropout_rate", [0.005, 0.006, 0.007, 0.008, 0.009, 0.01, 0.015])), # Tune dropout rate
-            "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 3.0, 5.0])),
-            "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 3.0, 5.0, 10.0])),
+                # --- Stage 1 Optimizer ---
+                "lr_stage1": trial.suggest_float("lr_stage1", 5e-6, 1e-3, log=True),
+                "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
+                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 0.5, 1.0, 3.0, 5.0])),
+                "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.01, log=True),
 
-            # --- LR Scheduler Params ---
-            "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.05, log=True), # Tune eta_min fraction for Stage 1
-            "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-5, 0.01, log=True), # Tune eta_min fraction for Stage 2
+                # --- Bagging ---
+                "bagging_size": trial.suggest_categorical("bagging_size", dynamic_kwargs.get("bagging_size", [None, 64, 128, 256])),
+            }
+            return {**common_params, **stage1_params}
 
-        }
-        return params
+        elif tuning_phase == 2:  # Stage 2: Copula only
+            logger.info("Stage 2 tuning: Only copula/ac_mlp parameters will be tuned")
+
+            # Pass through ALL Stage 1 architecture params so the model is built
+            # with the same marginal/flow/decoder config that Phase 1 optimized.
+            # Without this, the estimator would use YAML defaults instead of Phase 1's best.
+            stage1_arch_params = {k: v for k, v in stage1_fixed.items() if k not in common_params}
+            logger.info(f"Phase 2: Injecting {len(stage1_arch_params)} Stage 1 architecture params: {list(stage1_arch_params.keys())}")
+
+            # Phase 2 loads Phase 1 checkpoint → starts directly in Stage 2
+            # No stage2_start_epoch tuning needed (no Stage 1 warm-up)
+            common_params["initial_stage"] = 2
+            common_params["stage2_start_epoch"] = 0
+            common_params["skip_copula"] = False
+            common_params["lock_skip_copula"] = False
+            stage2_params = {
+                # Stage 2 activation function — relu (sharp) vs gelu (smooth transformer standard)
+                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu"])),
+
+                # --- Attentional Copula Encoder ---
+                "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
+                "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
+                "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 3),
+                "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 2, 4),
+                "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])),
+
+                # --- Attentional Copula MLP ---
+                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 1, 4),
+                "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])),
+
+                # --- Stage 2 Optimizer ---
+                "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 5e-4, log=True),
+                "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
+                "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0.5, 1.0, 3.0, 5.0, 10.0])),
+                "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-3, 0.01, log=True),
+            }
+            return {**common_params, **stage1_arch_params, **stage2_params}
+
+        else:  # Legacy mode (tuning_phase == 0): All parameters for backward compatibility
+            logger.warning(f"Legacy tuning mode (tuning_phase={tuning_phase}): All parameters will be tuned. Consider using tuning_phase=1 or 2 for efficiency.")
+            common_params["stage2_start_epoch"] = trial.suggest_categorical(
+                "stage2_start_epoch",
+                dynamic_kwargs.get("stage2_start_epoch", [5, 10, 15, 20]),
+            )
+            legacy_params = {
+                "stage2_activation_function": trial.suggest_categorical("stage2_activation_function", dynamic_kwargs.get("stage2_activation_function", ["relu", "gelu", "swish", "mish"])),
+                "stage1_activation_function": trial.suggest_categorical("stage1_activation_function", dynamic_kwargs.get("stage1_activation_function", ["relu"])),
+
+                # --- Marginal CDF Encoder ---
+                "marginal_embedding_dim_per_head": trial.suggest_categorical("marginal_embedding_dim_per_head", dynamic_kwargs.get("marginal_embedding_dim_per_head", [16, 32, 64, 128, 256, 512])),
+                "marginal_num_heads": trial.suggest_int("marginal_num_heads", 2, 6),
+                "marginal_num_layers": trial.suggest_int("marginal_num_layers", 3, 5),
+                "flow_input_encoder_layers": trial.suggest_int("flow_input_encoder_layers", 3, 5),
+                "flow_series_embedding_dim": trial.suggest_categorical("flow_series_embedding_dim", dynamic_kwargs.get("flow_series_embedding_dim", [5, 8, 16, 32, 64, 128, 256])),
+
+                # --- Attentional Copula Encoder ---
+                "copula_embedding_dim_per_head": trial.suggest_categorical("copula_embedding_dim_per_head", dynamic_kwargs.get("copula_embedding_dim_per_head", [8, 16, 32, 64, 128, 256])),
+                "copula_num_heads": trial.suggest_int("copula_num_heads", 2, 6),
+                "copula_num_layers": trial.suggest_int("copula_num_layers", 1, 3),
+                "copula_input_encoder_layers": trial.suggest_int("copula_input_encoder_layers", 2, 4),
+                "copula_series_embedding_dim": trial.suggest_categorical("copula_series_embedding_dim", dynamic_kwargs.get("copula_series_embedding_dim", [16, 32, 48, 64, 128, 256])),
+
+                # --- Attentional Copula MLP ---
+                "ac_mlp_num_layers": trial.suggest_int("ac_mlp_num_layers", 1, 6),
+                "ac_mlp_dim": trial.suggest_categorical("ac_mlp_dim", dynamic_kwargs.get("ac_mlp_dim", [32, 64, 128, 256])),
+
+                # --- Decoder ---
+                "decoder_dsf_num_layers": trial.suggest_int("decoder_dsf_num_layers", 1, 4),
+                "decoder_dsf_hidden_dim": trial.suggest_categorical("decoder_dsf_hidden_dim", dynamic_kwargs.get("decoder_dsf_hidden_dim", [48, 64, 128, 256, 512])),
+                "decoder_mlp_num_layers": trial.suggest_int("decoder_mlp_num_layers", 2, 5),
+                "decoder_mlp_hidden_dim": trial.suggest_categorical("decoder_mlp_hidden_dim", dynamic_kwargs.get("decoder_mlp_hidden_dim", [8, 16, 32, 48, 64, 128, 256])),
+                "decoder_transformer_num_layers": trial.suggest_int("decoder_transformer_num_layers", 2, 5),
+                "decoder_transformer_embedding_dim_per_head": trial.suggest_categorical("decoder_transformer_embedding_dim_per_head", dynamic_kwargs.get("decoder_transformer_embedding_dim_per_head", [32, 64, 128])),
+                "decoder_transformer_num_heads": trial.suggest_int("decoder_transformer_num_heads", 3, 5),
+                "decoder_num_bins": trial.suggest_categorical("decoder_num_bins", dynamic_kwargs.get("decoder_num_bins", [50, 100, 200, 300])),
+
+                # --- Optimizer Params ---
+                "lr_stage1": trial.suggest_float("lr_stage1", 2e-6, 1e-5, log=True),
+                "lr_stage2": trial.suggest_float("lr_stage2", 1e-6, 9e-6, log=True),
+                "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
+                "weight_decay_stage2": trial.suggest_categorical("weight_decay_stage2", dynamic_kwargs.get("weight_decay_stage2", [0.0, 2e-5, 1e-5, 5e-6, 1e-6])),
+                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 1.0, 3.0, 5.0])),
+                "gradient_clip_val_stage2": trial.suggest_categorical("gradient_clip_val_stage2", dynamic_kwargs.get("gradient_clip_val_stage2", [0, 1.0, 3.0, 5.0, 10.0])),
+
+                # --- LR Scheduler Params ---
+                "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.05, log=True),
+                "eta_min_fraction_s2": trial.suggest_float("eta_min_fraction_s2", 1e-5, 0.01, log=True),
+
+                # --- Bagging ---
+                "bagging_size": trial.suggest_categorical("bagging_size", dynamic_kwargs.get("bagging_size", [None, 64, 128, 256])),
+            }
+            return {**common_params, **legacy_params}
     
     def create_transformation(self, use_lazyframe=True) -> Transformation:
         """
@@ -523,17 +634,17 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         #         Path to the pickle file containing training data.
         
         return WindForecastingDatamodule(
-            train_data_path=train_data_path, 
-            val_data_path=val_data_path, 
-            train_sampler=self.train_sampler, 
+            train_data_path=train_data_path,
+            val_data_path=val_data_path,
+            train_sampler=self.train_sampler,
             context_length=self.context_length,
             prediction_length=self.prediction_length,
             time_features=self.time_features,
-            val_sampler=None, 
+            val_sampler=None,
             train_repeat=self.num_batches_per_epoch is not None,
             val_repeat=False,
             batch_size=self.batch_size,
-            num_workers=kwargs.get('num_workers', 4), 
+            num_workers=kwargs.get('num_workers', 4),
             pin_memory=kwargs.get('pin_memory', True)
             )
 
@@ -694,13 +805,14 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "bagging_size": self.bagging_size,
             "input_encoding_normalization": self.input_encoding_normalization,
             "loss_normalization": self.loss_normalization,
+            "skip_copula": self.skip_copula,  # Pass skip_copula flag from config
+            "lock_skip_copula": self.lock_skip_copula,  # Pass lock_skip_copula flag
             "encoder_type": self.encoder_type, # Pass encoder type
             "dropout_rate": self.dropout_rate, # Pass dropout rate
-            # "stage1_activation_function": self.stage1_activation_function, # Will be passed directly to LightningModule
-            # Attentional Copula specific MLP params (Aligned with AttentionalCopula class)
+            # Attentional Copula specific MLP params (standardized naming: ac_mlp_num_layers)
             "ac_mlp_num_layers": self.ac_mlp_num_layers,
             "ac_mlp_dim": self.ac_mlp_dim,
-            # "stage2_activation_function": self.stage2_activation_function, # Will be passed directly to LightningModule
+            # stage1/stage2 activation functions are passed directly to LightningModule
             # GluonTS compatability parameters
             "cardinality": self.cardinality,
             "num_feat_dynamic_real": self.num_feat_dynamic_real,
@@ -717,55 +829,91 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         max_epochs = self.trainer_kwargs.get("max_epochs", 100)  # Default to 100 if not specified
         
         # Calculate epochs per stage
-        epochs_stage1 = self.stage2_start_epoch
-        epochs_stage2 = max_epochs - self.stage2_start_epoch
+        # BUG FIX: Use actual training duration instead of theoretical stage2_start_epoch
+        epochs_stage1 = min(max_epochs, self.stage2_start_epoch)
+        epochs_stage2 = max_epochs - epochs_stage1
         
-        # Calculate effective batches per epoch considering limit_train_batches and DDP
-        effective_batches_per_epoch = self.true_num_batches_per_epoch
-        
-        # Adjust for distributed training (DDP) - data is split across GPUs
+        # FIXED: Separate logical optimization steps from physical data loading steps
+        # This ensures learning rate scheduling uses the correct step count regardless of DDP
+
+        # First, determine the logical optimization steps per epoch (for LR scheduling)
+        logical_steps_per_epoch = self.true_num_batches_per_epoch or self.num_batches_per_epoch
+
+        # Check for trainer limit_train_batches setting
+        limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
+        if limit_train_batches is not None and limit_train_batches != "null":
+            try:
+                limit_value = int(limit_train_batches)
+                if limit_value > 0:
+                    original_batches = logical_steps_per_epoch
+                    logical_steps_per_epoch = min(logical_steps_per_epoch or limit_value, limit_value)
+                    logger.info(f"limit_train_batches detected: {original_batches} -> {logical_steps_per_epoch}")
+            except (ValueError, TypeError):
+                pass
+
+        # Fallback for logical steps per epoch
+        if logical_steps_per_epoch is None:
+            if limit_train_batches is not None and limit_train_batches != "null":
+                try:
+                    logical_steps_per_epoch = int(limit_train_batches)
+                    logger.info(f"Using limit_train_batches as fallback: {logical_steps_per_epoch}")
+                except (ValueError, TypeError):
+                    logical_steps_per_epoch = self.num_batches_per_epoch or 50
+                    logger.warning(f"Could not parse limit_train_batches, using fallback: {logical_steps_per_epoch}")
+            else:
+                logical_steps_per_epoch = self.num_batches_per_epoch or 50
+                logger.warning(f"No limit_train_batches found, using fallback: {logical_steps_per_epoch}")
+
+        # Now handle DDP data distribution (separate from optimization steps)
         strategy = self.trainer_kwargs.get("strategy")
         devices = self.trainer_kwargs.get("devices", 1)
-        
-        # Check if using DDP strategy (handles both string and object forms)
+
+        # Check if using DDP strategy
         is_ddp = False
         if strategy == "ddp":
             is_ddp = True
         elif hasattr(strategy, "__class__") and "DDP" in strategy.__class__.__name__:
             is_ddp = True
+
+        # Handle devices parameter (can be int or "auto")
+        num_devices = devices if isinstance(devices, int) else 1
+
+        # For data loading: adjust steps only if using PyTorch DataLoader with DDP
+        if self.use_pytorch_dataloader and is_ddp and num_devices > 1:
+            # Each GPU processes 1/devices of the data per epoch (for data loading only)
+            dataloader_steps_per_epoch = logical_steps_per_epoch // num_devices
+            logger.info(f"DDP + PyTorch DataLoader: data loading steps per GPU {logical_steps_per_epoch:,} -> {dataloader_steps_per_epoch:,}")
+        else:
+            # No adjustment needed for GluonTS data loading or non-DDP
+            dataloader_steps_per_epoch = logical_steps_per_epoch
+            if is_ddp and num_devices > 1:
+                logger.info(f"DDP detected ({num_devices} GPUs) but using GluonTS DataLoader - no data loading step adjustment")
+            elif num_devices > 1:
+                logger.info(f"Multi-GPU detected ({num_devices} devices) but strategy={strategy} - no adjustment needed")
+
+        # CRITICAL: Use logical_steps_per_epoch for learning rate scheduling calculations
+        if logical_steps_per_epoch:
+            steps_stage1 = epochs_stage1 * logical_steps_per_epoch
+            steps_stage2 = epochs_stage2 * logical_steps_per_epoch
+        else:
+            # Fallback if logical_steps_per_epoch is None/0
+            steps_stage1 = 0
+            steps_stage2 = 0
+            logger.warning("logical_steps_per_epoch is None or 0, using fallback step calculations")
+
+        # Store both values for different purposes
+        self.true_num_batches_per_epoch = logical_steps_per_epoch  # For LR scheduling
+        self.dataloader_steps_per_epoch = dataloader_steps_per_epoch  # For data loading
         
-        if is_ddp and devices > 1:
-            # In DDP, each GPU processes 1/devices of the data per epoch
-            original_batches = effective_batches_per_epoch
-            effective_batches_per_epoch = effective_batches_per_epoch // devices
-            logger.info(f"DDP detected ({devices} GPUs): adjusting steps per epoch {original_batches:,} -> {effective_batches_per_epoch:,}")
-        elif devices > 1:
-            logger.info(f"Multi-GPU detected ({devices} devices) but strategy={strategy} - no step adjustment applied")
-        
-        # First, check for trainer limit_train_batches setting
-        limit_train_batches = self.trainer_kwargs.get("limit_train_batches", None)
-        if limit_train_batches is not None and limit_train_batches != "null":
-            # If limit_train_batches is set, that becomes our effective batch count
-            try:
-                limit_value = int(limit_train_batches)
-                if limit_value > 0:
-                    original_batches = effective_batches_per_epoch
-                    effective_batches_per_epoch = min(effective_batches_per_epoch or limit_value, limit_value)
-                    logger.info(f"limit_train_batches detected: {original_batches} -> {effective_batches_per_epoch}")
-            except (ValueError, TypeError):
-                # If it's not a valid number, ignore it
-                pass
-        
-        if effective_batches_per_epoch:
-            # Calculate total steps per stage using the correctly adjusted batch count
-            steps_stage1 = epochs_stage1 * effective_batches_per_epoch if effective_batches_per_epoch else 0
-            steps_stage2 = epochs_stage2 * effective_batches_per_epoch if effective_batches_per_epoch else 0
-            
         logger.info(f"Training schedule calculation:")
-        logger.info(f"  Max epochs: {max_epochs}")
+        logger.info(f"  Max epochs: {max_epochs}, stage2_start_epoch: {self.stage2_start_epoch}")
+        logger.info(f"  SCHEDULER FIX: Using epochs_stage1={epochs_stage1} (min({max_epochs}, {self.stage2_start_epoch}))")
         logger.info(f"  Stage 1: epochs 0-{epochs_stage1} ({epochs_stage1} epochs, {steps_stage1:,} steps)")
-        logger.info(f"  Stage 2: epochs {self.stage2_start_epoch}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
-        logger.info(f"  Effective steps per epoch: {effective_batches_per_epoch:,}")
+        logger.info(f"  Stage 2: epochs {epochs_stage1}-{max_epochs} ({epochs_stage2} epochs, {steps_stage2:,} steps)")
+        logger.info(f"  Logical steps per epoch (for LR scheduling): {logical_steps_per_epoch:,}")
+        if self.use_pytorch_dataloader and is_ddp and num_devices > 1:
+            logger.info(f"  Data loading steps per GPU: {dataloader_steps_per_epoch:,}")
+        logger.info(f"  Stored true_num_batches_per_epoch: {self.true_num_batches_per_epoch}")
         
         resolved_warmup_s1 = resolve_steps(self.warmup_steps_s1, steps_stage1, "warmup_steps_s1")
         resolved_warmup_s2 = resolve_steps(self.warmup_steps_s2, steps_stage2, "warmup_steps_s2")
@@ -799,5 +947,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             base_batch_size_for_scheduler_steps=self.base_batch_size_for_scheduler_steps,
             base_limit_train_batches=self.base_limit_train_batches,
             # Pass num_batches_per_epoch for scheduler calculations
-            num_batches_per_epoch=self.true_num_batches_per_epoch,
+            num_batches_per_epoch=self.true_num_batches_per_epoch or self.num_batches_per_epoch,
+            # Phase 2: load pre-trained marginal weights from Phase 1 checkpoint
+            phase1_checkpoint_path=self.phase1_checkpoint_path,
         )

@@ -138,3 +138,5 @@ logs/
 lightning_logs/
 wandb/
 *.pkl
+checkpoints/
+*.ckpt

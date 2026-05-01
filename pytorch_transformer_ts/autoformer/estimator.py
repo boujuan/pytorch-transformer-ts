@@ -369,8 +369,8 @@ class AutoformerEstimator(PyTorchLightningEstimator):
         
         from wind_forecasting.preprocessing.pytorch_dataset import WindForecastingDatamodule
         return WindForecastingDatamodule(
-            train_data_path=train_data_path, 
-            val_data_path=val_data_path, 
+            train_data_path=train_data_path,
+            val_data_path=val_data_path,
             train_sampler=self.train_sampler, 
             context_length=self.context_length,
             prediction_length=self.prediction_length,
