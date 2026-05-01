@@ -58,7 +58,7 @@ if False:
 #     with open("/Users/ahenry/Documents/toolboxes/wind_forecasting/examples/inputs/training_inputs_aoifemac_flasc.yaml", 'r') as file:
 #         config  = yaml.safe_load(file)
         
-#     data_module = DataModule(data_path=config["dataset"]["data_path"], n_splits=config["dataset"]["n_splits"],
+#     data_module = DataModule(normalized_data_path=config["dataset"]["data_path"], n_splits=config["dataset"]["n_splits"],
 #                             continuity_groups=None, train_split=(1.0 - config["dataset"]["val_split"] - config["dataset"]["test_split"]),
 #                                 val_split=config["dataset"]["val_split"], test_split=config["dataset"]["test_split"], 
 #                                 prediction_length=config["dataset"]["prediction_length"], context_length=config["dataset"]["context_length"],
