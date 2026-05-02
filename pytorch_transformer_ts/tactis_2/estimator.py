@@ -144,6 +144,12 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         input_size: int = 1, # Number of target series
         use_pytorch_dataloader: bool = False,
         phase1_checkpoint_path: str = None,
+        # --- DSF flow-collapse regularization ---
+        # See pytorch_transformer_ts/tactis_2/lightning_module.py for the soft-hinge L2 penalty.
+        # Targets the empirically-observed `a` parameter explosion (~0.84 → ~720 across stage 1
+        # training) that produces collapsed marginal CDFs and degenerate inference samples.
+        lambda_a_reg: float = 0.0,
+        a_reg_threshold: float = 3.0,
         **kwargs,
     ) -> None:
         self.phase1_checkpoint_path = phase1_checkpoint_path
@@ -212,6 +218,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.steps_to_decay_s2 = steps_to_decay_s2 # Store manual T_max value for stage 2
         self.base_batch_size_for_scheduler_steps = base_batch_size_for_scheduler_steps
         self.base_limit_train_batches = base_limit_train_batches
+        # DSF flow-collapse regularization (defaults: 0.0, 3.0 = disabled / no-op)
+        self.lambda_a_reg = lambda_a_reg
+        self.a_reg_threshold = a_reg_threshold
 
         # Common parameters
         self.input_size = input_size
@@ -336,6 +345,14 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
 
                 # --- Bagging ---
                 "bagging_size": trial.suggest_categorical("bagging_size", dynamic_kwargs.get("bagging_size", [None, 64, 128, 256])),
+
+                # --- DSF flow-collapse regularization (Stage 1 only) ---
+                # Soft-hinge L2 penalty on `a_pre`. Wide log-uniform range to find the sweet spot.
+                # When 0 (or close), behaves like the unregularized model that produced the collapse.
+                # MarginalHealthMonitor callback prunes trials whose `a` parameter still explodes
+                # (max-a > 50) at end of stage 1 — this prevents Optuna from rediscovering the
+                # collapsed minimum (which has spuriously low val_loss).
+                "lambda_a_reg": trial.suggest_float("lambda_a_reg", 1e-5, 1.0, log=True),
             }
             return {**common_params, **stage1_params}
 
@@ -950,4 +967,7 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             num_batches_per_epoch=self.true_num_batches_per_epoch or self.num_batches_per_epoch,
             # Phase 2: load pre-trained marginal weights from Phase 1 checkpoint
             phase1_checkpoint_path=self.phase1_checkpoint_path,
+            # DSF flow-collapse regularization
+            lambda_a_reg=self.lambda_a_reg,
+            a_reg_threshold=self.a_reg_threshold,
         )

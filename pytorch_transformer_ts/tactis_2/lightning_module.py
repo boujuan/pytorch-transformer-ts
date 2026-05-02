@@ -39,6 +39,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         base_batch_size_for_scheduler_steps: int = 2048, # Base batch size for scheduler step calculations
         base_limit_train_batches: int = None, # Base limit train batches - if set, disables batch size scaling
         phase1_checkpoint_path: str = None, # Path to Phase 1 best checkpoint for Phase 2 tuning
+        lambda_a_reg: float = 0.0, # Regularizer strength on DSF sigmoid-steepness `a_pre`. 0 = disabled (backward compat)
+        a_reg_threshold: float = 3.0, # Soft-hinge threshold above which `a_pre` is penalized
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -78,7 +80,8 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "stage1_activation_function", "stage2_activation_function",
                                    "eta_min_fraction_s1", "eta_min_fraction_s2",
                                    "num_batches_per_epoch", "batch_size",
-                                   "base_batch_size_for_scheduler_steps", "base_limit_train_batches")
+                                   "base_batch_size_for_scheduler_steps", "base_limit_train_batches",
+                                   "lambda_a_reg", "a_reg_threshold")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -465,26 +468,55 @@ class TACTiS2LightningModule(pl.LightningModule):
         past_target = batch["past_target"]
         past_observed_values = batch["past_observed_values"]
         future_target = batch["future_target"]
-        
+
         # Get time features
         past_time_feat = batch["past_time_feat"]
         future_time_feat = batch["future_time_feat"]
-        
+
         # Get static features if available
         feat_static_cat = batch.get("feat_static_cat", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.long))
         feat_static_real = batch.get("feat_static_real", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.float32))
-        
-        # Process with model
-        model_output = self.model(
-            feat_static_cat=feat_static_cat,
-            feat_static_real=feat_static_real,
-            past_time_feat=past_time_feat,
-            past_target=past_target,
-            past_observed_values=past_observed_values,
-            future_time_feat=future_time_feat,
-            future_target=future_target,  # For teacher forcing or loss computation
+
+        # --- DSF flow-collapse regularization setup (Stage 1 only, no-op when lambda_a_reg=0) ---
+        # The marginal_conditioner runs multiple times during a forward+sample pass:
+        #   1. forward_logdet (loss path)  -- this is the one we want for regularization
+        #   2. forward_no_logdet (sampling)
+        #   3. inverse (CDF inversion)
+        # We register a hook that captures only the FIRST call's output, then we use it
+        # to compute the soft-hinge L2 penalty on the `a_pre` portion of marginal_params.
+        captured_marginal_params = []  # list-as-mutable-cell for closure
+        reg_hook_handle = None
+        apply_reg = (
+            self.stage == 1
+            and float(self.hparams.lambda_a_reg) > 0.0
+            and self.training
         )
-        
+        if apply_reg:
+            def _capture_first_call(module, inputs, output):
+                if len(captured_marginal_params) == 0:
+                    captured_marginal_params.append(output)
+            try:
+                _conditioner = self.model.tactis.decoder.marginal.marginal_conditioner
+                reg_hook_handle = _conditioner.register_forward_hook(_capture_first_call)
+            except AttributeError:
+                # If model structure differs (e.g., pure-marginal mode), silently skip
+                reg_hook_handle = None
+
+        # Process with model
+        try:
+            model_output = self.model(
+                feat_static_cat=feat_static_cat,
+                feat_static_real=feat_static_real,
+                past_time_feat=past_time_feat,
+                past_target=past_target,
+                past_observed_values=past_observed_values,
+                future_time_feat=future_time_feat,
+                future_target=future_target,  # For teacher forcing or loss computation
+            )
+        finally:
+            if reg_hook_handle is not None:
+                reg_hook_handle.remove()
+
         # Check if model returns a tuple (common in TACTiS-2 where the model returns both predictions and loss)
         if isinstance(model_output, tuple):
             # The second element of the tuple is typically the loss
@@ -494,11 +526,43 @@ class TACTiS2LightningModule(pl.LightningModule):
             # If it's not a tuple, assume it's just the loss
             loss = model_output
             logger.debug(f"Training - Model returned scalar loss: {loss}")
-        
+
         # Check for NaN in loss
         if torch.isnan(loss).any():
             logger.warning("NaN detected in loss! Replacing with large value to continue training.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
+
+        # --- DSF flow-collapse regularization (Stage 1 only) ---
+        # Soft-hinge L2 penalty on the `a_pre` portion of marginal_params (the pre-softplus
+        # input that becomes the sigmoid-steepness parameter `a` in DeepSigmoidFlow).
+        # Targets the specific failure mode where unregularized DSF flow training drives
+        # `a` to ~720, collapsing the marginal CDF to a step function.
+        # See /dss/work/.../logs/tactis_inference_deep_diagnosis.md for full diagnosis.
+        if apply_reg and len(captured_marginal_params) > 0:
+            marginal_params = captured_marginal_params[0]
+            mc = self.hparams.model_config
+            n_layers = mc.get("decoder_dsf_num_layers", 3)
+            hidden_dim = mc.get("decoder_dsf_hidden_dim", 48)
+            params_per_layer = 3 * hidden_dim
+            # Slice out the `a_pre` portion (first hidden_dim of each layer's params block)
+            a_pre_slices = [
+                marginal_params[..., i * params_per_layer : i * params_per_layer + hidden_dim]
+                for i in range(n_layers)
+            ]
+            a_pre_all = torch.cat(a_pre_slices, dim=-1)
+            # Soft hinge: penalize only when a_pre exceeds threshold (epoch-2 healthy max ~0.84)
+            threshold = float(self.hparams.a_reg_threshold)
+            a_reg = torch.relu(a_pre_all - threshold).pow(2).mean()
+            loss = loss + float(self.hparams.lambda_a_reg) * a_reg
+            # Log diagnostics for monitoring + Optuna pruning callback consumption
+            with torch.no_grad():
+                self.log("a_reg/loss_term", a_reg.detach(), on_step=True, on_epoch=True, prog_bar=False)
+                self.log("a_reg/max_a_pre", a_pre_all.max().detach(), on_step=False, on_epoch=True, prog_bar=False)
+                self.log("a_reg/mean_a_pre", a_pre_all.mean().detach(), on_step=False, on_epoch=True, prog_bar=False)
+                # Also log post-softplus `a` to match the diagnostic probe's units
+                a_post = torch.nn.functional.softplus(a_pre_all)
+                self.log("a_reg/max_a", a_post.max().detach(), on_step=False, on_epoch=True, prog_bar=False)
+                self.log("a_reg/mean_a", a_post.mean().detach(), on_step=False, on_epoch=True, prog_bar=False)
         
         # Manual optimization - get the correct optimizer based on current stage
         if self.stage == 2 and hasattr(self, '_stage2_optimizer') and self._stage2_optimizer is not None:
