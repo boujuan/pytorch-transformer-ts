@@ -363,7 +363,15 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 # MarginalHealthMonitor callback prunes trials whose `a` parameter still explodes
                 # (max-a > 50) at end of stage 1 — this prevents Optuna from rediscovering the
                 # collapsed minimum (which has spuriously low val_loss).
-                "lambda_a_reg": trial.suggest_float("lambda_a_reg", 1e-5, 1.0, log=True),
+                #
+                # FOCUSED-STUDY override: dynamic_kwargs may pass {"lambda_a_reg_fixed": <float>}
+                # to lock the value (skipping the trial.suggest call) — used by
+                # tune_log_density_max_focused.yaml to sweep only log_density_max.
+                "lambda_a_reg": (
+                    dynamic_kwargs["lambda_a_reg_fixed"]
+                    if dynamic_kwargs.get("lambda_a_reg_fixed") is not None
+                    else trial.suggest_float("lambda_a_reg", 1e-5, 1.0, log=True)
+                ),
 
                 # --- Deeper-fix v2: per-datapoint log-density regularization ---
                 # See plan: /user/taed7566/.claude/plans/moonlit-sprouting-gosling.md
@@ -371,9 +379,26 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 # per-(batch, vars) total log-density), addressing 4 loopholes in the
                 # per-parameter `lambda_a_reg` alone. Wider log-uniform range ([1e-4, 10])
                 # reflects that this penalty's units are different (per-data-point density,
-                # not per-parameter). log_density_max=3 and a_max=20 fixed at the
-                # LightningModule defaults; tunable later if needed.
-                "lambda_log_density": trial.suggest_float("lambda_log_density", 1e-4, 10.0, log=True),
+                # not per-parameter).
+                "lambda_log_density": (
+                    dynamic_kwargs["lambda_log_density_fixed"]
+                    if dynamic_kwargs.get("lambda_log_density_fixed") is not None
+                    else trial.suggest_float("lambda_log_density", 1e-4, 10.0, log=True)
+                ),
+
+                # log_density_max: threshold above which the per-datapoint log-density
+                # is penalized. Smoke test (epoch 3 healthy training) showed
+                # max_log_density ≈ -5; collapse at +∞. With threshold +3 the penalty
+                # only fires for *catastrophic* sharpening (8+ nats above healthy).
+                # Sweep to find a threshold that's discriminative for *covert* sharpening
+                # too — the v1 collapse showed F⁻¹=0.099 with max_a=25 and
+                # marginal_logdet=+715, suggesting log-density got well above 0 long before
+                # it would have hit +3. Lower thresholds (0, -2) make the penalty fire
+                # earlier; higher (3) only catches catastrophe.
+                "log_density_max": trial.suggest_categorical(
+                    "log_density_max",
+                    dynamic_kwargs.get("log_density_max", [-2.0, 0.0, 1.0, 3.0]),
+                ),
             }
             return {**common_params, **stage1_params}
 

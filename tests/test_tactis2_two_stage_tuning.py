@@ -49,6 +49,7 @@ STAGE1_ONLY_PARAMS = {
 PHASE1_ONLY_REG_PARAMS = {
     "lambda_a_reg": 1e-3,
     "lambda_log_density": 1e-2,
+    "log_density_max": 0.0,
 }
 
 # Parameters used only in Stage 2 (copula/ac_mlp)

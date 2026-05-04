@@ -766,7 +766,15 @@ class TACTiS2LightningModule(pl.LightningModule):
                 # Always logged so ModelCheckpoint(monitor='val_copula_loss') doesn't crash.
                 # Stage 1: inf (ModelCheckpoint with mode='min' will never save this as best)
                 # Stage 2: actual copula loss (what we want to optimize)
-                if self.stage >= 2 and not self.hparams.model_config.get('skip_copula', True):
+                #
+                # BUG FIX: previously read self.hparams.model_config.get('skip_copula', True)
+                # — that's the *static* construction-time value, never updated when
+                # set_stage(2) flips the live skip_copula flag. As a result every
+                # Stage 2 epoch logged inf, masking real Stage 2 progress (Phase 5 v1
+                # had val_copula_loss=inf throughout 70 Stage-2 epochs). Use the live
+                # flag from the TACTiS module instead.
+                live_skip_copula = bool(getattr(tactis_model, "skip_copula", True))
+                if self.stage >= 2 and not live_skip_copula:
                     self.log("val_copula_loss", tactis_model.copula_loss.detach(),
                            on_step=False, on_epoch=True, prog_bar=False)
                 else:
