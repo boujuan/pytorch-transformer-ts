@@ -43,6 +43,14 @@ STAGE1_ONLY_PARAMS = {
     "bagging_size": None,
 }
 
+# Regularization params suggested ONLY in tuning_phase=1 (NOT in legacy phase 0).
+# Kept separate from STAGE1_ONLY_PARAMS so _all_fixed_params() (used by phase 0 tests)
+# doesn't include keys that phase 0's get_params() never returns.
+PHASE1_ONLY_REG_PARAMS = {
+    "lambda_a_reg": 1e-3,
+    "lambda_log_density": 1e-2,
+}
+
 # Parameters used only in Stage 2 (copula/ac_mlp)
 STAGE2_ONLY_PARAMS = {
     "stage2_activation_function": "relu",
@@ -71,8 +79,16 @@ COMMON_PARAMS = {
 # Keys that identify common params in the output dict
 COMMON_PARAM_KEYS = set(COMMON_PARAMS.keys())
 
-# Keys that identify Stage 1 specific params in the output dict
-STAGE1_PARAM_KEYS = set(STAGE1_ONLY_PARAMS.keys())
+# Full Phase 1 winning trial = Stage 1 architecture + Phase-1-only regularization params.
+# Used as the realistic `stage1_fixed` snapshot in Phase 2 tests (which inherit Phase 1's full
+# config) and to construct Phase 1 fixtures.
+STAGE1_FULL_PARAMS = {**STAGE1_ONLY_PARAMS, **PHASE1_ONLY_REG_PARAMS}
+
+# Keys that identify Stage 1 specific params in the output dict.
+# Includes Phase-1-only regularization keys (lambda_a_reg, lambda_log_density), since they are
+# suggested in tuning_phase=1 but not in tuning_phase=2 (Phase 2 must not RE-suggest them, but
+# does pass them through from stage1_fixed).
+STAGE1_PARAM_KEYS = set(STAGE1_FULL_PARAMS.keys())
 
 # Keys that identify Stage 2 specific params in the output dict
 STAGE2_PARAM_KEYS = set(STAGE2_ONLY_PARAMS.keys())
@@ -85,7 +101,7 @@ def _all_fixed_params():
 
 def _phase1_fixed_params():
     """Return param dict needed for a Phase 1 FixedTrial."""
-    return {**COMMON_PARAMS, **STAGE1_ONLY_PARAMS}
+    return {**COMMON_PARAMS, **STAGE1_ONLY_PARAMS, **PHASE1_ONLY_REG_PARAMS}
 
 
 def _phase2_fixed_params():
@@ -215,7 +231,7 @@ class TestGetParamsPhase2WithFixedStage1:
             is built with Phase 1's best marginal/flow/decoder config)
           - Stage 2 params must still come from trial suggestions
         """
-        # Realistic Phase 1 best trial (common + stage1-specific params)
+        # Realistic Phase 1 best trial (common + stage1-specific + Phase-1-only reg params)
         stage1_fixed = {
             # Common params
             "context_length_factor": 20,
@@ -223,8 +239,8 @@ class TestGetParamsPhase2WithFixedStage1:
             "batch_size": 128,
             "dropout_rate": 0.007,
             "loss_normalization": "both",
-            # Stage 1 architecture params (must be passed through to estimator)
-            **STAGE1_ONLY_PARAMS,
+            # Stage 1 architecture + regularization params (must be passed through to estimator)
+            **STAGE1_FULL_PARAMS,
         }
 
         # The FixedTrial only needs Stage 2 params since common + stage1 params
@@ -244,11 +260,11 @@ class TestGetParamsPhase2WithFixedStage1:
                 f"got {result[key]!r}"
             )
 
-        # -- Stage 1 architecture params must be passed through --
+        # -- Stage 1 architecture + reg params must be passed through --
         for key in STAGE1_PARAM_KEYS:
             assert key in result, f"Stage 1 arch param '{key}' must be passed through in Phase 2"
-            assert result[key] == STAGE1_ONLY_PARAMS[key], (
-                f"Stage 1 arch param '{key}': expected {STAGE1_ONLY_PARAMS[key]!r}, got {result[key]!r}"
+            assert result[key] == STAGE1_FULL_PARAMS[key], (
+                f"Stage 1 arch param '{key}': expected {STAGE1_FULL_PARAMS[key]!r}, got {result[key]!r}"
             )
 
         # -- Stage 2 params must still be tunable (from trial) --

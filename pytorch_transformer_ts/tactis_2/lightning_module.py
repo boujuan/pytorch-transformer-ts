@@ -41,6 +41,11 @@ class TACTiS2LightningModule(pl.LightningModule):
         phase1_checkpoint_path: str = None, # Path to Phase 1 best checkpoint for Phase 2 tuning
         lambda_a_reg: float = 0.0, # Regularizer strength on DSF sigmoid-steepness `a_pre`. 0 = disabled (backward compat)
         a_reg_threshold: float = 3.0, # Soft-hinge threshold above which `a_pre` is penalized
+        # === Deeper-fix v2 (per-datapoint log-density regularization + smooth a-cap) ===
+        # See plan: /user/taed7566/.claude/plans/moonlit-sprouting-gosling.md
+        lambda_log_density: float = 0.0, # Strength of per-(b,v) log-density penalty. 0 = disabled.
+        log_density_max: float = 3.0, # Soft-hinge threshold on per-(b,v) log-density (density ≤ exp(3) ≈ 20).
+        a_max: float = 0.0, # Smooth cap on `a` (post-softplus). 0 = disabled. Recommended: 20 to bound the broken-regime ~720.
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -81,7 +86,8 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "eta_min_fraction_s1", "eta_min_fraction_s2",
                                    "num_batches_per_epoch", "batch_size",
                                    "base_batch_size_for_scheduler_steps", "base_limit_train_batches",
-                                   "lambda_a_reg", "a_reg_threshold")
+                                   "lambda_a_reg", "a_reg_threshold",
+                                   "lambda_log_density", "log_density_max", "a_max")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -120,7 +126,22 @@ class TACTiS2LightningModule(pl.LightningModule):
             stage2_activation_function=self.hparams.stage2_activation_function, # Use direct hparam
             attentional_copula_kwargs=ac_params if ac_params else None # Pass mapped AC params separately
         )
-        
+
+        # Deeper-fix v2: apply Fix B (smooth a-cap) by setting a_max on the
+        # marginal flow's SigmoidFlow layers post-construction. This avoids
+        # threading a_max through TACTiS2Model -> DSFMarginal -> DeepSigmoidFlow
+        # constructors. SigmoidFlow.forward reads self.a_max each call.
+        if float(self.hparams.a_max) > 0.0:
+            try:
+                _flow = self.model.tactis.decoder.marginal.marginal_flow
+                _flow.a_max = float(self.hparams.a_max)
+                for _layer in _flow.layers:
+                    _layer.a_max = float(self.hparams.a_max)
+                logger.info(f"Deeper-fix v2: applied smooth a-cap (a_max={self.hparams.a_max}) "
+                            f"to {len(_flow.layers)} SigmoidFlow layer(s).")
+            except AttributeError as e:
+                logger.warning(f"Deeper-fix v2: could not set a_max on flow layers: {e}")
+
         # Store stage-specific optimizer parameters (already in self.hparams)
         # self.lr_stage1 = lr_stage1
         # self.lr_stage2 = lr_stage2
@@ -563,6 +584,51 @@ class TACTiS2LightningModule(pl.LightningModule):
                 a_post = torch.nn.functional.softplus(a_pre_all)
                 self.log("a_reg/max_a", a_post.max().detach(), on_step=False, on_epoch=True, prog_bar=False)
                 self.log("a_reg/mean_a", a_post.mean().detach(), on_step=False, on_epoch=True, prog_bar=False)
+
+        # === Deeper-fix v2: Per-datapoint log-density regularizer (Fix A + Fix C) ===
+        # Penalizes the actual quantity that runs to +inf during flow collapse: the
+        # per-(batch, vars) total log-density at training data points. This fixes:
+        #   - Loophole 1 (per-element-mean penalty was too weak): scales correctly per data point
+        #   - Loophole 2 (log_sum_exp dominated by one large `a`): penalizes post-LSE
+        #   - Loophole 3 (`b` shift bypasses `a` threshold): penalizes the joint (a,b,w) effect
+        # Lambda schedule (Fix C): 5x during epochs 0-4, linear decay to 1x by epoch 15,
+        # then constant. Forces the model into a broad-CDF basin during init when
+        # random init still allows escape, then relaxes for normal training.
+        # Gated on stage==1 (Stage 2 has frozen marginal — penalty is no-op).
+        if (
+            apply_reg
+            and float(self.hparams.lambda_log_density) > 0.0
+        ):
+            try:
+                flow = self.model.tactis.decoder.marginal.marginal_flow
+                per_dp_log_density = getattr(flow, "_last_per_datapoint_log_density", None)
+            except AttributeError:
+                per_dp_log_density = None
+            if per_dp_log_density is not None:
+                threshold_lp = float(self.hparams.log_density_max)
+                # Per-(batch, vars) penalty: relu^2 of excess log-density above threshold
+                log_density_reg = torch.relu(per_dp_log_density - threshold_lp).pow(2).mean()
+                # Schedule: 5x for epochs 0-4, linear decay to 1x at epoch 15, then 1x
+                cur_epoch = int(self.current_epoch)
+                if cur_epoch < 5:
+                    schedule_mult = 5.0
+                elif cur_epoch < 15:
+                    schedule_mult = 5.0 - 4.0 * (cur_epoch - 5) / 10.0
+                else:
+                    schedule_mult = 1.0
+                effective_lambda = schedule_mult * float(self.hparams.lambda_log_density)
+                loss = loss + effective_lambda * log_density_reg
+                with torch.no_grad():
+                    self.log("log_density_reg/loss_term", log_density_reg.detach(),
+                             on_step=True, on_epoch=True, prog_bar=False)
+                    self.log("log_density_reg/max_log_density", per_dp_log_density.max().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("log_density_reg/mean_log_density", per_dp_log_density.mean().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("log_density_reg/schedule_mult", torch.tensor(schedule_mult, device=loss.device),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("log_density_reg/effective_lambda", torch.tensor(effective_lambda, device=loss.device),
+                             on_step=False, on_epoch=True, prog_bar=False)
         
         # Manual optimization - get the correct optimizer based on current stage
         if self.stage == 2 and hasattr(self, '_stage2_optimizer') and self._stage2_optimizer is not None:

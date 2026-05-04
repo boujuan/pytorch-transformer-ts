@@ -150,6 +150,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # training) that produces collapsed marginal CDFs and degenerate inference samples.
         lambda_a_reg: float = 0.0,
         a_reg_threshold: float = 3.0,
+        # Deeper-fix v2: per-datapoint log-density penalty + smooth a-cap.
+        # See plan: /user/taed7566/.claude/plans/moonlit-sprouting-gosling.md
+        lambda_log_density: float = 0.0,
+        log_density_max: float = 3.0,
+        a_max: float = 0.0,
         **kwargs,
     ) -> None:
         self.phase1_checkpoint_path = phase1_checkpoint_path
@@ -221,6 +226,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # DSF flow-collapse regularization (defaults: 0.0, 3.0 = disabled / no-op)
         self.lambda_a_reg = lambda_a_reg
         self.a_reg_threshold = a_reg_threshold
+        # Deeper-fix v2: per-datapoint log-density penalty + smooth a-cap.
+        self.lambda_log_density = lambda_log_density
+        self.log_density_max = log_density_max
+        self.a_max = a_max
 
         # Common parameters
         self.input_size = input_size
@@ -340,7 +349,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 # --- Stage 1 Optimizer ---
                 "lr_stage1": trial.suggest_float("lr_stage1", 5e-6, 1e-3, log=True),
                 "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
-                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 0.5, 1.0, 3.0, 5.0])),
+                # NOTE: dropped 0 from default categorical because v1 pilot showed clip=0 strongly
+                # correlates with covert collapse (4/5 clip=0 trials had F^-1 std < 0.1).
+                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0.5, 1.0, 3.0, 5.0])),
                 "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.01, log=True),
 
                 # --- Bagging ---
@@ -353,6 +364,16 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 # (max-a > 50) at end of stage 1 — this prevents Optuna from rediscovering the
                 # collapsed minimum (which has spuriously low val_loss).
                 "lambda_a_reg": trial.suggest_float("lambda_a_reg", 1e-5, 1.0, log=True),
+
+                # --- Deeper-fix v2: per-datapoint log-density regularization ---
+                # See plan: /user/taed7566/.claude/plans/moonlit-sprouting-gosling.md
+                # Penalizes the actual quantity that runs to +inf during flow collapse (the
+                # per-(batch, vars) total log-density), addressing 4 loopholes in the
+                # per-parameter `lambda_a_reg` alone. Wider log-uniform range ([1e-4, 10])
+                # reflects that this penalty's units are different (per-data-point density,
+                # not per-parameter). log_density_max=3 and a_max=20 fixed at the
+                # LightningModule defaults; tunable later if needed.
+                "lambda_log_density": trial.suggest_float("lambda_log_density", 1e-4, 10.0, log=True),
             }
             return {**common_params, **stage1_params}
 
@@ -970,4 +991,8 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # DSF flow-collapse regularization
             lambda_a_reg=self.lambda_a_reg,
             a_reg_threshold=self.a_reg_threshold,
+            # Deeper-fix v2 hparams
+            lambda_log_density=self.lambda_log_density,
+            log_density_max=self.log_density_max,
+            a_max=self.a_max,
         )
