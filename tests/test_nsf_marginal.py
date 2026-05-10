@@ -221,6 +221,44 @@ def test_estimator_accepts_nsf_hparams():
         assert name in sig.parameters, f"hparam {name} missing from Estimator.__init__"
 
 
+def test_estimator_model_config_dict_includes_nsf_keys():
+    """REGRESSION: the `model_config` dict built inside Estimator (which gets
+    passed to TACTiS2Model.__init__) MUST include all NSF keys.
+
+    Phase 0i-E F-pilot v1 (5 trials, ~12 GPU-hours) wasted because this
+    specific plumbing link was broken — Estimator and LightningModule both
+    accepted `marginal_flow_type` but the model_config dict didn't propagate
+    it. TACTiS2Model fell back to default `marginal_flow_type='dsf'` and the
+    YAML key was silently ignored.
+
+    This test would have caught the bug before submission.
+    """
+    import re
+    estimator_src = open(
+        os.path.join(os.path.dirname(__file__), "..",
+                     "pytorch_transformer_ts/tactis_2/estimator.py")
+    ).read()
+    # The model_config dict must contain explicit entries that map self.X → "X"
+    # for every NSF hparam we added.
+    required_pairs = [
+        ('"marginal_flow_type"', "self.marginal_flow_type"),
+        ('"decoder_nsf_num_bins"', "self.decoder_nsf_num_bins"),
+        ('"decoder_nsf_tail_bound"', "self.decoder_nsf_tail_bound"),
+        ('"decoder_nsf_num_layers"', "self.decoder_nsf_num_layers"),
+        ('"decoder_nsf_min_derivative"', "self.decoder_nsf_min_derivative"),
+    ]
+    for key_str, attr_str in required_pairs:
+        # Pattern: "key_str": self.attr_str (allowing whitespace + commas/brackets)
+        pattern = rf'{re.escape(key_str)}\s*:\s*{re.escape(attr_str)}'
+        assert re.search(pattern, estimator_src), (
+            f"REGRESSION: Estimator.create_lightning_module's model_config "
+            f"dict missing entry `{key_str}: {attr_str}`. The NSF hparam "
+            f"won't propagate to TACTiS2Model.__init__ — silent fallback "
+            f"to DSF default. Phase 0i-E F-pilot v1 was wasted on this exact "
+            f"bug."
+        )
+
+
 if __name__ == "__main__":
     test_nsf_marginal_constructs_with_default_hparams()
     test_nsf_marginal_interface_matches_dsf()

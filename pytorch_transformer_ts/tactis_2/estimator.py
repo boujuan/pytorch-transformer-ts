@@ -901,6 +901,14 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "copula_num_layers": self.copula_num_layers,
             "decoder_dsf_num_layers": self.decoder_dsf_num_layers,
             "decoder_dsf_hidden_dim": self.decoder_dsf_hidden_dim,
+            # Phase 0i-E: NSF marginal flow alternative — passed through to TACTiS2Model.
+            # Without these in model_config, TACTiS2Model falls back to default
+            # marginal_flow_type="dsf" and the YAML key is silently ignored.
+            "marginal_flow_type": self.marginal_flow_type,
+            "decoder_nsf_num_bins": self.decoder_nsf_num_bins,
+            "decoder_nsf_tail_bound": self.decoder_nsf_tail_bound,
+            "decoder_nsf_num_layers": self.decoder_nsf_num_layers,
+            "decoder_nsf_min_derivative": self.decoder_nsf_min_derivative,
             "decoder_mlp_num_layers": self.decoder_mlp_num_layers,
             "decoder_mlp_hidden_dim": self.decoder_mlp_hidden_dim,
             "decoder_transformer_num_layers": self.decoder_transformer_num_layers,
