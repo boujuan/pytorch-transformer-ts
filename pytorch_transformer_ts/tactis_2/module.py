@@ -479,6 +479,19 @@ class TACTiS2Model(nn.Module):
         This transformation ensures compatibility with GluonTS forecast generators.
         """
         if network_input["future_target"] is not None:
+            # === Fix Sd: stash standardized tensors for the training_step ES/VS block ===
+            # Phase 0i-D, 2026-05-09. The Sd regularizer in
+            # lightning_module.training_step needs to call self.tactis.sample()
+            # with the SAME standardized inputs the NLL forward pass uses.
+            # Stashing here (training mode only) avoids re-running
+            # create_network_inputs in the lightning step.
+            self.tactis._last_train_inputs = {
+                "hist_time": network_input["hist_time"],
+                "hist_value_norm": network_input["past_target"],
+                "pred_time": network_input["pred_time"],
+                "pred_value_norm": network_input["future_target"],
+            }
+
             # Training mode - compute loss
             loss = self.tactis.forward(
                 hist_time=network_input["hist_time"],

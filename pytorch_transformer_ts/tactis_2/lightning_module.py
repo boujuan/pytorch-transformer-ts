@@ -61,6 +61,17 @@ class TACTiS2LightningModule(pl.LightningModule):
         # 64-unit DSF capacity. See plan moonlit-sprouting-gosling.md.
         lambda_w_entropy: float = 0.0, # Strength of relu(w_entropy_min - H(w))^2 penalty. 0 = disabled.
         w_entropy_min: float = 2.0, # Soft-hinge floor on H(w). log(8)≈2.08 → eff_dim ≥ 8.
+        # === Fix Sd (proper scoring rule loss): Energy Score / Variogram Score ===
+        # Phase 0i-D, 2026-05-09. After Sa+Sw mechanically fixed parameter pathologies
+        # but didn't widen F^-1 spread, the 10-trial pilot history proved the bottleneck
+        # is the NLL training objective itself. ES/VS are sample-based proper scoring
+        # rules that penalize distributions which don't OVERLAP the truth — fixes the
+        # "narrow but lucky" failure mode NLL rewards. See plan moonlit-sprouting-gosling.md.
+        lambda_energy_score: float = 0.0, # Strength of ES(samples, truth) regularizer. 0 = disabled.
+        energy_score_num_samples: int = 8, # N samples drawn per training step for ES estimation.
+        lambda_variogram: float = 0.0, # Strength of VS(samples, truth) — catches correlation errors ES misses.
+        variogram_p: float = 0.5, # Order of the variogram. Scheuerer & Hamill 2015 recommend p=0.5.
+        trajectory_noise_std: float = 0.0, # Optional Gaussian noise on past_target during training (cheap label-smoothing).
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -104,7 +115,10 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "lambda_a_reg", "a_reg_threshold",
                                    "lambda_log_density", "log_density_max", "a_max",
                                    "lambda_a_floor", "a_floor_threshold",
-                                   "lambda_w_entropy", "w_entropy_min")
+                                   "lambda_w_entropy", "w_entropy_min",
+                                   "lambda_energy_score", "energy_score_num_samples",
+                                   "lambda_variogram", "variogram_p",
+                                   "trajectory_noise_std")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -511,6 +525,17 @@ class TACTiS2LightningModule(pl.LightningModule):
         past_time_feat = batch["past_time_feat"]
         future_time_feat = batch["future_time_feat"]
 
+        # === Fix Sd: trajectory noise on past_target (free regularizer) ===
+        # Phase 0i-D, 2026-05-09. Optional small Gaussian noise on observed
+        # past_target during training. Acts as label smoothing on the
+        # autoregressive context — prevents the model from memorizing exact
+        # near-deterministic trajectories at 15-s scale. σ in standardized
+        # units (data is scaler-normalized before reaching the encoder).
+        # Applied only when training and σ > 0; respects observed mask.
+        if self.training and float(self.hparams.trajectory_noise_std) > 0.0:
+            noise = torch.randn_like(past_target) * float(self.hparams.trajectory_noise_std)
+            past_target = past_target + noise * past_observed_values
+
         # Get static features if available
         feat_static_cat = batch.get("feat_static_cat", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.long))
         feat_static_real = batch.get("feat_static_real", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.float32))
@@ -724,6 +749,89 @@ class TACTiS2LightningModule(pl.LightningModule):
                         self.log(f"w_entropy_reg/layer{li}_median_eff_dim",
                                  w_l.median().exp().detach(),
                                  on_step=False, on_epoch=True, prog_bar=False)
+
+        # === Fix Sd: Energy Score / Variogram Score regularizers (Stage 1 only) ===
+        # Phase 0i-D, 2026-05-09. After Sa+Sw mechanically fixed parameter
+        # pathologies but didn't widen F^-1, this block adds proper-scoring-rule
+        # losses that penalize narrow distributions which miss the truth.
+        # Stage 1 only (sample path goes through marginal flow; Stage 2 freezes
+        # the flow so ES gradient on flow params is zero — copula path is
+        # multivariate-coupled, but for now we apply ES Stage-1 only to keep
+        # the pilot scope focused on the marginal calibration question).
+        sd_active = (
+            self.stage == 1
+            and self.training
+            and (
+                float(self.hparams.lambda_energy_score) > 0.0
+                or float(self.hparams.lambda_variogram) > 0.0
+            )
+        )
+        if sd_active:
+            try:
+                # `module.create_network_inputs` stashed the standardized
+                # tensors on `tactis._last_train_inputs` during the just-
+                # completed forward pass (training mode only).
+                tactis = self.model.tactis
+                stash = getattr(tactis, "_last_train_inputs", None)
+            except AttributeError:
+                stash = None
+            if stash is not None:
+                hist_time = stash["hist_time"]
+                hist_value_norm = stash["hist_value_norm"]
+                pred_time = stash["pred_time"]
+                pred_value_norm = stash["pred_value_norm"]  # [B, S, P]
+                num_samples = int(self.hparams.energy_score_num_samples)
+                try:
+                    samples_norm = tactis.sample(
+                        num_samples=num_samples,
+                        hist_time=hist_time,
+                        hist_value=hist_value_norm,
+                        pred_time=pred_time,
+                    )  # [N, B, S, P]
+                except Exception as e:
+                    logger.warning(f"Sd: tactis.sample failed during training; skipping ES/VS this step: {e}")
+                    samples_norm = None
+                if samples_norm is not None and not torch.isnan(samples_norm).any():
+                    # Flatten the multivariate target dim: D = S * P
+                    n_samp = samples_norm.shape[0]
+                    b_size = samples_norm.shape[1]
+                    samples_flat = samples_norm.reshape(n_samp, b_size, -1)  # [N, B, D]
+                    target_flat = pred_value_norm.reshape(b_size, -1)  # [B, D]
+
+                    # Optional 5-epoch warm-up to stabilize early training.
+                    cur_epoch = int(self.current_epoch)
+                    schedule_mult = 1.0 if cur_epoch >= 5 else max(0.0, cur_epoch / 5.0)
+
+                    if float(self.hparams.lambda_energy_score) > 0.0:
+                        from pytorch_transformer_ts.tactis_2.proper_scoring_rules import energy_score
+                        es_per_batch = energy_score(samples_flat, target_flat)
+                        es_loss = es_per_batch.mean()
+                        eff_lambda_es = schedule_mult * float(self.hparams.lambda_energy_score)
+                        loss = loss + eff_lambda_es * es_loss
+                        with torch.no_grad():
+                            self.log("energy_score/loss_term", es_loss.detach(),
+                                     on_step=True, on_epoch=True, prog_bar=False)
+                            self.log("energy_score/effective_lambda",
+                                     torch.tensor(eff_lambda_es, device=loss.device),
+                                     on_step=False, on_epoch=True, prog_bar=False)
+                            self.log("energy_score/num_samples_used",
+                                     torch.tensor(float(n_samp), device=loss.device),
+                                     on_step=False, on_epoch=True, prog_bar=False)
+
+                    if float(self.hparams.lambda_variogram) > 0.0:
+                        from pytorch_transformer_ts.tactis_2.proper_scoring_rules import variogram_score
+                        vs_per_batch = variogram_score(
+                            samples_flat, target_flat, p=float(self.hparams.variogram_p)
+                        )
+                        vs_loss = vs_per_batch.mean()
+                        eff_lambda_vs = schedule_mult * float(self.hparams.lambda_variogram)
+                        loss = loss + eff_lambda_vs * vs_loss
+                        with torch.no_grad():
+                            self.log("variogram_score/loss_term", vs_loss.detach(),
+                                     on_step=True, on_epoch=True, prog_bar=False)
+                            self.log("variogram_score/effective_lambda",
+                                     torch.tensor(eff_lambda_vs, device=loss.device),
+                                     on_step=False, on_epoch=True, prog_bar=False)
 
         # Manual optimization - get the correct optimizer based on current stage
         if self.stage == 2 and hasattr(self, '_stage2_optimizer') and self._stage2_optimizer is not None:

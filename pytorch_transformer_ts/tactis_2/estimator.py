@@ -165,6 +165,15 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         # of hidden_dim=64; this is the actual reason F^-1 spread stays narrow.
         lambda_w_entropy: float = 0.0,
         w_entropy_min: float = 2.0,
+        # Fix Sd: proper-scoring-rule loss (Phase 0i-D). After Sa+Sw failed to
+        # widen F^-1, the bottleneck is the NLL training objective. ES/VS are
+        # sample-based proper scoring rules that penalize narrow distributions
+        # which miss truth.
+        lambda_energy_score: float = 0.0,
+        energy_score_num_samples: int = 8,
+        lambda_variogram: float = 0.0,
+        variogram_p: float = 0.5,
+        trajectory_noise_std: float = 0.0,
         **kwargs,
     ) -> None:
         self.phase1_checkpoint_path = phase1_checkpoint_path
@@ -244,6 +253,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.a_floor_threshold = a_floor_threshold
         self.lambda_w_entropy = lambda_w_entropy
         self.w_entropy_min = w_entropy_min
+        self.lambda_energy_score = lambda_energy_score
+        self.energy_score_num_samples = energy_score_num_samples
+        self.lambda_variogram = lambda_variogram
+        self.variogram_p = variogram_p
+        self.trajectory_noise_std = trajectory_noise_std
 
         # Common parameters
         self.input_size = input_size
@@ -1040,4 +1054,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             # Fix Sw hparams (w-entropy)
             lambda_w_entropy=self.lambda_w_entropy,
             w_entropy_min=self.w_entropy_min,
+            # Fix Sd hparams (proper scoring rule loss)
+            lambda_energy_score=self.lambda_energy_score,
+            energy_score_num_samples=self.energy_score_num_samples,
+            lambda_variogram=self.lambda_variogram,
+            variogram_p=self.variogram_p,
+            trajectory_noise_std=self.trajectory_noise_std,
         )
