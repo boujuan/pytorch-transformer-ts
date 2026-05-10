@@ -74,6 +74,12 @@ class TACTiS2Model(nn.Module):
         num_parallel_samples: int = 100,
         stage: int = 1,  # Add stage parameter with default value 1
         attentional_copula_kwargs: Optional[dict] = None,  # Parameters for AttentionalCopula component
+        # Phase 0i-E: NSF marginal flow alternative (defaults preserve DSF backward-compat)
+        marginal_flow_type: str = "dsf",
+        decoder_nsf_num_bins: int = 32,
+        decoder_nsf_tail_bound: float = 4.0,
+        decoder_nsf_num_layers: int = 2,
+        decoder_nsf_min_derivative: float = 1e-3,
     ) -> None:
         """
         Initialize the TACTiS2Model.
@@ -248,6 +254,17 @@ class TACTiS2Model(nn.Module):
                 "flow_layers": decoder_dsf_num_layers,
                 "flow_hid_dim": decoder_dsf_hidden_dim,
             },
+            # Phase 0i-E: parallel NSF args block. tactis.py picks one based on marginal_flow_type.
+            "nsf_marginal": {
+                "context_dim": marginal_d_model,
+                "mlp_layers": decoder_mlp_num_layers,
+                "mlp_dim": decoder_mlp_hidden_dim,
+                "num_flow_layers": decoder_nsf_num_layers,
+                "num_bins": decoder_nsf_num_bins,
+                "tail_bound": decoder_nsf_tail_bound,
+                "min_derivative": decoder_nsf_min_derivative,
+            },
+            "marginal_flow_type": marginal_flow_type,
             "skip_copula": False, # Will be controlled by LightningModule stage
             "lock_skip_copula": lock_skip_copula, # Prevent automatic skip_copula updates
         }

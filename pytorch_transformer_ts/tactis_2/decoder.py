@@ -6,6 +6,7 @@ from torch import nn
 
 # Assuming these are in the same directory or correctly importable
 from .dsf_marginal import DSFMarginal
+from .nsf_marginal import NSFMarginal
 from .attentional_copula import AttentionalCopula
 
 logger = logging.getLogger(__name__)
@@ -39,7 +40,9 @@ class CopulaDecoder(nn.Module):
         self,
         flow_input_dim: int,
         copula_input_dim: Optional[int], # Can be None if skip_copula=True initially
-        dsf_marginal: Dict[str, Any],
+        dsf_marginal: Optional[Dict[str, Any]] = None,
+        nsf_marginal: Optional[Dict[str, Any]] = None,
+        marginal_flow_type: str = "dsf",  # "dsf" (default, backward compat) or "nsf"
         attentional_copula: Optional[Dict[str, Any]] = None,
         min_u: float = 0.0,
         max_u: float = 1.0,
@@ -73,16 +76,34 @@ class CopulaDecoder(nn.Module):
         self.max_u = max_u
         self.skip_sampling_marginal = skip_sampling_marginal
         self.attentional_copula_args = attentional_copula
+        self.marginal_flow_type = marginal_flow_type
         self.dsf_marginal_args = dsf_marginal
+        self.nsf_marginal_args = nsf_marginal
         self.skip_copula = skip_copula
 
-        # --- Initialize Marginal ---
-        # Ensure context_dim matches flow_input_dim
-        if self.dsf_marginal_args["context_dim"] != self.flow_input_dim:
-            logger.warning(f"DSF Marginal context_dim ({self.dsf_marginal_args['context_dim']}) != flow_input_dim ({self.flow_input_dim}). Using flow_input_dim.")
-            self.dsf_marginal_args["context_dim"] = self.flow_input_dim
-        self.marginal = DSFMarginal(**self.dsf_marginal_args)
-        logger.debug(f"Initialized marginal (DSF) in CopulaDecoder with context_dim={self.flow_input_dim}")
+        # --- Initialize Marginal (Phase 0i-E: switch on marginal_flow_type) ---
+        if self.marginal_flow_type == "nsf":
+            if self.nsf_marginal_args is None:
+                raise ValueError("marginal_flow_type='nsf' requires `nsf_marginal` config dict.")
+            if self.nsf_marginal_args["context_dim"] != self.flow_input_dim:
+                logger.warning(
+                    f"NSF Marginal context_dim ({self.nsf_marginal_args['context_dim']}) != "
+                    f"flow_input_dim ({self.flow_input_dim}). Using flow_input_dim."
+                )
+                self.nsf_marginal_args["context_dim"] = self.flow_input_dim
+            self.marginal = NSFMarginal(**self.nsf_marginal_args)
+            logger.info(f"Initialized marginal (NSF) in CopulaDecoder with context_dim={self.flow_input_dim}")
+        else:
+            if self.dsf_marginal_args is None:
+                raise ValueError("marginal_flow_type='dsf' requires `dsf_marginal` config dict.")
+            if self.dsf_marginal_args["context_dim"] != self.flow_input_dim:
+                logger.warning(
+                    f"DSF Marginal context_dim ({self.dsf_marginal_args['context_dim']}) != "
+                    f"flow_input_dim ({self.flow_input_dim}). Using flow_input_dim."
+                )
+                self.dsf_marginal_args["context_dim"] = self.flow_input_dim
+            self.marginal = DSFMarginal(**self.dsf_marginal_args)
+            logger.debug(f"Initialized marginal (DSF) in CopulaDecoder with context_dim={self.flow_input_dim}")
 
         # --- Initialize Copula (if not skipping) ---
         self.copula = None

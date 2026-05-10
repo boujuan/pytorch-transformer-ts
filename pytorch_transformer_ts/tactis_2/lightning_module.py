@@ -61,6 +61,15 @@ class TACTiS2LightningModule(pl.LightningModule):
         # 64-unit DSF capacity. See plan moonlit-sprouting-gosling.md.
         lambda_w_entropy: float = 0.0, # Strength of relu(w_entropy_min - H(w))^2 penalty. 0 = disabled.
         w_entropy_min: float = 2.0, # Soft-hinge floor on H(w). log(8)≈2.08 → eff_dim ≥ 8.
+        # === Phase 0i-E: NSF marginal flow hparams ===
+        # Switch from DSF (default) to NSF marginal. NSF's `min_derivative` parameter
+        # structurally prevents the CDF flatness pattern that traps DSF training. See
+        # plan moonlit-sprouting-gosling.md for diagnostics.
+        marginal_flow_type: str = "dsf", # "dsf" (default, backward-compat) or "nsf".
+        decoder_nsf_num_bins: int = 32, # NSF: number of spline bins per layer.
+        decoder_nsf_tail_bound: float = 4.0, # NSF: domain bound. Outside [-B, B] flow is identity.
+        decoder_nsf_num_layers: int = 2, # NSF: number of stacked spline transforms.
+        decoder_nsf_min_derivative: float = 1e-3, # NSF: structural anti-collapse floor on dF/dx.
         # === Fix Sd (proper scoring rule loss): Energy Score / Variogram Score ===
         # Phase 0i-D, 2026-05-09. After Sa+Sw mechanically fixed parameter pathologies
         # but didn't widen F^-1 spread, the 10-trial pilot history proved the bottleneck
@@ -118,7 +127,10 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "lambda_w_entropy", "w_entropy_min",
                                    "lambda_energy_score", "energy_score_num_samples",
                                    "lambda_variogram", "variogram_p",
-                                   "trajectory_noise_std")
+                                   "trajectory_noise_std",
+                                   "marginal_flow_type", "decoder_nsf_num_bins",
+                                   "decoder_nsf_tail_bound", "decoder_nsf_num_layers",
+                                   "decoder_nsf_min_derivative")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config

@@ -174,6 +174,15 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         lambda_variogram: float = 0.0,
         variogram_p: float = 0.5,
         trajectory_noise_std: float = 0.0,
+        # Phase 0i-E: NSF marginal flow. The Phase 0i-D pilot showed sample-based
+        # losses can't widen F^-1 on a collapsed DSF (gradient attenuation through
+        # the inverse-DSF). NSF replaces the parametrization itself; min_derivative
+        # > 0 structurally prevents the failure mode.
+        marginal_flow_type: str = "dsf",
+        decoder_nsf_num_bins: int = 32,
+        decoder_nsf_tail_bound: float = 4.0,
+        decoder_nsf_num_layers: int = 2,
+        decoder_nsf_min_derivative: float = 1e-3,
         **kwargs,
     ) -> None:
         self.phase1_checkpoint_path = phase1_checkpoint_path
@@ -258,6 +267,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.lambda_variogram = lambda_variogram
         self.variogram_p = variogram_p
         self.trajectory_noise_std = trajectory_noise_std
+        self.marginal_flow_type = marginal_flow_type
+        self.decoder_nsf_num_bins = decoder_nsf_num_bins
+        self.decoder_nsf_tail_bound = decoder_nsf_tail_bound
+        self.decoder_nsf_num_layers = decoder_nsf_num_layers
+        self.decoder_nsf_min_derivative = decoder_nsf_min_derivative
 
         # Common parameters
         self.input_size = input_size
@@ -1060,4 +1074,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             lambda_variogram=self.lambda_variogram,
             variogram_p=self.variogram_p,
             trajectory_noise_std=self.trajectory_noise_std,
+            # Phase 0i-E NSF marginal hparams
+            marginal_flow_type=self.marginal_flow_type,
+            decoder_nsf_num_bins=self.decoder_nsf_num_bins,
+            decoder_nsf_tail_bound=self.decoder_nsf_tail_bound,
+            decoder_nsf_num_layers=self.decoder_nsf_num_layers,
+            decoder_nsf_min_derivative=self.decoder_nsf_min_derivative,
         )
