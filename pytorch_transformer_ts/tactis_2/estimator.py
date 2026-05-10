@@ -155,6 +155,16 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         lambda_log_density: float = 0.0,
         log_density_max: float = 3.0,
         a_max: float = 0.0,
+        # Fix Sa: a_floor regularizer (penalizes small `a` values that produce
+        # flat CDF regions). 2026-05-08 diagnostics confirmed this is the F1+F2
+        # root cause; see plan moonlit-sprouting-gosling.md.
+        lambda_a_floor: float = 0.0,
+        a_floor_threshold: float = 0.5,
+        # Fix Sw: w-entropy regularizer (penalizes one-hot softmax weights).
+        # 2026-05-09 diagnostics on Sa pilot trials revealed eff_dim ≈ 1.0 out
+        # of hidden_dim=64; this is the actual reason F^-1 spread stays narrow.
+        lambda_w_entropy: float = 0.0,
+        w_entropy_min: float = 2.0,
         **kwargs,
     ) -> None:
         self.phase1_checkpoint_path = phase1_checkpoint_path
@@ -230,6 +240,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.lambda_log_density = lambda_log_density
         self.log_density_max = log_density_max
         self.a_max = a_max
+        self.lambda_a_floor = lambda_a_floor
+        self.a_floor_threshold = a_floor_threshold
+        self.lambda_w_entropy = lambda_w_entropy
+        self.w_entropy_min = w_entropy_min
 
         # Common parameters
         self.input_size = input_size
@@ -1020,4 +1034,10 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             lambda_log_density=self.lambda_log_density,
             log_density_max=self.log_density_max,
             a_max=self.a_max,
+            # Fix Sa hparams (a_floor)
+            lambda_a_floor=self.lambda_a_floor,
+            a_floor_threshold=self.a_floor_threshold,
+            # Fix Sw hparams (w-entropy)
+            lambda_w_entropy=self.lambda_w_entropy,
+            w_entropy_min=self.w_entropy_min,
         )

@@ -46,6 +46,21 @@ class TACTiS2LightningModule(pl.LightningModule):
         lambda_log_density: float = 0.0, # Strength of per-(b,v) log-density penalty. 0 = disabled.
         log_density_max: float = 3.0, # Soft-hinge threshold on per-(b,v) log-density (density ≤ exp(3) ≈ 20).
         a_max: float = 0.0, # Smooth cap on `a` (post-softplus). 0 = disabled. Recommended: 20 to bound the broken-regime ~720.
+        # === Fix Sa (a_floor): symmetric lower bound on DSF sigmoid steepness ===
+        # 2026-05-08 diagnostics showed 52.7% of layer-0 `a` values < 0.1, producing
+        # flat CDF regions that cause both F1 (sample tightness) and F2 (time-flatness).
+        # The existing `a_max` cap addresses upper saturation; this addresses the
+        # unconstrained lower floor. See plan: moonlit-sprouting-gosling.md.
+        lambda_a_floor: float = 0.0, # Strength of relu(a_floor_threshold - a)^2 penalty. 0 = disabled (backward compat).
+        a_floor_threshold: float = 0.5, # Soft-hinge threshold below which post-cap `a` is penalized.
+        # === Fix Sw (w-entropy): force the marginal_conditioner to spread softmax weights ===
+        # 2026-05-09 diagnostics on the 5 Sa pilot trials revealed that the softmax
+        # weights `w` are essentially one-hot (eff_dim ≈ 1.0 out of 64 hidden units),
+        # which is the actual reason F^-1 spread stays narrow even after Sa fixes
+        # the `a` distribution. Penalizing low entropy on `w` activates more of the
+        # 64-unit DSF capacity. See plan moonlit-sprouting-gosling.md.
+        lambda_w_entropy: float = 0.0, # Strength of relu(w_entropy_min - H(w))^2 penalty. 0 = disabled.
+        w_entropy_min: float = 2.0, # Soft-hinge floor on H(w). log(8)≈2.08 → eff_dim ≥ 8.
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -87,7 +102,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "num_batches_per_epoch", "batch_size",
                                    "base_batch_size_for_scheduler_steps", "base_limit_train_batches",
                                    "lambda_a_reg", "a_reg_threshold",
-                                   "lambda_log_density", "log_density_max", "a_max")
+                                   "lambda_log_density", "log_density_max", "a_max",
+                                   "lambda_a_floor", "a_floor_threshold",
+                                   "lambda_w_entropy", "w_entropy_min")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -629,7 +646,85 @@ class TACTiS2LightningModule(pl.LightningModule):
                              on_step=False, on_epoch=True, prog_bar=False)
                     self.log("log_density_reg/effective_lambda", torch.tensor(effective_lambda, device=loss.device),
                              on_step=False, on_epoch=True, prog_bar=False)
-        
+
+        # === Fix Sa: a_floor regularizer (Stage 1 only) ===
+        # Penalty: lambda_a_floor * mean( relu(a_floor_threshold - a_post)^2 )
+        # where a_post is the post-cap, post-EPSILON `a` values from each DSF
+        # SigmoidFlow layer. Targets the F1+F2 root cause from 2026-05-08
+        # diagnostics: 52.7% of layer-0 `a` values < 0.1 produced flat CDF
+        # regions causing both narrow F^-1 output AND insensitive ∂F^-1/∂context.
+        # Active only in Stage 1 (flow trains here; Stage 2 freezes the flow).
+        if (
+            apply_reg
+            and float(self.hparams.lambda_a_floor) > 0.0
+        ):
+            try:
+                flow = self.model.tactis.decoder.marginal.marginal_flow
+                a_per_layer = getattr(flow, "_last_a_post_cap_per_layer", None)
+            except AttributeError:
+                a_per_layer = None
+            if a_per_layer is not None and len(a_per_layer) > 0:
+                threshold_floor = float(self.hparams.a_floor_threshold)
+                # Concatenate per-layer a tensors along last dim → one (B, V, n_layers*h) tensor
+                a_all = torch.cat(a_per_layer, dim=-1)
+                a_floor_reg = torch.relu(threshold_floor - a_all).pow(2).mean()
+                loss = loss + float(self.hparams.lambda_a_floor) * a_floor_reg
+                with torch.no_grad():
+                    self.log("a_floor_reg/loss_term", a_floor_reg.detach(),
+                             on_step=True, on_epoch=True, prog_bar=False)
+                    self.log("a_floor_reg/min_a", a_all.min().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("a_floor_reg/median_a", a_all.median().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("a_floor_reg/frac_a_lt_0p1", (a_all < 0.1).float().mean().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("a_floor_reg/frac_a_lt_threshold", (a_all < threshold_floor).float().mean().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    # Per-layer breakdown (layer 0 is where collapse is worst)
+                    for li, a_l in enumerate(a_per_layer):
+                        self.log(f"a_floor_reg/layer{li}_median_a", a_l.median().detach(),
+                                 on_step=False, on_epoch=True, prog_bar=False)
+                        self.log(f"a_floor_reg/layer{li}_frac_a_lt_0p1", (a_l < 0.1).float().mean().detach(),
+                                 on_step=False, on_epoch=True, prog_bar=False)
+
+        # === Fix Sw: w-entropy regularizer (Stage 1 only) ===
+        # Penalty: lambda_w_entropy * mean(relu(w_entropy_min - H(w))^2)
+        # where H(w) is the per-(b,v) Shannon entropy of softmax weights from
+        # each DSF layer. Forces the conditioner to spread weight across many
+        # hidden units (vs the empirically-observed one-hot collapse from
+        # 2026-05-09 diagnostics: eff_dim ≈ 1 out of 64). w_entropy_min=2.08
+        # corresponds to eff_dim ≥ 8 sigmoids active.
+        if (
+            apply_reg
+            and float(self.hparams.lambda_w_entropy) > 0.0
+        ):
+            try:
+                flow = self.model.tactis.decoder.marginal.marginal_flow
+                w_ent_per_layer = getattr(flow, "_last_w_entropy_per_layer", None)
+            except AttributeError:
+                w_ent_per_layer = None
+            if w_ent_per_layer is not None and len(w_ent_per_layer) > 0:
+                threshold_we = float(self.hparams.w_entropy_min)
+                # Concatenate per-layer (B, V) entropy tensors → one (B, V, n_layers)
+                w_ent_all = torch.stack(w_ent_per_layer, dim=-1)  # B, V, L
+                w_entropy_reg = torch.relu(threshold_we - w_ent_all).pow(2).mean()
+                loss = loss + float(self.hparams.lambda_w_entropy) * w_entropy_reg
+                with torch.no_grad():
+                    self.log("w_entropy_reg/loss_term", w_entropy_reg.detach(),
+                             on_step=True, on_epoch=True, prog_bar=False)
+                    self.log("w_entropy_reg/min_H", w_ent_all.min().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("w_entropy_reg/median_H", w_ent_all.median().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("w_entropy_reg/median_eff_dim", w_ent_all.median().exp().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    for li, w_l in enumerate(w_ent_per_layer):
+                        self.log(f"w_entropy_reg/layer{li}_median_H", w_l.median().detach(),
+                                 on_step=False, on_epoch=True, prog_bar=False)
+                        self.log(f"w_entropy_reg/layer{li}_median_eff_dim",
+                                 w_l.median().exp().detach(),
+                                 on_step=False, on_epoch=True, prog_bar=False)
+
         # Manual optimization - get the correct optimizer based on current stage
         if self.stage == 2 and hasattr(self, '_stage2_optimizer') and self._stage2_optimizer is not None:
             # Use Stage 2 fresh optimizer with only copula parameters
