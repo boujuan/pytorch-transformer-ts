@@ -195,11 +195,21 @@ class TACTiS(nn.Module):
         else:
             raise ValueError(f"Unknown encoder_type for flow: {self.encoder_type}")
 
-        # Marginal flow type switch (Phase 0i-E): "dsf" (default, backward-compat) or "nsf"
+        # Marginal flow type switch (Phase 0i-E NSF, 0i-G Quantile): "dsf" (default), "nsf", or "quantile"
         if self.copula_decoder_args is None:
             raise ValueError("copula_decoder configuration is required.")
         marginal_flow_type = self.copula_decoder_args.get("marginal_flow_type", "dsf")
-        if marginal_flow_type == "nsf":
+        if marginal_flow_type == "quantile":
+            if "quantile_marginal" not in self.copula_decoder_args:
+                raise ValueError("Quantile Marginal arguments ('quantile_marginal') missing in copula_decoder config.")
+            q_args = self.copula_decoder_args["quantile_marginal"]
+            if q_args["context_dim"] != flow_d_model:
+                logger.warning(
+                    f"quantile_marginal context_dim ({q_args['context_dim']}) differs from "
+                    f"flow_encoder output dim ({flow_d_model}). Using encoder output dim."
+                )
+                q_args["context_dim"] = flow_d_model
+        elif marginal_flow_type == "nsf":
             if "nsf_marginal" not in self.copula_decoder_args:
                 raise ValueError("NSF Marginal arguments ('nsf_marginal') missing in copula_decoder config.")
             nsf_args = self.copula_decoder_args["nsf_marginal"]
@@ -234,6 +244,7 @@ class TACTiS(nn.Module):
              marginal_flow_type=marginal_flow_type,
              dsf_marginal=self.copula_decoder_args.get("dsf_marginal"),
              nsf_marginal=self.copula_decoder_args.get("nsf_marginal"),
+             quantile_marginal=self.copula_decoder_args.get("quantile_marginal"),
              attentional_copula=self.copula_decoder_args.get("attentional_copula"), # Pass None if not present
              min_u=self.copula_decoder_args.get("min_u", 0.0),
              max_u=self.copula_decoder_args.get("max_u", 1.0),

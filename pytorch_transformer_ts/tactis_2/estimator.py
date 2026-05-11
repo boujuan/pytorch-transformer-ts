@@ -183,6 +183,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         decoder_nsf_tail_bound: float = 4.0,
         decoder_nsf_num_layers: int = 2,
         decoder_nsf_min_derivative: float = 1e-3,
+        # Phase 0i-G: Quantile-head marginal hparams (pinball loss)
+        decoder_quantile_levels: Optional[List[float]] = None,
+        decoder_quantile_mlp_layers: int = 2,
+        decoder_quantile_mlp_dim: int = 64,
+        decoder_quantile_crossing_fix: str = "monotonic_delta",
         **kwargs,
     ) -> None:
         self.phase1_checkpoint_path = phase1_checkpoint_path
@@ -272,6 +277,11 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.decoder_nsf_tail_bound = decoder_nsf_tail_bound
         self.decoder_nsf_num_layers = decoder_nsf_num_layers
         self.decoder_nsf_min_derivative = decoder_nsf_min_derivative
+        # Phase 0i-G: Quantile-head marginal hparams (pinball loss)
+        self.decoder_quantile_levels = decoder_quantile_levels
+        self.decoder_quantile_mlp_layers = decoder_quantile_mlp_layers
+        self.decoder_quantile_mlp_dim = decoder_quantile_mlp_dim
+        self.decoder_quantile_crossing_fix = decoder_quantile_crossing_fix
 
         # Common parameters
         self.input_size = input_size
@@ -909,6 +919,13 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "decoder_nsf_tail_bound": self.decoder_nsf_tail_bound,
             "decoder_nsf_num_layers": self.decoder_nsf_num_layers,
             "decoder_nsf_min_derivative": self.decoder_nsf_min_derivative,
+            # Phase 0i-G: Quantile head hparams. Without these in model_config, TACTiS2Model
+            # falls back to defaults and the YAML key is silently ignored — same plumbing
+            # bug class as the NSF v1 pilot from Phase 0i-E. See test_estimator_model_config_dict_includes_quantile_keys.
+            "decoder_quantile_levels": self.decoder_quantile_levels,
+            "decoder_quantile_mlp_layers": self.decoder_quantile_mlp_layers,
+            "decoder_quantile_mlp_dim": self.decoder_quantile_mlp_dim,
+            "decoder_quantile_crossing_fix": self.decoder_quantile_crossing_fix,
             "decoder_mlp_num_layers": self.decoder_mlp_num_layers,
             "decoder_mlp_hidden_dim": self.decoder_mlp_hidden_dim,
             "decoder_transformer_num_layers": self.decoder_transformer_num_layers,
@@ -1088,4 +1105,9 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             decoder_nsf_tail_bound=self.decoder_nsf_tail_bound,
             decoder_nsf_num_layers=self.decoder_nsf_num_layers,
             decoder_nsf_min_derivative=self.decoder_nsf_min_derivative,
+            # Phase 0i-G Quantile-head marginal hparams (pinball loss)
+            decoder_quantile_levels=self.decoder_quantile_levels,
+            decoder_quantile_mlp_layers=self.decoder_quantile_mlp_layers,
+            decoder_quantile_mlp_dim=self.decoder_quantile_mlp_dim,
+            decoder_quantile_crossing_fix=self.decoder_quantile_crossing_fix,
         )

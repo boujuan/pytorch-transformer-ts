@@ -5,7 +5,7 @@ import lightning.pytorch as pl
 import torch
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR
 from .module import TACTiS2Model
-from typing import Optional
+from typing import Optional, List
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -65,11 +65,16 @@ class TACTiS2LightningModule(pl.LightningModule):
         # Switch from DSF (default) to NSF marginal. NSF's `min_derivative` parameter
         # structurally prevents the CDF flatness pattern that traps DSF training. See
         # plan moonlit-sprouting-gosling.md for diagnostics.
-        marginal_flow_type: str = "dsf", # "dsf" (default, backward-compat) or "nsf".
+        marginal_flow_type: str = "dsf", # "dsf" (default, backward-compat), "nsf", or "quantile".
         decoder_nsf_num_bins: int = 32, # NSF: number of spline bins per layer.
         decoder_nsf_tail_bound: float = 4.0, # NSF: domain bound. Outside [-B, B] flow is identity.
         decoder_nsf_num_layers: int = 2, # NSF: number of stacked spline transforms.
         decoder_nsf_min_derivative: float = 1e-3, # NSF: structural anti-collapse floor on dF/dx.
+        # === Phase 0i-G: Quantile-head marginal (pinball loss) ===
+        decoder_quantile_levels: Optional[List[float]] = None, # K predicted quantile levels (default: 11 standard levels).
+        decoder_quantile_mlp_layers: int = 2, # Quantile head MLP depth.
+        decoder_quantile_mlp_dim: int = 64, # Quantile head MLP width.
+        decoder_quantile_crossing_fix: str = "monotonic_delta", # "monotonic_delta" (recommended), "post_hoc_sort", or "none".
         # === Fix Sd (proper scoring rule loss): Energy Score / Variogram Score ===
         # Phase 0i-D, 2026-05-09. After Sa+Sw mechanically fixed parameter pathologies
         # but didn't widen F^-1 spread, the 10-trial pilot history proved the bottleneck
@@ -130,7 +135,9 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "trajectory_noise_std",
                                    "marginal_flow_type", "decoder_nsf_num_bins",
                                    "decoder_nsf_tail_bound", "decoder_nsf_num_layers",
-                                   "decoder_nsf_min_derivative")
+                                   "decoder_nsf_min_derivative",
+                                   "decoder_quantile_levels", "decoder_quantile_mlp_layers",
+                                   "decoder_quantile_mlp_dim", "decoder_quantile_crossing_fix")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -561,10 +568,17 @@ class TACTiS2LightningModule(pl.LightningModule):
         # to compute the soft-hinge L2 penalty on the `a_pre` portion of marginal_params.
         captured_marginal_params = []  # list-as-mutable-cell for closure
         reg_hook_handle = None
+        # Phase 0i-G: DSF regularizers (a_reg, log_density, a_floor, w_entropy)
+        # are gated on marginal_flow_type == "dsf" because they read DSF-specific
+        # parameter attributes (_last_per_datapoint_log_density, _last_a_post_cap_per_layer,
+        # etc.) that don't exist for NSF or Quantile marginals. Already silent no-ops
+        # via getattr(..., None) but we make the gate explicit for clarity.
+        is_dsf_mode = (self.hparams.marginal_flow_type == "dsf")
         apply_reg = (
             self.stage == 1
             and float(self.hparams.lambda_a_reg) > 0.0
             and self.training
+            and is_dsf_mode
         )
         if apply_reg:
             def _capture_first_call(module, inputs, output):

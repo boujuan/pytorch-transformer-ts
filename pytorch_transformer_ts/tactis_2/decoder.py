@@ -7,6 +7,7 @@ from torch import nn
 # Assuming these are in the same directory or correctly importable
 from .dsf_marginal import DSFMarginal
 from .nsf_marginal import NSFMarginal
+from .quantile_marginal import QuantileMarginal
 from .attentional_copula import AttentionalCopula
 
 logger = logging.getLogger(__name__)
@@ -42,7 +43,8 @@ class CopulaDecoder(nn.Module):
         copula_input_dim: Optional[int], # Can be None if skip_copula=True initially
         dsf_marginal: Optional[Dict[str, Any]] = None,
         nsf_marginal: Optional[Dict[str, Any]] = None,
-        marginal_flow_type: str = "dsf",  # "dsf" (default, backward compat) or "nsf"
+        quantile_marginal: Optional[Dict[str, Any]] = None,
+        marginal_flow_type: str = "dsf",  # "dsf" (default, backward compat), "nsf", or "quantile"
         attentional_copula: Optional[Dict[str, Any]] = None,
         min_u: float = 0.0,
         max_u: float = 1.0,
@@ -79,10 +81,26 @@ class CopulaDecoder(nn.Module):
         self.marginal_flow_type = marginal_flow_type
         self.dsf_marginal_args = dsf_marginal
         self.nsf_marginal_args = nsf_marginal
+        self.quantile_marginal_args = quantile_marginal
         self.skip_copula = skip_copula
 
-        # --- Initialize Marginal (Phase 0i-E: switch on marginal_flow_type) ---
-        if self.marginal_flow_type == "nsf":
+        # --- Initialize Marginal (Phase 0i-E NSF + 0i-G Quantile: switch on marginal_flow_type) ---
+        if self.marginal_flow_type == "quantile":
+            if self.quantile_marginal_args is None:
+                raise ValueError("marginal_flow_type='quantile' requires `quantile_marginal` config dict.")
+            if self.quantile_marginal_args["context_dim"] != self.flow_input_dim:
+                logger.warning(
+                    f"Quantile Marginal context_dim ({self.quantile_marginal_args['context_dim']}) != "
+                    f"flow_input_dim ({self.flow_input_dim}). Using flow_input_dim."
+                )
+                self.quantile_marginal_args["context_dim"] = self.flow_input_dim
+            self.marginal = QuantileMarginal(**self.quantile_marginal_args)
+            logger.info(
+                f"Initialized marginal (Quantile, K={self.marginal.K}, "
+                f"crossing_fix={self.marginal.crossing_fix}) in CopulaDecoder "
+                f"with context_dim={self.flow_input_dim}"
+            )
+        elif self.marginal_flow_type == "nsf":
             if self.nsf_marginal_args is None:
                 raise ValueError("marginal_flow_type='nsf' requires `nsf_marginal` config dict.")
             if self.nsf_marginal_args["context_dim"] != self.flow_input_dim:
@@ -189,11 +207,28 @@ class CopulaDecoder(nn.Module):
         # num_pred_variables = S * num_pred_steps # Used in original copula loss call
 
         # --- Marginal Calculation ---
-        # DSFMarginal expects context [B, N, D] and x [B, N]
-        u_vals_merged, marginal_logdet_batch = self.marginal.forward_logdet(
-            flow_encoded_merged, true_value_merged
-        )
-        # marginal_logdet_batch shape: [B] (already summed over N dimension by DSF)
+        # Phase 0i-G: in quantile mode the training objective is pinball loss,
+        # not NLL+logdet. We wrap pinball as `marginal_logdet_batch = -pinball`
+        # so the existing `loss = copula_loss - marginal_logdet` formula in
+        # tactis.py yields `loss = copula_loss + pinball_loss` — no caller
+        # changes needed. Uniforms u_vals still come from the piecewise-linear
+        # CDF (forward_no_logdet semantics) so the copula path works unchanged.
+        if self.marginal_flow_type == "quantile":
+            pinball_batch = self.marginal.pinball_loss(
+                flow_encoded_merged, true_value_merged
+            )  # [B]
+            # u-values for the copula path: get them WITHOUT going through the
+            # logdet branch, since logdet is meaningless here.
+            u_vals_merged = self.marginal.forward_no_logdet(
+                flow_encoded_merged, true_value_merged
+            )
+            marginal_logdet_batch = -pinball_batch
+        else:
+            # DSF / NSF: training objective is the marginal logdet (NLL flow).
+            u_vals_merged, marginal_logdet_batch = self.marginal.forward_logdet(
+                flow_encoded_merged, true_value_merged
+            )
+        # marginal_logdet_batch shape: [B]
         self.marginal_logdet_val = marginal_logdet_batch # Store for potential logging
 
         # --- Copula Calculation (if not skipped) ---

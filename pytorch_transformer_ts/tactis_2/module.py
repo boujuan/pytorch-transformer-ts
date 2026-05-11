@@ -80,6 +80,11 @@ class TACTiS2Model(nn.Module):
         decoder_nsf_tail_bound: float = 4.0,
         decoder_nsf_num_layers: int = 2,
         decoder_nsf_min_derivative: float = 1e-3,
+        # Phase 0i-G: Quantile-head marginal alternative (pinball loss)
+        decoder_quantile_levels: Optional[List[float]] = None,
+        decoder_quantile_mlp_layers: int = 2,
+        decoder_quantile_mlp_dim: int = 64,
+        decoder_quantile_crossing_fix: str = "monotonic_delta",
     ) -> None:
         """
         Initialize the TACTiS2Model.
@@ -263,6 +268,18 @@ class TACTiS2Model(nn.Module):
                 "num_bins": decoder_nsf_num_bins,
                 "tail_bound": decoder_nsf_tail_bound,
                 "min_derivative": decoder_nsf_min_derivative,
+            },
+            # Phase 0i-G: parallel Quantile args block (pinball loss).
+            "quantile_marginal": {
+                "context_dim": marginal_d_model,
+                "mlp_layers": decoder_quantile_mlp_layers,
+                "mlp_dim": decoder_quantile_mlp_dim,
+                "quantile_levels": (
+                    decoder_quantile_levels
+                    if decoder_quantile_levels is not None
+                    else [0.01, 0.05, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 0.95, 0.99]
+                ),
+                "crossing_fix": decoder_quantile_crossing_fix,
             },
             "marginal_flow_type": marginal_flow_type,
             "skip_copula": False, # Will be controlled by LightningModule stage
