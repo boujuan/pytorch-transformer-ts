@@ -144,6 +144,50 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         input_size: int = 1, # Number of target series
         use_pytorch_dataloader: bool = False,
         phase1_checkpoint_path: str = None,
+        # --- DSF flow-collapse regularization ---
+        # See pytorch_transformer_ts/tactis_2/lightning_module.py for the soft-hinge L2 penalty.
+        # Targets the empirically-observed `a` parameter explosion (~0.84 → ~720 across stage 1
+        # training) that produces collapsed marginal CDFs and degenerate inference samples.
+        lambda_a_reg: float = 0.0,
+        a_reg_threshold: float = 3.0,
+        # Deeper-fix v2: per-datapoint log-density penalty + smooth a-cap.
+        # See plan: /user/taed7566/.claude/plans/moonlit-sprouting-gosling.md
+        lambda_log_density: float = 0.0,
+        log_density_max: float = 3.0,
+        a_max: float = 0.0,
+        # Fix Sa: a_floor regularizer (penalizes small `a` values that produce
+        # flat CDF regions). 2026-05-08 diagnostics confirmed this is the F1+F2
+        # root cause; see plan moonlit-sprouting-gosling.md.
+        lambda_a_floor: float = 0.0,
+        a_floor_threshold: float = 0.5,
+        # Fix Sw: w-entropy regularizer (penalizes one-hot softmax weights).
+        # 2026-05-09 diagnostics on Sa pilot trials revealed eff_dim ≈ 1.0 out
+        # of hidden_dim=64; this is the actual reason F^-1 spread stays narrow.
+        lambda_w_entropy: float = 0.0,
+        w_entropy_min: float = 2.0,
+        # Fix Sd: proper-scoring-rule loss (Phase 0i-D). After Sa+Sw failed to
+        # widen F^-1, the bottleneck is the NLL training objective. ES/VS are
+        # sample-based proper scoring rules that penalize narrow distributions
+        # which miss truth.
+        lambda_energy_score: float = 0.0,
+        energy_score_num_samples: int = 8,
+        lambda_variogram: float = 0.0,
+        variogram_p: float = 0.5,
+        trajectory_noise_std: float = 0.0,
+        # Phase 0i-E: NSF marginal flow. The Phase 0i-D pilot showed sample-based
+        # losses can't widen F^-1 on a collapsed DSF (gradient attenuation through
+        # the inverse-DSF). NSF replaces the parametrization itself; min_derivative
+        # > 0 structurally prevents the failure mode.
+        marginal_flow_type: str = "dsf",
+        decoder_nsf_num_bins: int = 32,
+        decoder_nsf_tail_bound: float = 4.0,
+        decoder_nsf_num_layers: int = 2,
+        decoder_nsf_min_derivative: float = 1e-3,
+        # Phase 0i-G: Quantile-head marginal hparams (pinball loss)
+        decoder_quantile_levels: Optional[List[float]] = None,
+        decoder_quantile_mlp_layers: int = 2,
+        decoder_quantile_mlp_dim: int = 64,
+        decoder_quantile_crossing_fix: str = "monotonic_delta",
         **kwargs,
     ) -> None:
         self.phase1_checkpoint_path = phase1_checkpoint_path
@@ -212,6 +256,32 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
         self.steps_to_decay_s2 = steps_to_decay_s2 # Store manual T_max value for stage 2
         self.base_batch_size_for_scheduler_steps = base_batch_size_for_scheduler_steps
         self.base_limit_train_batches = base_limit_train_batches
+        # DSF flow-collapse regularization (defaults: 0.0, 3.0 = disabled / no-op)
+        self.lambda_a_reg = lambda_a_reg
+        self.a_reg_threshold = a_reg_threshold
+        # Deeper-fix v2: per-datapoint log-density penalty + smooth a-cap.
+        self.lambda_log_density = lambda_log_density
+        self.log_density_max = log_density_max
+        self.a_max = a_max
+        self.lambda_a_floor = lambda_a_floor
+        self.a_floor_threshold = a_floor_threshold
+        self.lambda_w_entropy = lambda_w_entropy
+        self.w_entropy_min = w_entropy_min
+        self.lambda_energy_score = lambda_energy_score
+        self.energy_score_num_samples = energy_score_num_samples
+        self.lambda_variogram = lambda_variogram
+        self.variogram_p = variogram_p
+        self.trajectory_noise_std = trajectory_noise_std
+        self.marginal_flow_type = marginal_flow_type
+        self.decoder_nsf_num_bins = decoder_nsf_num_bins
+        self.decoder_nsf_tail_bound = decoder_nsf_tail_bound
+        self.decoder_nsf_num_layers = decoder_nsf_num_layers
+        self.decoder_nsf_min_derivative = decoder_nsf_min_derivative
+        # Phase 0i-G: Quantile-head marginal hparams (pinball loss)
+        self.decoder_quantile_levels = decoder_quantile_levels
+        self.decoder_quantile_mlp_layers = decoder_quantile_mlp_layers
+        self.decoder_quantile_mlp_dim = decoder_quantile_mlp_dim
+        self.decoder_quantile_crossing_fix = decoder_quantile_crossing_fix
 
         # Common parameters
         self.input_size = input_size
@@ -331,11 +401,56 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
                 # --- Stage 1 Optimizer ---
                 "lr_stage1": trial.suggest_float("lr_stage1", 5e-6, 1e-3, log=True),
                 "weight_decay_stage1": trial.suggest_categorical("weight_decay_stage1", dynamic_kwargs.get("weight_decay_stage1", [0.0, 1e-6, 1e-7])),
-                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0, 0.5, 1.0, 3.0, 5.0])),
+                # NOTE: dropped 0 from default categorical because v1 pilot showed clip=0 strongly
+                # correlates with covert collapse (4/5 clip=0 trials had F^-1 std < 0.1).
+                "gradient_clip_val_stage1": trial.suggest_categorical("gradient_clip_val_stage1", dynamic_kwargs.get("gradient_clip_val_stage1", [0.5, 1.0, 3.0, 5.0])),
                 "eta_min_fraction_s1": trial.suggest_float("eta_min_fraction_s1", 1e-3, 0.01, log=True),
 
                 # --- Bagging ---
                 "bagging_size": trial.suggest_categorical("bagging_size", dynamic_kwargs.get("bagging_size", [None, 64, 128, 256])),
+
+                # --- DSF flow-collapse regularization (Stage 1 only) ---
+                # Soft-hinge L2 penalty on `a_pre`. Wide log-uniform range to find the sweet spot.
+                # When 0 (or close), behaves like the unregularized model that produced the collapse.
+                # MarginalHealthMonitor callback prunes trials whose `a` parameter still explodes
+                # (max-a > 50) at end of stage 1 — this prevents Optuna from rediscovering the
+                # collapsed minimum (which has spuriously low val_loss).
+                #
+                # FOCUSED-STUDY override: dynamic_kwargs may pass {"lambda_a_reg_fixed": <float>}
+                # to lock the value (skipping the trial.suggest call) — used by
+                # tune_log_density_max_focused.yaml to sweep only log_density_max.
+                "lambda_a_reg": (
+                    dynamic_kwargs["lambda_a_reg_fixed"]
+                    if dynamic_kwargs.get("lambda_a_reg_fixed") is not None
+                    else trial.suggest_float("lambda_a_reg", 1e-5, 1.0, log=True)
+                ),
+
+                # --- Deeper-fix v2: per-datapoint log-density regularization ---
+                # See plan: /user/taed7566/.claude/plans/moonlit-sprouting-gosling.md
+                # Penalizes the actual quantity that runs to +inf during flow collapse (the
+                # per-(batch, vars) total log-density), addressing 4 loopholes in the
+                # per-parameter `lambda_a_reg` alone. Wider log-uniform range ([1e-4, 10])
+                # reflects that this penalty's units are different (per-data-point density,
+                # not per-parameter).
+                "lambda_log_density": (
+                    dynamic_kwargs["lambda_log_density_fixed"]
+                    if dynamic_kwargs.get("lambda_log_density_fixed") is not None
+                    else trial.suggest_float("lambda_log_density", 1e-4, 10.0, log=True)
+                ),
+
+                # log_density_max: threshold above which the per-datapoint log-density
+                # is penalized. Smoke test (epoch 3 healthy training) showed
+                # max_log_density ≈ -5; collapse at +∞. With threshold +3 the penalty
+                # only fires for *catastrophic* sharpening (8+ nats above healthy).
+                # Sweep to find a threshold that's discriminative for *covert* sharpening
+                # too — the v1 collapse showed F⁻¹=0.099 with max_a=25 and
+                # marginal_logdet=+715, suggesting log-density got well above 0 long before
+                # it would have hit +3. Lower thresholds (0, -2) make the penalty fire
+                # earlier; higher (3) only catches catastrophe.
+                "log_density_max": trial.suggest_categorical(
+                    "log_density_max",
+                    dynamic_kwargs.get("log_density_max", [-2.0, 0.0, 1.0, 3.0]),
+                ),
             }
             return {**common_params, **stage1_params}
 
@@ -796,6 +911,21 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             "copula_num_layers": self.copula_num_layers,
             "decoder_dsf_num_layers": self.decoder_dsf_num_layers,
             "decoder_dsf_hidden_dim": self.decoder_dsf_hidden_dim,
+            # Phase 0i-E: NSF marginal flow alternative — passed through to TACTiS2Model.
+            # Without these in model_config, TACTiS2Model falls back to default
+            # marginal_flow_type="dsf" and the YAML key is silently ignored.
+            "marginal_flow_type": self.marginal_flow_type,
+            "decoder_nsf_num_bins": self.decoder_nsf_num_bins,
+            "decoder_nsf_tail_bound": self.decoder_nsf_tail_bound,
+            "decoder_nsf_num_layers": self.decoder_nsf_num_layers,
+            "decoder_nsf_min_derivative": self.decoder_nsf_min_derivative,
+            # Phase 0i-G: Quantile head hparams. Without these in model_config, TACTiS2Model
+            # falls back to defaults and the YAML key is silently ignored — same plumbing
+            # bug class as the NSF v1 pilot from Phase 0i-E. See test_estimator_model_config_dict_includes_quantile_keys.
+            "decoder_quantile_levels": self.decoder_quantile_levels,
+            "decoder_quantile_mlp_layers": self.decoder_quantile_mlp_layers,
+            "decoder_quantile_mlp_dim": self.decoder_quantile_mlp_dim,
+            "decoder_quantile_crossing_fix": self.decoder_quantile_crossing_fix,
             "decoder_mlp_num_layers": self.decoder_mlp_num_layers,
             "decoder_mlp_hidden_dim": self.decoder_mlp_hidden_dim,
             "decoder_transformer_num_layers": self.decoder_transformer_num_layers,
@@ -950,4 +1080,34 @@ class TACTiS2Estimator(PyTorchLightningEstimator):
             num_batches_per_epoch=self.true_num_batches_per_epoch or self.num_batches_per_epoch,
             # Phase 2: load pre-trained marginal weights from Phase 1 checkpoint
             phase1_checkpoint_path=self.phase1_checkpoint_path,
+            # DSF flow-collapse regularization
+            lambda_a_reg=self.lambda_a_reg,
+            a_reg_threshold=self.a_reg_threshold,
+            # Deeper-fix v2 hparams
+            lambda_log_density=self.lambda_log_density,
+            log_density_max=self.log_density_max,
+            a_max=self.a_max,
+            # Fix Sa hparams (a_floor)
+            lambda_a_floor=self.lambda_a_floor,
+            a_floor_threshold=self.a_floor_threshold,
+            # Fix Sw hparams (w-entropy)
+            lambda_w_entropy=self.lambda_w_entropy,
+            w_entropy_min=self.w_entropy_min,
+            # Fix Sd hparams (proper scoring rule loss)
+            lambda_energy_score=self.lambda_energy_score,
+            energy_score_num_samples=self.energy_score_num_samples,
+            lambda_variogram=self.lambda_variogram,
+            variogram_p=self.variogram_p,
+            trajectory_noise_std=self.trajectory_noise_std,
+            # Phase 0i-E NSF marginal hparams
+            marginal_flow_type=self.marginal_flow_type,
+            decoder_nsf_num_bins=self.decoder_nsf_num_bins,
+            decoder_nsf_tail_bound=self.decoder_nsf_tail_bound,
+            decoder_nsf_num_layers=self.decoder_nsf_num_layers,
+            decoder_nsf_min_derivative=self.decoder_nsf_min_derivative,
+            # Phase 0i-G Quantile-head marginal hparams (pinball loss)
+            decoder_quantile_levels=self.decoder_quantile_levels,
+            decoder_quantile_mlp_layers=self.decoder_quantile_mlp_layers,
+            decoder_quantile_mlp_dim=self.decoder_quantile_mlp_dim,
+            decoder_quantile_crossing_fix=self.decoder_quantile_crossing_fix,
         )

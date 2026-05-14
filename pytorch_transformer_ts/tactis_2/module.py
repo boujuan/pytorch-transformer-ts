@@ -74,6 +74,17 @@ class TACTiS2Model(nn.Module):
         num_parallel_samples: int = 100,
         stage: int = 1,  # Add stage parameter with default value 1
         attentional_copula_kwargs: Optional[dict] = None,  # Parameters for AttentionalCopula component
+        # Phase 0i-E: NSF marginal flow alternative (defaults preserve DSF backward-compat)
+        marginal_flow_type: str = "dsf",
+        decoder_nsf_num_bins: int = 32,
+        decoder_nsf_tail_bound: float = 4.0,
+        decoder_nsf_num_layers: int = 2,
+        decoder_nsf_min_derivative: float = 1e-3,
+        # Phase 0i-G: Quantile-head marginal alternative (pinball loss)
+        decoder_quantile_levels: Optional[List[float]] = None,
+        decoder_quantile_mlp_layers: int = 2,
+        decoder_quantile_mlp_dim: int = 64,
+        decoder_quantile_crossing_fix: str = "monotonic_delta",
     ) -> None:
         """
         Initialize the TACTiS2Model.
@@ -248,6 +259,29 @@ class TACTiS2Model(nn.Module):
                 "flow_layers": decoder_dsf_num_layers,
                 "flow_hid_dim": decoder_dsf_hidden_dim,
             },
+            # Phase 0i-E: parallel NSF args block. tactis.py picks one based on marginal_flow_type.
+            "nsf_marginal": {
+                "context_dim": marginal_d_model,
+                "mlp_layers": decoder_mlp_num_layers,
+                "mlp_dim": decoder_mlp_hidden_dim,
+                "num_flow_layers": decoder_nsf_num_layers,
+                "num_bins": decoder_nsf_num_bins,
+                "tail_bound": decoder_nsf_tail_bound,
+                "min_derivative": decoder_nsf_min_derivative,
+            },
+            # Phase 0i-G: parallel Quantile args block (pinball loss).
+            "quantile_marginal": {
+                "context_dim": marginal_d_model,
+                "mlp_layers": decoder_quantile_mlp_layers,
+                "mlp_dim": decoder_quantile_mlp_dim,
+                "quantile_levels": (
+                    decoder_quantile_levels
+                    if decoder_quantile_levels is not None
+                    else [0.01, 0.05, 0.1, 0.25, 0.4, 0.5, 0.6, 0.75, 0.9, 0.95, 0.99]
+                ),
+                "crossing_fix": decoder_quantile_crossing_fix,
+            },
+            "marginal_flow_type": marginal_flow_type,
             "skip_copula": False, # Will be controlled by LightningModule stage
             "lock_skip_copula": lock_skip_copula, # Prevent automatic skip_copula updates
         }
@@ -479,6 +513,19 @@ class TACTiS2Model(nn.Module):
         This transformation ensures compatibility with GluonTS forecast generators.
         """
         if network_input["future_target"] is not None:
+            # === Fix Sd: stash standardized tensors for the training_step ES/VS block ===
+            # Phase 0i-D, 2026-05-09. The Sd regularizer in
+            # lightning_module.training_step needs to call self.tactis.sample()
+            # with the SAME standardized inputs the NLL forward pass uses.
+            # Stashing here (training mode only) avoids re-running
+            # create_network_inputs in the lightning step.
+            self.tactis._last_train_inputs = {
+                "hist_time": network_input["hist_time"],
+                "hist_value_norm": network_input["past_target"],
+                "pred_time": network_input["pred_time"],
+                "pred_value_norm": network_input["future_target"],
+            }
+
             # Training mode - compute loss
             loss = self.tactis.forward(
                 hist_time=network_input["hist_time"],

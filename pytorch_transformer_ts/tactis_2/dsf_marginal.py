@@ -112,21 +112,19 @@ class DSFMarginal(nn.Module):
         left = -max_value * torch.ones_like(u)
         right = max_value * torch.ones_like(u)
 
-        for iter_num in range(max_iter): # Add iter_num for logging
+        # FIX (matches upstream ServiceNow/tactis): return `mid` from inside the loop, not a recomputed
+        # final_mid from updated left/right bounds. The recomputed version pushes the result by half a
+        # bin width which can be significant when the trained CDF is sharp.
+        for iter_num in range(max_iter):
             mid = (left + right) / 2
             cdf_mid = self.marginal_flow.forward_no_logdet(marginal_params, mid)
 
-            # CRITICAL FIX #3: Use original TACTiS binary search update logic
-            # Original uses error-based updating for more precise convergence
             error = cdf_mid - u
-            left[error <= 0] = mid[error <= 0]  # Update left bound where CDF is below target
-            right[error >= 0] = mid[error >= 0]  # Update right bound where CDF is above target
+            left[error <= 0] = mid[error <= 0]
+            right[error >= 0] = mid[error >= 0]
 
-            # CRITICAL FIX #4: Add missing precision-based early stopping from original TACTiS
             max_error = error.abs().max().item()
             if max_error < precision:
                 break
 
-        final_mid = (left + right) / 2
-
-        return final_mid # Return the final mid value
+        return mid

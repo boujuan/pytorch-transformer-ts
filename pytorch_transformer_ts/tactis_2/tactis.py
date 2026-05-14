@@ -195,19 +195,42 @@ class TACTiS(nn.Module):
         else:
             raise ValueError(f"Unknown encoder_type for flow: {self.encoder_type}")
 
-        # Marginals (DSF) - Use parameters from copula_decoder_args['dsf_marginal']
-        if self.copula_decoder_args is None or "dsf_marginal" not in self.copula_decoder_args:
-             raise ValueError("DSF Marginal arguments ('dsf_marginal') missing in copula_decoder config.")
-        dsf_args = self.copula_decoder_args["dsf_marginal"]
-        # Ensure context_dim matches the output of the flow_encoder
-        if dsf_args["context_dim"] != flow_d_model:
-              logger.warning(f"dsf_marginal context_dim ({dsf_args['context_dim']}) differs from flow_encoder output dim ({flow_d_model}). Using encoder output dim.")
-              dsf_args["context_dim"] = flow_d_model
-
-        # --- Initialize Decoder (which contains Marginal and Copula) ---
+        # Marginal flow type switch (Phase 0i-E NSF, 0i-G Quantile): "dsf" (default), "nsf", or "quantile"
         if self.copula_decoder_args is None:
             raise ValueError("copula_decoder configuration is required.")
+        marginal_flow_type = self.copula_decoder_args.get("marginal_flow_type", "dsf")
+        if marginal_flow_type == "quantile":
+            if "quantile_marginal" not in self.copula_decoder_args:
+                raise ValueError("Quantile Marginal arguments ('quantile_marginal') missing in copula_decoder config.")
+            q_args = self.copula_decoder_args["quantile_marginal"]
+            if q_args["context_dim"] != flow_d_model:
+                logger.warning(
+                    f"quantile_marginal context_dim ({q_args['context_dim']}) differs from "
+                    f"flow_encoder output dim ({flow_d_model}). Using encoder output dim."
+                )
+                q_args["context_dim"] = flow_d_model
+        elif marginal_flow_type == "nsf":
+            if "nsf_marginal" not in self.copula_decoder_args:
+                raise ValueError("NSF Marginal arguments ('nsf_marginal') missing in copula_decoder config.")
+            nsf_args = self.copula_decoder_args["nsf_marginal"]
+            if nsf_args["context_dim"] != flow_d_model:
+                logger.warning(
+                    f"nsf_marginal context_dim ({nsf_args['context_dim']}) differs from "
+                    f"flow_encoder output dim ({flow_d_model}). Using encoder output dim."
+                )
+                nsf_args["context_dim"] = flow_d_model
+        else:
+            if "dsf_marginal" not in self.copula_decoder_args:
+                raise ValueError("DSF Marginal arguments ('dsf_marginal') missing in copula_decoder config.")
+            dsf_args = self.copula_decoder_args["dsf_marginal"]
+            if dsf_args["context_dim"] != flow_d_model:
+                logger.warning(
+                    f"dsf_marginal context_dim ({dsf_args['context_dim']}) differs from "
+                    f"flow_encoder output dim ({flow_d_model}). Using encoder output dim."
+                )
+                dsf_args["context_dim"] = flow_d_model
 
+        # --- Initialize Decoder (which contains Marginal and Copula) ---
         # Determine initial copula_input_dim based on skip_copula flag
         copula_input_dim_init = None
         if not self.skip_copula and self.copula_encoder_args:
@@ -215,18 +238,20 @@ class TACTiS(nn.Module):
         elif not self.skip_copula and self.copula_temporal_encoder_args:
              copula_input_dim_init = self.copula_temporal_encoder_args["d_model"]
 
-
         self.decoder = CopulaDecoder(
              flow_input_dim=flow_d_model,
              copula_input_dim=copula_input_dim_init, # Pass initial dim or None
-             dsf_marginal=self.copula_decoder_args["dsf_marginal"],
+             marginal_flow_type=marginal_flow_type,
+             dsf_marginal=self.copula_decoder_args.get("dsf_marginal"),
+             nsf_marginal=self.copula_decoder_args.get("nsf_marginal"),
+             quantile_marginal=self.copula_decoder_args.get("quantile_marginal"),
              attentional_copula=self.copula_decoder_args.get("attentional_copula"), # Pass None if not present
              min_u=self.copula_decoder_args.get("min_u", 0.0),
              max_u=self.copula_decoder_args.get("max_u", 1.0),
              skip_sampling_marginal=self.copula_decoder_args.get("skip_sampling_marginal", False),
              skip_copula=self.skip_copula # Pass initial skip_copula state
         )
-        logger.debug(f"Initialized CopulaDecoder.")
+        logger.debug(f"Initialized CopulaDecoder with marginal_flow_type={marginal_flow_type}.")
 
     def _initialize_copula_components(self):
         """Initialize copula-related components using stored args. Called during __init__ or set_stage."""

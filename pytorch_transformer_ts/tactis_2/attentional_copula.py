@@ -484,10 +484,16 @@ class AttentionalCopula(nn.Module):
                     [v(key_value_input) for v in self.value_creators[layer]],
                     dim=2, # Stack along head dimension
                 )
-                # Store in keys_samples/values_samples at index p[0] for the current variable
+                # FIX: store at sequential autoregressive position `i`, not at variable index `p[0]`.
+                # Upstream ServiceNow/tactis uses `i` (the iteration / position in the AR chain).
+                # The slice `keys_samples[layer][:, :, :, :i, :]` retrieves "everything sampled so far",
+                # which is the per-iteration order, NOT a particular variable's index.
+                # Using `p[0]` (sample 0's variable index) caused the cache to be filled at sample 0's
+                # permutation indices for ALL samples, breaking attention for samples >= 1 and
+                # producing degenerate (constant-across-horizon-and-samples) predictions.
                 # Target shape: [layers, bsz, num_samples, heads, num_variables, attn_dim]
-                keys_samples[layer][:, :, :, p[0], :] = new_keys
-                values_samples[layer][:, :, :, p[0], :] = new_values
+                keys_samples[layer][:, :, :, i, :] = new_keys
+                values_samples[layer][:, :, :, i, :] = new_values
 
         # Samples shape: [bsz, num_variables, num_samples]
         return samples

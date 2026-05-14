@@ -1,10 +1,11 @@
 # Use the newer namespace consistent with Lightning > v2.0
 import logging
+import os
 import lightning.pytorch as pl
 import torch
 from torch.optim.lr_scheduler import LambdaLR, CosineAnnealingLR, SequentialLR
 from .module import TACTiS2Model
-from typing import Optional
+from typing import Optional, List
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -38,6 +39,53 @@ class TACTiS2LightningModule(pl.LightningModule):
         base_batch_size_for_scheduler_steps: int = 2048, # Base batch size for scheduler step calculations
         base_limit_train_batches: int = None, # Base limit train batches - if set, disables batch size scaling
         phase1_checkpoint_path: str = None, # Path to Phase 1 best checkpoint for Phase 2 tuning
+        lambda_a_reg: float = 0.0, # Regularizer strength on DSF sigmoid-steepness `a_pre`. 0 = disabled (backward compat)
+        a_reg_threshold: float = 3.0, # Soft-hinge threshold above which `a_pre` is penalized
+        # === Deeper-fix v2 (per-datapoint log-density regularization + smooth a-cap) ===
+        # See plan: /user/taed7566/.claude/plans/moonlit-sprouting-gosling.md
+        lambda_log_density: float = 0.0, # Strength of per-(b,v) log-density penalty. 0 = disabled.
+        log_density_max: float = 3.0, # Soft-hinge threshold on per-(b,v) log-density (density ≤ exp(3) ≈ 20).
+        a_max: float = 0.0, # Smooth cap on `a` (post-softplus). 0 = disabled. Recommended: 20 to bound the broken-regime ~720.
+        # === Fix Sa (a_floor): symmetric lower bound on DSF sigmoid steepness ===
+        # 2026-05-08 diagnostics showed 52.7% of layer-0 `a` values < 0.1, producing
+        # flat CDF regions that cause both F1 (sample tightness) and F2 (time-flatness).
+        # The existing `a_max` cap addresses upper saturation; this addresses the
+        # unconstrained lower floor. See plan: moonlit-sprouting-gosling.md.
+        lambda_a_floor: float = 0.0, # Strength of relu(a_floor_threshold - a)^2 penalty. 0 = disabled (backward compat).
+        a_floor_threshold: float = 0.5, # Soft-hinge threshold below which post-cap `a` is penalized.
+        # === Fix Sw (w-entropy): force the marginal_conditioner to spread softmax weights ===
+        # 2026-05-09 diagnostics on the 5 Sa pilot trials revealed that the softmax
+        # weights `w` are essentially one-hot (eff_dim ≈ 1.0 out of 64 hidden units),
+        # which is the actual reason F^-1 spread stays narrow even after Sa fixes
+        # the `a` distribution. Penalizing low entropy on `w` activates more of the
+        # 64-unit DSF capacity. See plan moonlit-sprouting-gosling.md.
+        lambda_w_entropy: float = 0.0, # Strength of relu(w_entropy_min - H(w))^2 penalty. 0 = disabled.
+        w_entropy_min: float = 2.0, # Soft-hinge floor on H(w). log(8)≈2.08 → eff_dim ≥ 8.
+        # === Phase 0i-E: NSF marginal flow hparams ===
+        # Switch from DSF (default) to NSF marginal. NSF's `min_derivative` parameter
+        # structurally prevents the CDF flatness pattern that traps DSF training. See
+        # plan moonlit-sprouting-gosling.md for diagnostics.
+        marginal_flow_type: str = "dsf", # "dsf" (default, backward-compat), "nsf", or "quantile".
+        decoder_nsf_num_bins: int = 32, # NSF: number of spline bins per layer.
+        decoder_nsf_tail_bound: float = 4.0, # NSF: domain bound. Outside [-B, B] flow is identity.
+        decoder_nsf_num_layers: int = 2, # NSF: number of stacked spline transforms.
+        decoder_nsf_min_derivative: float = 1e-3, # NSF: structural anti-collapse floor on dF/dx.
+        # === Phase 0i-G: Quantile-head marginal (pinball loss) ===
+        decoder_quantile_levels: Optional[List[float]] = None, # K predicted quantile levels (default: 11 standard levels).
+        decoder_quantile_mlp_layers: int = 2, # Quantile head MLP depth.
+        decoder_quantile_mlp_dim: int = 64, # Quantile head MLP width.
+        decoder_quantile_crossing_fix: str = "monotonic_delta", # "monotonic_delta" (recommended), "post_hoc_sort", or "none".
+        # === Fix Sd (proper scoring rule loss): Energy Score / Variogram Score ===
+        # Phase 0i-D, 2026-05-09. After Sa+Sw mechanically fixed parameter pathologies
+        # but didn't widen F^-1 spread, the 10-trial pilot history proved the bottleneck
+        # is the NLL training objective itself. ES/VS are sample-based proper scoring
+        # rules that penalize distributions which don't OVERLAP the truth — fixes the
+        # "narrow but lucky" failure mode NLL rewards. See plan moonlit-sprouting-gosling.md.
+        lambda_energy_score: float = 0.0, # Strength of ES(samples, truth) regularizer. 0 = disabled.
+        energy_score_num_samples: int = 8, # N samples drawn per training step for ES estimation.
+        lambda_variogram: float = 0.0, # Strength of VS(samples, truth) — catches correlation errors ES misses.
+        variogram_p: float = 0.5, # Order of the variogram. Scheuerer & Hamill 2015 recommend p=0.5.
+        trajectory_noise_std: float = 0.0, # Optional Gaussian noise on past_target during training (cheap label-smoothing).
     ) -> None:
         """
         Initialize the TACTiS2 Lightning Module.
@@ -77,7 +125,19 @@ class TACTiS2LightningModule(pl.LightningModule):
                                    "stage1_activation_function", "stage2_activation_function",
                                    "eta_min_fraction_s1", "eta_min_fraction_s2",
                                    "num_batches_per_epoch", "batch_size",
-                                   "base_batch_size_for_scheduler_steps", "base_limit_train_batches")
+                                   "base_batch_size_for_scheduler_steps", "base_limit_train_batches",
+                                   "lambda_a_reg", "a_reg_threshold",
+                                   "lambda_log_density", "log_density_max", "a_max",
+                                   "lambda_a_floor", "a_floor_threshold",
+                                   "lambda_w_entropy", "w_entropy_min",
+                                   "lambda_energy_score", "energy_score_num_samples",
+                                   "lambda_variogram", "variogram_p",
+                                   "trajectory_noise_std",
+                                   "marginal_flow_type", "decoder_nsf_num_bins",
+                                   "decoder_nsf_tail_bound", "decoder_nsf_num_layers",
+                                   "decoder_nsf_min_derivative",
+                                   "decoder_quantile_levels", "decoder_quantile_mlp_layers",
+                                   "decoder_quantile_mlp_dim", "decoder_quantile_crossing_fix")
 
         # Instantiate the model internally using the provided config
         # Separate Attentional Copula parameters from the main model config
@@ -116,7 +176,22 @@ class TACTiS2LightningModule(pl.LightningModule):
             stage2_activation_function=self.hparams.stage2_activation_function, # Use direct hparam
             attentional_copula_kwargs=ac_params if ac_params else None # Pass mapped AC params separately
         )
-        
+
+        # Deeper-fix v2: apply Fix B (smooth a-cap) by setting a_max on the
+        # marginal flow's SigmoidFlow layers post-construction. This avoids
+        # threading a_max through TACTiS2Model -> DSFMarginal -> DeepSigmoidFlow
+        # constructors. SigmoidFlow.forward reads self.a_max each call.
+        if float(self.hparams.a_max) > 0.0:
+            try:
+                _flow = self.model.tactis.decoder.marginal.marginal_flow
+                _flow.a_max = float(self.hparams.a_max)
+                for _layer in _flow.layers:
+                    _layer.a_max = float(self.hparams.a_max)
+                logger.info(f"Deeper-fix v2: applied smooth a-cap (a_max={self.hparams.a_max}) "
+                            f"to {len(_flow.layers)} SigmoidFlow layer(s).")
+            except AttributeError as e:
+                logger.warning(f"Deeper-fix v2: could not set a_max on flow layers: {e}")
+
         # Store stage-specific optimizer parameters (already in self.hparams)
         # self.lr_stage1 = lr_stage1
         # self.lr_stage2 = lr_stage2
@@ -363,6 +438,8 @@ class TACTiS2LightningModule(pl.LightningModule):
         super().on_train_epoch_start()
         current_epoch = self.current_epoch
         
+        if self.stage == 2 and current_epoch == 0:
+            logger.info(f"Epoch {current_epoch}: Resumed directly into Stage 2 (initial_stage=2); skipping transition.")
         if self.stage == 1 and current_epoch >= self.stage2_start_epoch:
             logger.info(f"Epoch {current_epoch}: Entering Stage 2 transition.")
             self.stage = 2
@@ -392,14 +469,6 @@ class TACTiS2LightningModule(pl.LightningModule):
                     self.trainer.optimizers[0] = fresh_optimizer
                     logger.info("Successfully replaced Stage 1 optimizer with fresh Stage 2 optimizer")
 
-                # Log successful Stage 2 transition
-                self.log_dict({
-                    "stage": 2,
-                    "learning_rate": self.lr_stage2,
-                    "weight_decay": self.weight_decay_stage2,
-                    "optimizer_param_count": sum(p.numel() for p in fresh_optimizer.param_groups[0]['params'])
-                })
-
                 logger.info(f"Epoch {current_epoch}: Successfully created fresh Stage 2 optimizer")
                 logger.info(f"Stage 2 optimizer trains {sum(p.numel() for p in fresh_optimizer.param_groups[0]['params']):,} parameters (copula only)")
 
@@ -410,7 +479,21 @@ class TACTiS2LightningModule(pl.LightningModule):
                 logger.error(f"Failed to create fresh Stage 2 optimizer: {e}")
                 logger.warning("Continuing with existing optimizer configuration - Stage 2 may not work correctly")
 
-            self.log("stage", self.stage, on_step=False, on_epoch=True)
+    def on_train_epoch_end(self):
+        super().on_train_epoch_end()
+        epoch = self.current_epoch
+        save_every = 5
+        is_save_epoch = (epoch + 1) % save_every == 0
+        is_final = self.trainer is not None and self.trainer.max_epochs is not None and (epoch + 1) >= self.trainer.max_epochs
+        if (is_save_epoch or is_final) and self.trainer.is_global_zero:
+            try:
+                ckpt_dir = self.trainer.default_root_dir
+                os.makedirs(ckpt_dir, exist_ok=True)
+                path = os.path.join(ckpt_dir, f"manual_save_epoch{epoch}.ckpt")
+                self.trainer.save_checkpoint(path)
+                logger.info(f"Manual save (defensive): {path}")
+            except Exception as save_err:
+                logger.error(f"Defensive save failed at epoch {epoch}: {save_err}", exc_info=True)
 
     def _unpack_batch(self, batch):
         """Unpack batch from either tuple (PyTorch DataLoader) or dict (GluonTS DataLoader) format.
@@ -456,26 +539,73 @@ class TACTiS2LightningModule(pl.LightningModule):
         past_target = batch["past_target"]
         past_observed_values = batch["past_observed_values"]
         future_target = batch["future_target"]
-        
+
         # Get time features
         past_time_feat = batch["past_time_feat"]
         future_time_feat = batch["future_time_feat"]
-        
+
+        # === Fix Sd: trajectory noise on past_target (free regularizer) ===
+        # Phase 0i-D, 2026-05-09. Optional small Gaussian noise on observed
+        # past_target during training. Acts as label smoothing on the
+        # autoregressive context — prevents the model from memorizing exact
+        # near-deterministic trajectories at 15-s scale. σ in standardized
+        # units (data is scaler-normalized before reaching the encoder).
+        # Applied only when training and σ > 0; respects observed mask.
+        if self.training and float(self.hparams.trajectory_noise_std) > 0.0:
+            noise = torch.randn_like(past_target) * float(self.hparams.trajectory_noise_std)
+            past_target = past_target + noise * past_observed_values
+
         # Get static features if available
         feat_static_cat = batch.get("feat_static_cat", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.long))
         feat_static_real = batch.get("feat_static_real", torch.zeros((past_target.shape[0], 1), device=self.device, dtype=torch.float32))
-        
-        # Process with model
-        model_output = self.model(
-            feat_static_cat=feat_static_cat,
-            feat_static_real=feat_static_real,
-            past_time_feat=past_time_feat,
-            past_target=past_target,
-            past_observed_values=past_observed_values,
-            future_time_feat=future_time_feat,
-            future_target=future_target,  # For teacher forcing or loss computation
+
+        # --- DSF flow-collapse regularization setup (Stage 1 only, no-op when lambda_a_reg=0) ---
+        # The marginal_conditioner runs multiple times during a forward+sample pass:
+        #   1. forward_logdet (loss path)  -- this is the one we want for regularization
+        #   2. forward_no_logdet (sampling)
+        #   3. inverse (CDF inversion)
+        # We register a hook that captures only the FIRST call's output, then we use it
+        # to compute the soft-hinge L2 penalty on the `a_pre` portion of marginal_params.
+        captured_marginal_params = []  # list-as-mutable-cell for closure
+        reg_hook_handle = None
+        # Phase 0i-G: DSF regularizers (a_reg, log_density, a_floor, w_entropy)
+        # are gated on marginal_flow_type == "dsf" because they read DSF-specific
+        # parameter attributes (_last_per_datapoint_log_density, _last_a_post_cap_per_layer,
+        # etc.) that don't exist for NSF or Quantile marginals. Already silent no-ops
+        # via getattr(..., None) but we make the gate explicit for clarity.
+        is_dsf_mode = (self.hparams.marginal_flow_type == "dsf")
+        apply_reg = (
+            self.stage == 1
+            and float(self.hparams.lambda_a_reg) > 0.0
+            and self.training
+            and is_dsf_mode
         )
-        
+        if apply_reg:
+            def _capture_first_call(module, inputs, output):
+                if len(captured_marginal_params) == 0:
+                    captured_marginal_params.append(output)
+            try:
+                _conditioner = self.model.tactis.decoder.marginal.marginal_conditioner
+                reg_hook_handle = _conditioner.register_forward_hook(_capture_first_call)
+            except AttributeError:
+                # If model structure differs (e.g., pure-marginal mode), silently skip
+                reg_hook_handle = None
+
+        # Process with model
+        try:
+            model_output = self.model(
+                feat_static_cat=feat_static_cat,
+                feat_static_real=feat_static_real,
+                past_time_feat=past_time_feat,
+                past_target=past_target,
+                past_observed_values=past_observed_values,
+                future_time_feat=future_time_feat,
+                future_target=future_target,  # For teacher forcing or loss computation
+            )
+        finally:
+            if reg_hook_handle is not None:
+                reg_hook_handle.remove()
+
         # Check if model returns a tuple (common in TACTiS-2 where the model returns both predictions and loss)
         if isinstance(model_output, tuple):
             # The second element of the tuple is typically the loss
@@ -485,12 +615,250 @@ class TACTiS2LightningModule(pl.LightningModule):
             # If it's not a tuple, assume it's just the loss
             loss = model_output
             logger.debug(f"Training - Model returned scalar loss: {loss}")
-        
+
         # Check for NaN in loss
         if torch.isnan(loss).any():
             logger.warning("NaN detected in loss! Replacing with large value to continue training.")
             loss = torch.nan_to_num(loss, nan=1000.0)  # Use a large value but not too large
-        
+
+        # --- DSF flow-collapse regularization (Stage 1 only) ---
+        # Soft-hinge L2 penalty on the `a_pre` portion of marginal_params (the pre-softplus
+        # input that becomes the sigmoid-steepness parameter `a` in DeepSigmoidFlow).
+        # Targets the specific failure mode where unregularized DSF flow training drives
+        # `a` to ~720, collapsing the marginal CDF to a step function.
+        # See /dss/work/.../logs/tactis_inference_deep_diagnosis.md for full diagnosis.
+        if apply_reg and len(captured_marginal_params) > 0:
+            marginal_params = captured_marginal_params[0]
+            mc = self.hparams.model_config
+            n_layers = mc.get("decoder_dsf_num_layers", 3)
+            hidden_dim = mc.get("decoder_dsf_hidden_dim", 48)
+            params_per_layer = 3 * hidden_dim
+            # Slice out the `a_pre` portion (first hidden_dim of each layer's params block)
+            a_pre_slices = [
+                marginal_params[..., i * params_per_layer : i * params_per_layer + hidden_dim]
+                for i in range(n_layers)
+            ]
+            a_pre_all = torch.cat(a_pre_slices, dim=-1)
+            # Soft hinge: penalize only when a_pre exceeds threshold (epoch-2 healthy max ~0.84)
+            threshold = float(self.hparams.a_reg_threshold)
+            a_reg = torch.relu(a_pre_all - threshold).pow(2).mean()
+            loss = loss + float(self.hparams.lambda_a_reg) * a_reg
+            # Log diagnostics for monitoring + Optuna pruning callback consumption
+            with torch.no_grad():
+                self.log("a_reg/loss_term", a_reg.detach(), on_step=True, on_epoch=True, prog_bar=False)
+                self.log("a_reg/max_a_pre", a_pre_all.max().detach(), on_step=False, on_epoch=True, prog_bar=False)
+                self.log("a_reg/mean_a_pre", a_pre_all.mean().detach(), on_step=False, on_epoch=True, prog_bar=False)
+                # Also log post-softplus `a` to match the diagnostic probe's units
+                a_post = torch.nn.functional.softplus(a_pre_all)
+                self.log("a_reg/max_a", a_post.max().detach(), on_step=False, on_epoch=True, prog_bar=False)
+                self.log("a_reg/mean_a", a_post.mean().detach(), on_step=False, on_epoch=True, prog_bar=False)
+
+        # === Deeper-fix v2: Per-datapoint log-density regularizer (Fix A + Fix C) ===
+        # Penalizes the actual quantity that runs to +inf during flow collapse: the
+        # per-(batch, vars) total log-density at training data points. This fixes:
+        #   - Loophole 1 (per-element-mean penalty was too weak): scales correctly per data point
+        #   - Loophole 2 (log_sum_exp dominated by one large `a`): penalizes post-LSE
+        #   - Loophole 3 (`b` shift bypasses `a` threshold): penalizes the joint (a,b,w) effect
+        # Lambda schedule (Fix C): 5x during epochs 0-4, linear decay to 1x by epoch 15,
+        # then constant. Forces the model into a broad-CDF basin during init when
+        # random init still allows escape, then relaxes for normal training.
+        # Gated on stage==1 (Stage 2 has frozen marginal — penalty is no-op).
+        if (
+            apply_reg
+            and float(self.hparams.lambda_log_density) > 0.0
+        ):
+            try:
+                flow = self.model.tactis.decoder.marginal.marginal_flow
+                per_dp_log_density = getattr(flow, "_last_per_datapoint_log_density", None)
+            except AttributeError:
+                per_dp_log_density = None
+            if per_dp_log_density is not None:
+                threshold_lp = float(self.hparams.log_density_max)
+                # Per-(batch, vars) penalty: relu^2 of excess log-density above threshold
+                log_density_reg = torch.relu(per_dp_log_density - threshold_lp).pow(2).mean()
+                # Schedule: 5x for epochs 0-4, linear decay to 1x at epoch 15, then 1x
+                cur_epoch = int(self.current_epoch)
+                if cur_epoch < 5:
+                    schedule_mult = 5.0
+                elif cur_epoch < 15:
+                    schedule_mult = 5.0 - 4.0 * (cur_epoch - 5) / 10.0
+                else:
+                    schedule_mult = 1.0
+                effective_lambda = schedule_mult * float(self.hparams.lambda_log_density)
+                loss = loss + effective_lambda * log_density_reg
+                with torch.no_grad():
+                    self.log("log_density_reg/loss_term", log_density_reg.detach(),
+                             on_step=True, on_epoch=True, prog_bar=False)
+                    self.log("log_density_reg/max_log_density", per_dp_log_density.max().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("log_density_reg/mean_log_density", per_dp_log_density.mean().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("log_density_reg/schedule_mult", torch.tensor(schedule_mult, device=loss.device),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("log_density_reg/effective_lambda", torch.tensor(effective_lambda, device=loss.device),
+                             on_step=False, on_epoch=True, prog_bar=False)
+
+        # === Fix Sa: a_floor regularizer (Stage 1 only) ===
+        # Penalty: lambda_a_floor * mean( relu(a_floor_threshold - a_post)^2 )
+        # where a_post is the post-cap, post-EPSILON `a` values from each DSF
+        # SigmoidFlow layer. Targets the F1+F2 root cause from 2026-05-08
+        # diagnostics: 52.7% of layer-0 `a` values < 0.1 produced flat CDF
+        # regions causing both narrow F^-1 output AND insensitive ∂F^-1/∂context.
+        # Active only in Stage 1 (flow trains here; Stage 2 freezes the flow).
+        if (
+            apply_reg
+            and float(self.hparams.lambda_a_floor) > 0.0
+        ):
+            try:
+                flow = self.model.tactis.decoder.marginal.marginal_flow
+                a_per_layer = getattr(flow, "_last_a_post_cap_per_layer", None)
+            except AttributeError:
+                a_per_layer = None
+            if a_per_layer is not None and len(a_per_layer) > 0:
+                threshold_floor = float(self.hparams.a_floor_threshold)
+                # Concatenate per-layer a tensors along last dim → one (B, V, n_layers*h) tensor
+                a_all = torch.cat(a_per_layer, dim=-1)
+                a_floor_reg = torch.relu(threshold_floor - a_all).pow(2).mean()
+                loss = loss + float(self.hparams.lambda_a_floor) * a_floor_reg
+                with torch.no_grad():
+                    self.log("a_floor_reg/loss_term", a_floor_reg.detach(),
+                             on_step=True, on_epoch=True, prog_bar=False)
+                    self.log("a_floor_reg/min_a", a_all.min().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("a_floor_reg/median_a", a_all.median().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("a_floor_reg/frac_a_lt_0p1", (a_all < 0.1).float().mean().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("a_floor_reg/frac_a_lt_threshold", (a_all < threshold_floor).float().mean().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    # Per-layer breakdown (layer 0 is where collapse is worst)
+                    for li, a_l in enumerate(a_per_layer):
+                        self.log(f"a_floor_reg/layer{li}_median_a", a_l.median().detach(),
+                                 on_step=False, on_epoch=True, prog_bar=False)
+                        self.log(f"a_floor_reg/layer{li}_frac_a_lt_0p1", (a_l < 0.1).float().mean().detach(),
+                                 on_step=False, on_epoch=True, prog_bar=False)
+
+        # === Fix Sw: w-entropy regularizer (Stage 1 only) ===
+        # Penalty: lambda_w_entropy * mean(relu(w_entropy_min - H(w))^2)
+        # where H(w) is the per-(b,v) Shannon entropy of softmax weights from
+        # each DSF layer. Forces the conditioner to spread weight across many
+        # hidden units (vs the empirically-observed one-hot collapse from
+        # 2026-05-09 diagnostics: eff_dim ≈ 1 out of 64). w_entropy_min=2.08
+        # corresponds to eff_dim ≥ 8 sigmoids active.
+        if (
+            apply_reg
+            and float(self.hparams.lambda_w_entropy) > 0.0
+        ):
+            try:
+                flow = self.model.tactis.decoder.marginal.marginal_flow
+                w_ent_per_layer = getattr(flow, "_last_w_entropy_per_layer", None)
+            except AttributeError:
+                w_ent_per_layer = None
+            if w_ent_per_layer is not None and len(w_ent_per_layer) > 0:
+                threshold_we = float(self.hparams.w_entropy_min)
+                # Concatenate per-layer (B, V) entropy tensors → one (B, V, n_layers)
+                w_ent_all = torch.stack(w_ent_per_layer, dim=-1)  # B, V, L
+                w_entropy_reg = torch.relu(threshold_we - w_ent_all).pow(2).mean()
+                loss = loss + float(self.hparams.lambda_w_entropy) * w_entropy_reg
+                with torch.no_grad():
+                    self.log("w_entropy_reg/loss_term", w_entropy_reg.detach(),
+                             on_step=True, on_epoch=True, prog_bar=False)
+                    self.log("w_entropy_reg/min_H", w_ent_all.min().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("w_entropy_reg/median_H", w_ent_all.median().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    self.log("w_entropy_reg/median_eff_dim", w_ent_all.median().exp().detach(),
+                             on_step=False, on_epoch=True, prog_bar=False)
+                    for li, w_l in enumerate(w_ent_per_layer):
+                        self.log(f"w_entropy_reg/layer{li}_median_H", w_l.median().detach(),
+                                 on_step=False, on_epoch=True, prog_bar=False)
+                        self.log(f"w_entropy_reg/layer{li}_median_eff_dim",
+                                 w_l.median().exp().detach(),
+                                 on_step=False, on_epoch=True, prog_bar=False)
+
+        # === Fix Sd: Energy Score / Variogram Score regularizers (Stage 1 only) ===
+        # Phase 0i-D, 2026-05-09. After Sa+Sw mechanically fixed parameter
+        # pathologies but didn't widen F^-1, this block adds proper-scoring-rule
+        # losses that penalize narrow distributions which miss the truth.
+        # Stage 1 only (sample path goes through marginal flow; Stage 2 freezes
+        # the flow so ES gradient on flow params is zero — copula path is
+        # multivariate-coupled, but for now we apply ES Stage-1 only to keep
+        # the pilot scope focused on the marginal calibration question).
+        sd_active = (
+            self.stage == 1
+            and self.training
+            and (
+                float(self.hparams.lambda_energy_score) > 0.0
+                or float(self.hparams.lambda_variogram) > 0.0
+            )
+        )
+        if sd_active:
+            try:
+                # `module.create_network_inputs` stashed the standardized
+                # tensors on `tactis._last_train_inputs` during the just-
+                # completed forward pass (training mode only).
+                tactis = self.model.tactis
+                stash = getattr(tactis, "_last_train_inputs", None)
+            except AttributeError:
+                stash = None
+            if stash is not None:
+                hist_time = stash["hist_time"]
+                hist_value_norm = stash["hist_value_norm"]
+                pred_time = stash["pred_time"]
+                pred_value_norm = stash["pred_value_norm"]  # [B, S, P]
+                num_samples = int(self.hparams.energy_score_num_samples)
+                try:
+                    samples_norm = tactis.sample(
+                        num_samples=num_samples,
+                        hist_time=hist_time,
+                        hist_value=hist_value_norm,
+                        pred_time=pred_time,
+                    )  # [N, B, S, P]
+                except Exception as e:
+                    logger.warning(f"Sd: tactis.sample failed during training; skipping ES/VS this step: {e}")
+                    samples_norm = None
+                if samples_norm is not None and not torch.isnan(samples_norm).any():
+                    # Flatten the multivariate target dim: D = S * P
+                    n_samp = samples_norm.shape[0]
+                    b_size = samples_norm.shape[1]
+                    samples_flat = samples_norm.reshape(n_samp, b_size, -1)  # [N, B, D]
+                    target_flat = pred_value_norm.reshape(b_size, -1)  # [B, D]
+
+                    # Optional 5-epoch warm-up to stabilize early training.
+                    cur_epoch = int(self.current_epoch)
+                    schedule_mult = 1.0 if cur_epoch >= 5 else max(0.0, cur_epoch / 5.0)
+
+                    if float(self.hparams.lambda_energy_score) > 0.0:
+                        from pytorch_transformer_ts.tactis_2.proper_scoring_rules import energy_score
+                        es_per_batch = energy_score(samples_flat, target_flat)
+                        es_loss = es_per_batch.mean()
+                        eff_lambda_es = schedule_mult * float(self.hparams.lambda_energy_score)
+                        loss = loss + eff_lambda_es * es_loss
+                        with torch.no_grad():
+                            self.log("energy_score/loss_term", es_loss.detach(),
+                                     on_step=True, on_epoch=True, prog_bar=False)
+                            self.log("energy_score/effective_lambda",
+                                     torch.tensor(eff_lambda_es, device=loss.device),
+                                     on_step=False, on_epoch=True, prog_bar=False)
+                            self.log("energy_score/num_samples_used",
+                                     torch.tensor(float(n_samp), device=loss.device),
+                                     on_step=False, on_epoch=True, prog_bar=False)
+
+                    if float(self.hparams.lambda_variogram) > 0.0:
+                        from pytorch_transformer_ts.tactis_2.proper_scoring_rules import variogram_score
+                        vs_per_batch = variogram_score(
+                            samples_flat, target_flat, p=float(self.hparams.variogram_p)
+                        )
+                        vs_loss = vs_per_batch.mean()
+                        eff_lambda_vs = schedule_mult * float(self.hparams.lambda_variogram)
+                        loss = loss + eff_lambda_vs * vs_loss
+                        with torch.no_grad():
+                            self.log("variogram_score/loss_term", vs_loss.detach(),
+                                     on_step=True, on_epoch=True, prog_bar=False)
+                            self.log("variogram_score/effective_lambda",
+                                     torch.tensor(eff_lambda_vs, device=loss.device),
+                                     on_step=False, on_epoch=True, prog_bar=False)
+
         # Manual optimization - get the correct optimizer based on current stage
         if self.stage == 2 and hasattr(self, '_stage2_optimizer') and self._stage2_optimizer is not None:
             # Use Stage 2 fresh optimizer with only copula parameters
@@ -518,7 +886,12 @@ class TACTiS2LightningModule(pl.LightningModule):
         
         # Optimizer step
         opt.step()
-        
+
+        try:
+            self.trainer.fit_loop.epoch_loop.manual_optimization.optim_step_progress.increment_completed()
+        except (AttributeError, TypeError):
+            pass
+
         # Update learning rate scheduler
         if sch is not None:
             if isinstance(sch, torch.optim.lr_scheduler.ReduceLROnPlateau):
@@ -534,14 +907,14 @@ class TACTiS2LightningModule(pl.LightningModule):
         tactis_model = getattr(self.model, 'tactis', None)
         if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
             if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
-                # DIAGNOSTIC: Marginal stability (should be constant in Stage 2)
-                self.log("train_marginal_logdet", tactis_model.marginal_logdet.detach(), 
-                       on_step=True, on_epoch=True, prog_bar=False)
-                
-                # OPTUNA TARGET: Consistent metric across both stages
+                safe_marginal_logdet = torch.nan_to_num(tactis_model.marginal_logdet.detach(), nan=0.0, posinf=1e6, neginf=-1e6)
+                self.log("train_marginal_logdet", safe_marginal_logdet,
+                       on_step=False, on_epoch=True, prog_bar=False)
+
                 total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
-                self.log("train_total_nll", total_nll.detach(), 
-                       on_step=True, on_epoch=True, prog_bar=False)
+                safe_total_nll = torch.nan_to_num(total_nll.detach(), nan=1e6, posinf=1e6, neginf=-1e6)
+                self.log("train_total_nll", safe_total_nll,
+                       on_step=False, on_epoch=True, prog_bar=False)
         
         # Return loss for logging (not used for backprop anymore)
         return loss
@@ -609,20 +982,28 @@ class TACTiS2LightningModule(pl.LightningModule):
         tactis_model = getattr(self.model, 'tactis', None)
         if tactis_model and hasattr(tactis_model, 'copula_loss') and hasattr(tactis_model, 'marginal_logdet'):
             if tactis_model.copula_loss is not None and tactis_model.marginal_logdet is not None:
-                # Marginal stability (should be constant in Stage 2)
-                self.log("val_marginal_logdet", tactis_model.marginal_logdet.detach(),
-                       on_step=True, on_epoch=True, prog_bar=False)
+                safe_marginal_logdet = torch.nan_to_num(tactis_model.marginal_logdet.detach(), nan=0.0, posinf=1e6, neginf=-1e6)
+                self.log("val_marginal_logdet", safe_marginal_logdet,
+                       on_step=False, on_epoch=True, prog_bar=False)
 
-                # Total NLL (copula_loss - marginal_logdet)
                 total_nll = tactis_model.copula_loss - tactis_model.marginal_logdet
-                self.log("val_total_nll", total_nll.detach(),
-                       on_step=True, on_epoch=True, prog_bar=False)
+                safe_total_nll = torch.nan_to_num(total_nll.detach(), nan=1e6, posinf=1e6, neginf=-1e6)
+                self.log("val_total_nll", safe_total_nll,
+                       on_step=False, on_epoch=True, prog_bar=False)
 
                 # PHASE 2 METRIC: Copula loss only.
                 # Always logged so ModelCheckpoint(monitor='val_copula_loss') doesn't crash.
                 # Stage 1: inf (ModelCheckpoint with mode='min' will never save this as best)
                 # Stage 2: actual copula loss (what we want to optimize)
-                if self.stage >= 2 and not self.hparams.model_config.get('skip_copula', True):
+                #
+                # BUG FIX: previously read self.hparams.model_config.get('skip_copula', True)
+                # — that's the *static* construction-time value, never updated when
+                # set_stage(2) flips the live skip_copula flag. As a result every
+                # Stage 2 epoch logged inf, masking real Stage 2 progress (Phase 5 v1
+                # had val_copula_loss=inf throughout 70 Stage-2 epochs). Use the live
+                # flag from the TACTiS module instead.
+                live_skip_copula = bool(getattr(tactis_model, "skip_copula", True))
+                if self.stage >= 2 and not live_skip_copula:
                     self.log("val_copula_loss", tactis_model.copula_loss.detach(),
                            on_step=False, on_epoch=True, prog_bar=False)
                 else:
@@ -642,21 +1023,35 @@ class TACTiS2LightningModule(pl.LightningModule):
         This method creates the initial Stage 1 optimizer. Stage 2 transition 
         replaces this with a fresh optimizer containing only copula parameters.
         """
-        # Always start with Stage 1 configuration
-        # Stage 2 transition will replace this with fresh copula-only optimizer
-        initial_lr = self.lr_stage1
-        initial_weight_decay = self.weight_decay_stage1
+        if self.stage == 2:
+            logger.info("configure_optimizers: stage=2 detected (resume path); applying Stage 2 freezing, building copula-only optimizer + scheduler")
+            self._apply_stage2_parameter_freezing()
+            optimizer = self._create_stage2_optimizer()
+            self._stage2_optimizer = optimizer
+            self._create_stage2_scheduler(optimizer)
+            self.automatic_optimization = False
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": self._stage2_scheduler,
+                    "interval": "step",
+                    "frequency": 1,
+                    "name": "lr_scheduler_stage2_resume",
+                },
+            }
+        else:
+            initial_lr = self.lr_stage1
+            initial_weight_decay = self.weight_decay_stage1
 
-        logger.info(f"Configuring Stage 1 optimizer with lr={initial_lr}, weight_decay={initial_weight_decay}")
+            logger.info(f"Configuring Stage 1 optimizer with lr={initial_lr}, weight_decay={initial_weight_decay}")
 
-        # Create Stage 1 optimizer with ALL model parameters (original TACTiS design)
-        optimizer = torch.optim.AdamW(
-            self.model.tactis.parameters(),  # All parameters for Stage 1
-            lr=initial_lr,
-            weight_decay=initial_weight_decay,
-        )
-        
-        logger.info(f"Created optimizer with {len(list(self.model.tactis.parameters()))} parameters")
+            optimizer = torch.optim.AdamW(
+                self.model.tactis.parameters(),
+                lr=initial_lr,
+                weight_decay=initial_weight_decay,
+            )
+
+            logger.info(f"Created optimizer with {len(list(self.model.tactis.parameters()))} parameters")
         
         # Use manual optimization for two-stage training with optimizer switching
         self.automatic_optimization = False

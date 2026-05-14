@@ -31,14 +31,56 @@ def log_sigmoid(x):
 # Set up logging
 logger = logging.getLogger(__name__)
 
+def smooth_a_cap(a_raw: torch.Tensor, a_max: float) -> torch.Tensor:
+    """
+    Smooth (rational) cap on the sigmoid-steepness parameter `a`.
+
+    Maps R+ -> (0, a_max) via `a = a_raw / (1 + a_raw / a_max)`.
+    - Healthy regime (a_raw << a_max): a ≈ a_raw (essentially identity)
+    - Pathological regime (a_raw >> a_max): a -> a_max (asymptote)
+    - Gradient is non-zero everywhere (unlike `clamp(., max=a_max)` which has zero
+      gradient above the cap and would trap the optimizer).
+
+    Used as defense-in-depth (Fix B) against marginal-flow collapse where DSF's
+    `a` parameter exploded to ~720 in the broken epoch=122 model. With a_max=20,
+    the broken regime is bounded but the healthy regime (a typically < 5) is
+    barely affected. See plan: /user/taed7566/.claude/plans/moonlit-sprouting-gosling.md
+
+    Set a_max=0 (or any non-positive) to disable capping (returns a_raw unchanged).
+    """
+    if a_max <= 0:
+        return a_raw
+    return a_raw / (1.0 + a_raw / a_max)
+
+
 class SigmoidFlow(nn.Module):
     """
     A single layer of the Deep Sigmoid Flow network.
     """
-    def __init__(self, hidden_dim: int, no_logit: bool = False):
+    def __init__(self, hidden_dim: int, no_logit: bool = False, a_max: float = 0.0):
         super().__init__()
         self.hidden_dim = hidden_dim
         self.no_logit = no_logit
+        # a_max=0 disables the smooth cap (default: backward-compatible / no-op).
+        # Set to a positive value (e.g., 20.0) via DeepSigmoidFlow / hparam to enable Fix B.
+        self.a_max = a_max
+        # Buffer for per-(batch, vars) log-density (logj after log_sum_exp over h).
+        # Populated by forward() during training when accessed by the regularizer in
+        # lightning_module.training_step. None when not training or after reset.
+        self._last_logj_per_datapoint: torch.Tensor = None
+        # Fix Sa (a_floor): buffer for per-(batch, vars, hidden) post-cap `a` values.
+        # Populated by forward() and forward_no_logdet(). Read by the a_floor
+        # regularizer in lightning_module.training_step to penalize small `a`
+        # values that produce flat CDF regions (the F1 + F2 root cause from
+        # exhaustive 2026-05-08 diagnostics).
+        self._last_a_post_cap: torch.Tensor = None
+        # Fix Sw (w-entropy): buffer for per-(batch, vars) softmax-weight entropy.
+        # 2026-05-09 diagnostics revealed the marginal_conditioner emits softmax
+        # weights that are essentially one-hot (eff_dim ≈ 1.0 out of hidden_dim=64),
+        # which is the actual reason F^-1 spread stays narrow even after Sa fixes
+        # the `a` distribution. This buffer is read by the w-entropy regularizer
+        # in lightning_module.training_step to penalize low-entropy `w`.
+        self._last_w_entropy: torch.Tensor = None
 
     def forward(self, params, x, logdet):
         """
@@ -58,10 +100,19 @@ class SigmoidFlow(nn.Module):
         # output logdet: b
         assert params.shape[-1] == 3 * self.hidden_dim
 
-        a = torch.nn.functional.softplus(params[..., : self.hidden_dim]) + EPSILON  # b, v, h - Use softplus directly
+        # Fix B: optional smooth cap on `a` to bound max sigmoid steepness.
+        a_raw = torch.nn.functional.softplus(params[..., : self.hidden_dim])  # b, v, h
+        a = smooth_a_cap(a_raw, self.a_max) + EPSILON  # b, v, h
+        # Fix Sa (a_floor): expose post-cap `a` (gradient-attached) for the
+        # a_floor regularizer in lightning_module.training_step.
+        self._last_a_post_cap = a
         b = params[..., self.hidden_dim : 2 * self.hidden_dim]  # b, v, h
         pre_w = params[..., 2 * self.hidden_dim :]  # b, v, h
         w = torch.nn.functional.softmax(pre_w, dim=-1)  # b, v, h
+        # Fix Sw: per-(batch, vars) entropy of softmax weights, gradient-attached.
+        # H(w) = -sum_h w_h log(w_h). Range: [0, log(hidden_dim)].
+        # Read by w-entropy regularizer in lightning_module.training_step.
+        self._last_w_entropy = -(w * (w + 1e-20).log()).sum(dim=-1)  # b, v
 
         pre_sigm = a * x[..., None] + b  # b, v, h
         sigm = torch.sigmoid(pre_sigm)  # b, v, h
@@ -72,6 +123,13 @@ class SigmoidFlow(nn.Module):
         )  # b, v, h
 
         logj = log_sum_exp(logj, dim=-1, keepdim=False)  # b, v
+        # Fix A: expose per-(batch, vars) log-density for external regularization.
+        # This is the actual quantity that runs to infinity during flow collapse.
+        # Penalizing this scales correctly with batch size (unlike per-parameter
+        # penalties on a_pre, which were 1000x weaker than the NLL pull).
+        # Saved as a tensor reference (gradient-attached) so the regularizer
+        # contributes to the optimizer's gradients.
+        self._last_logj_per_datapoint = logj
 
         if self.no_logit:
             # Only keep the batch dimension, summing all others in case this method is called with more dimensions
@@ -91,9 +149,15 @@ class SigmoidFlow(nn.Module):
 
     def forward_no_logdet(self, params, x):
         """Transform without derivative computation"""
-        a = torch.nn.functional.softplus(params[..., :self.hidden_dim]) + EPSILON
+        # Fix B: keep the smooth cap consistent with forward() so inference matches training.
+        a_raw = torch.nn.functional.softplus(params[..., :self.hidden_dim])
+        a = smooth_a_cap(a_raw, self.a_max) + EPSILON
+        # Fix Sa: also populate buffer here (some inference paths use this method).
+        self._last_a_post_cap = a
         b = params[..., self.hidden_dim:2*self.hidden_dim]
         w = torch.nn.functional.softmax(params[..., 2*self.hidden_dim:], dim=-1)
+        # Fix Sw: also populate w-entropy buffer here.
+        self._last_w_entropy = -(w * (w + 1e-20).log()).sum(dim=-1)
 
         pre_sigm = a * x[..., None] + b # Unsqueeze x for broadcasting
         sigm = torch.sigmoid(pre_sigm)
